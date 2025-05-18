@@ -1,0 +1,14 @@
+{
+  "processes": [
+    {
+      "processName": "GLOBAL",
+      "colorRules": [
+        {
+          "pattern": "data",
+          "background_color": "220,6,6",
+          "just_pattern": true
+        }
+      ]      
+    }
+  ]
+}

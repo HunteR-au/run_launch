@@ -1,0 +1,11 @@
+- config for notifications
+    - color param for notification
+    - regex matcher param
+    - link to goto line
+    - line to print for notifications
+
+- delete button for process view (kills process)
+
+- zig param to read config and push to js
+
+- create zig building script to package all web resoures in bin and for it to still run
