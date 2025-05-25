@@ -7,10 +7,9 @@ function newGroupDivider() {
     newDivider.style.backgroundColor = 'cornflowerblue';
     newDivider.style.marginTop = '30px';
     newDivider.style.marginBottom = '30px';
-    newDivider.style.marginLeft = "10px";
-    newDivider.style.marginRight = "10px";
-    newDivider.width = "12px";
-    newDivider.height = "90pv";
+    newDivider.style.marginLeft = "8px";
+    newDivider.style.marginRight = "8px";
+    newDivider.style.width = "3px";
     addViewGroupDividerEvents(newDivider);
     return newDivider;
 }

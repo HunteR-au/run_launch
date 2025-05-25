@@ -11,6 +11,17 @@
                 "host": "remote-machine-name",
                 "port": 5678
             }
+        },
+        {
+            "name": "Print",
+            "type": "debugpy",
+            "program": "data\\printlines.py",
+            "request": "attach",
+            "preLaunchTask": "list",
+            "connect": {
+                "host": "remote-machine-name",
+                "port": 5678
+            }
         }
     ]
 }

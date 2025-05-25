@@ -24,6 +24,7 @@ pub const Compound = struct {
     name: ?[]const u8 = null,
     configurations: ?[][]const u8 = null,
     preLaunchTask: ?[]const u8 = null,
+    postDebugTask: ?[]const u8 = null,
     stopAll: ?bool = null,
 
     const CompoundParsingErrors = error{ NoNameField, NoConfigurationsField };
@@ -200,29 +201,51 @@ pub fn parse_json(allocator: std.mem.Allocator, filepath: []const u8) !Launch {
             allocated_configs[i] = Configuration{};
 
             // non-optional values: Allocate strings for field and free if anything goes wrong
-            const fields = comptime .{ "name", "type", "request", "module" };
+            const fields = comptime .{ "name", "type", "request" };
             const strings = .{
                 item.object.get("name").?.string,
                 item.object.get("type").?.string,
                 item.object.get("request").?.string,
-                item.object.get("module").?.string,
             };
             inline for (fields, 0..) |fieldname, j| {
                 @field(allocated_configs[i], fieldname) = try allocator.dupe(u8, strings[j]);
                 errdefer if (@field(allocated_configs[i], fieldname)) |x| allocator.free(x);
             }
 
+            const optionalfields = comptime .{ "program", "module", "preLaunchTask", "postDebugTask" };
+            inline for (optionalfields) |fieldname| {
+                if (item.object.get(fieldname)) |value| {
+                    @field(allocated_configs[i], fieldname) = try allocator.dupe(u8, value.string);
+                }
+                errdefer {
+                    if (@field(allocated_configs[i], fieldname)) |p| allocator.free(p);
+                }
+            }
+
             // Parse the config arguments if they are present
+            // if (item.object.get("program")) |p| {
+            //     allocated_configs[i].program = try allocator.dupe(u8, p.string);
+            // }
+            // errdefer {
+            //     if (allocated_configs[i].program) |p| allocator.free(p);
+            // }
+            // if (item.object.get("module")) |m| {
+            //     allocated_configs[i].module = try allocator.dupe(u8, m.string);
+            // }
+            // errdefer {
+            //     if (allocated_configs[i].module) |p| allocator.free(p);
+            // }
+
             if (item.object.get("args")) |a| {
                 allocated_configs[i].args = try utils.parse_config_args(allocator, a.array);
                 // NOTE: no error defer - will cause mem bug - probably should create a deinit instead of writing the code here
-            } else allocated_configs[i].args = null;
+            }
 
             // Parse the env arguments if they are present
             if (item.object.get("env")) |e| {
                 allocated_configs[i].envs = try utils.parse_config_env(allocator, e.object);
                 // NOTE: no error defer - will cause mem bug - probably should create a deinit instead of writing the code here
-            } else allocated_configs[i].envs = null;
+            }
 
             if (item.object.get("connect")) |connect| {
                 const host_str = connect.object.get("host").?.string;
@@ -231,15 +254,19 @@ pub fn parse_json(allocator: std.mem.Allocator, filepath: []const u8) !Launch {
                 allocated_configs[i].connect.port = @intCast(connect.object.get("port").?.integer);
             }
 
-            if (item.object.get("preLaunchTask")) |taskname| {
-                allocated_configs[i].preLaunchTask = try allocator.dupe(u8, taskname.string);
-                errdefer if (allocated_configs[i].preLaunchTask) |p| allocator.free(p);
-            } else allocated_configs[i].preLaunchTask = null;
+            // if (item.object.get("preLaunchTask")) |taskname| {
+            //     allocated_configs[i].preLaunchTask = try allocator.dupe(u8, taskname.string);
+            // }
+            // errdefer {
+            //     if (allocated_configs[i].preLaunchTask) |p| allocator.free(p);
+            // }
 
-            if (item.object.get("postDebugTask")) |taskname| {
-                allocated_configs[i].postDebugTask = try allocator.dupe(u8, taskname.string);
-                errdefer if (allocated_configs[i].postDebugTask) |p| allocator.free(p);
-            } else allocated_configs[i].postDebugTask = null;
+            // if (item.object.get("postDebugTask")) |taskname| {
+            //     allocated_configs[i].postDebugTask = try allocator.dupe(u8, taskname.string);
+            // }
+            // errdefer {
+            //     if (allocated_configs[i].postDebugTask) |p| allocator.free(p);
+            // }
         }
         results.configurations = allocated_configs;
     }

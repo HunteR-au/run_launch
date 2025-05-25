@@ -1,0 +1,10 @@
+/* The cmd line textbar for a view */
+.cmdbar {
+ background-color: rgb(59,34,76);
+ color: #ffffff;
+ font-family: monospace; 
+ width: 100%;
+ height: 24px; /* Just tall enough for 1 line of text at 16px */
+ padding: 0px 0px;
+ border: 0px;
+}

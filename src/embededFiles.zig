@@ -5,5 +5,7 @@ pub const EmbededFiles = .{
     EmbededTuple{ .name = "/js/script.js", .ptr = @ptrCast(@embedFile("webui/js/script.js")) },
     EmbededTuple{ .name = "/js/viewgroup-divider.js", .ptr = @ptrCast(@embedFile("webui/js/viewgroup-divider.js")) },
     EmbededTuple{ .name = "/js/sidebar.js", .ptr = @ptrCast(@embedFile("webui/js/sidebar.js")) },
+    EmbededTuple{ .name = "/js/cmdline.js", .ptr = @ptrCast(@embedFile("webui/js/cmdline.js")) },
     EmbededTuple{ .name = "/sidebar.css", .ptr = @ptrCast(@embedFile("webui/sidebar.css")) },
+    EmbededTuple{ .name = "/cmdline.css", .ptr = @ptrCast(@embedFile("webui/cmdline.css")) },
 };

@@ -14,7 +14,7 @@ The cat jumps over a programming puzzle.
 A robot explores the universe.
 An AI appreciates the universe.
 A robot analyzes a random sentence.
-A robot explores the universe.
+ robot explores the universe.
 My friend jumps over a moon rock.
 My friend appreciates a programming puzzle.
 The cat analyzes the universe.
@@ -126,10 +126,17 @@ function createViewGroup() {
   
   var viewgroup = {
     div: viewgroupdiv,
+
+    cmdBars: new Map(),
     
     getTabCount: function getTabCount() {
       let tabgroup = this.div.getElementsByClassName('tab-group')[0];
       return tabgroup.getElementsByClassName('tablinks').length;
+    },
+
+    getTabs: function getTabs() {
+      const tabgroup = this.div.getElementsByClassName('tab-group')[0];
+      return Array.from(tabgroup.getElementsByClassName('tablinks'));
     },
 
     getViewGroupPosition: function getViewGroupPosition() {
@@ -153,17 +160,16 @@ function createViewGroup() {
     },
 
     remove: function remove() {
-      // REMOVE ANY HRs HERE
       if (this.getViewGroupPosition() == 0) {
-        // the left most viewgroup, remove right HR
+        // the left most viewgroup, remove right divider
         let nextEL = this.div.nextElementSibling;
-        if (nextEL.nodeName == "HR") {
+        if (nextEL != null && nextEL.classList.contains("viewgroup-divider")) {
           nextEL.remove();
         }
       } else {
-        // not the left most viewgroup, remove left HR
+        // not the left most viewgroup, remove left divider
         let prevEL = this.div.previousElementSibling;
-        if (prevEL.nodeName == "HR") {
+        if (prevEL != null && prevEL.classList.contains("viewgroup-divider")) {
           prevEL.remove();
         }
       }
@@ -175,6 +181,12 @@ function createViewGroup() {
     addNewProcessToGroup: function addNewProcessToGroup(processname) {
       createTab(processname, this.div);
       createOutput(processname, this.div);
+      
+      console.log("create command bar" + processname);
+      let cmdbar = new CommandBar(processname);
+      let outputGroupDiv = this.div.getElementsByClassName('output-group')[0];
+      outputGroupDiv.appendChild(cmdbar.createCmdBarEl());
+      this.cmdBars.set(processname, cmdbar);
     },
 
     createNewOutputView: function createNewOutputView(processname) {
@@ -190,6 +202,12 @@ function createViewGroup() {
 
       createTab(processname, viewgroupdiv);
       createOutputDiv(processname, viewgroupdiv);
+
+      // creat a cmd bar for the outputview
+      let cmdbar = new CommandBar(processname);
+      let outputGroupDiv = this.div.getElementsByClassName('output-group')[0];
+      outputGroupDiv.appendChild(cmdbar.createCmdBarEl());
+      this.cmdBars.set(processname, cmdbar);
 
       return true;
     },
@@ -214,21 +232,65 @@ function createViewGroup() {
       return null;
     },
 
-    createViewGroupDivider: function createViewGroupDivider(position) {
-      var newDivider = newGroupDivider()
-      this.div.insertAdjacentElement(position, newDivider);
+    // Check if there are dividers on the left/right as required
+    createViewGroupDividers: function createViewGroupDividers() {
+      // get an array of all the viewgroups in the view
+      const viewDiv = document.getElementById("views");
+      const viewGroupArray = Array.from(viewDiv.children).filter(
+        child => child.tagName === "DIV" && child.classList.contains("viewgroup")
+      );
+      if (this.div.id === viewGroupArray[0].id) {
+        // the left most viewgroup
+        let el = this.div.nextElementSibling;
+        if (el != null && !el.classList.contains("viewgroup-divider")) {
+          this.div.insertAdjacentElement("afterend", newGroupDivider());
+        }
+      } else if (this.div.id === viewGroupArray[viewGroupArray.length-1].id) {
+        // the right most viewgroup
+        let el = this.div.previousElementSibling;
+        if (el != null && !el.classList.contains("viewgroup-divider")) {
+          this.div.insertAdjacentElement("beforebegin", newGroupDivider());
+        }
+      } else {
+        // check both sides
+        let el = this.div.previousElementSibling;
+        if (el != null && !el.classList.contains("viewgroup-divider")) {
+          this.div.insertAdjacentElement("beforebegin", newGroupDivider());
+        }
+        el = this.div.nextElementSibling;
+        if (el != null && !el.classList.contains("viewgroup-divider")) {
+          this.div.insertAdjacentElement("afterend", newGroupDivider());
+        }
+      }
     },
+
+    // createViewGroupDivider: function createViewGroupDivider(position, viewGroupDiv) {
+    //   // check if there is already a divider before creating one
+    //   if (position === 'beforebegin') {
+    //     const el = this.div.previousElementSibling;
+    //     if (el != null && el.classList.contains("viewgroup-divider")) {
+    //       return;
+    //     }
+    //   } else if (position === 'afterend') {
+    //     const el = this.div.nextElementSibling;
+    //     if (el != null && el.classList.contains("viewgroup-divider")) {
+    //       return;
+    //     }
+    //   }
+    //   var newDivider = newGroupDivider()
+    //   this.div.insertAdjacentElement(position, newDivider);
+    // },
 
     applyViewGroupRelToSelf: function applyViewGroupRelToSelf(viewgroup, position) {
       if (position == 'beforebegin')
         {
           this.div.insertAdjacentElement(position, viewgroup.div);
-          this.createViewGroupDivider(position);
+          //this.createViewGroupDivider(position);
         }
       else if (position == 'afterend')
         {
           this.div.insertAdjacentElement(position, viewgroup.div);
-          this.createViewGroupDivider(position);
+          //this.createViewGroupDivider(position);
         }
     },
 
@@ -250,9 +312,13 @@ function createViewGroup() {
           tablink.classList.remove('active');
         }
       }
-
-      // set actie for tab
-      tab
+      for (let cmdline of newOutputGroup.getElementsByClassName('cmdbar')) {
+        if (cmdline.id == 'cmdbar-'+tab.innerText) {
+          cmdline.style.display = 'block';
+        } else {
+          cmdline.style.display = 'none';
+        }
+      }
     },
     
     moveTab: function moveTab(tab) {
@@ -276,12 +342,17 @@ function createViewGroup() {
       };
 
       let output = document.getElementById(tab.innerText);
+      let cmdbar = document.getElementById('cmdbar-'+tab.innerText);
+      let cmdbarObj = tabCurrViewGroup.cmdBars[tab.innerText];
+      tabCurrViewGroup.cmdBars.delete(tab.innerText);
+      this.cmdBars.set(tab.innerText, cmdbarObj);
 
       let newOutputGroup = this.div.getElementsByClassName('output-group')[0];
       let newTabGroup = this.div.getElementsByClassName('tab-group')[0];
       
       newTabGroup.appendChild(tab);
       newOutputGroup.appendChild(output);
+      newOutputGroup.appendChild(cmdbar);
 
       this.setActiveTab(tab);
 
@@ -331,8 +402,20 @@ class OutputView {
     this.numOfLines = 0
     this.idxLastFormattedTo = 0
     this.formattingRules = new Map();
+    this.isFolded = false;
+    this.foldedBuffer = "";
+    // An array of string to match on
+    this.foldedMatches = [];
   }
 
+  getParentViewGroup() {
+    return viewgroups[this.getDiv().parentElement.parentElement.id];
+  }
+
+  getDiv() {
+    return document.getElementById(this.processName);
+  }
+  
   addFormattingRule(ruleName, rule) {
     // TODO validation of map
     this.formattingRules.set(ruleName, rule)
@@ -345,6 +428,12 @@ class OutputView {
 
   addToBuffer(inputBuf) {
     this.rawBuffer += inputBuf;
+
+    // TODO - we should just add to the end of buffers and then format
+    // this is just a quick hack to get it working
+    if (this.isFolded) {
+      this.fold(this.foldedMatches);
+    }
   }
 
   getFormattedBuffer() {
@@ -358,10 +447,19 @@ class OutputView {
     }
 
     if (allRules.length > 0) {
-      this.formattedBuffer = colorMatches(this.rawBuffer, allRules)
+      if (this.isFolded) {
+        this.formattedBuffer = colorMatches(this.foldedBuffer, allRules)
+      } else {
+        this.formattedBuffer = colorMatches(this.rawBuffer, allRules)
+      }
       return this.formattedBuffer
     }
-    return this.rawBuffer
+
+    if (this.isFolded) {
+      return this.foldedBuffer;
+    } else {
+      return this.rawBuffer;
+    }
   }
 
   updateOutputDiv() {
@@ -377,6 +475,68 @@ class OutputView {
       processOutputDiv.scrollTop = processOutputDiv.scrollHeight - processOutputDiv.clientHeight
     }
   }
+
+  fold(arrOfStrs) {
+    console.log("we are folding...");
+    if (arrOfStrs.length == 0) {
+      this.unfold();
+      return;
+    }
+    this.isFolded = true;
+    this.foldedMatches = arrOfStrs;
+
+    let newBuffer = "";
+    let lines = this.rawBuffer.split("\n");
+    let linesSkipped = 0;
+    for (let line of lines) {
+      // check if any folded matches match
+      let isMatch = false;
+      let prevLineSkipped = false;
+      for (let foldedMatch of this.foldedMatches) {
+        let m = line.match(foldedMatch);
+        if (m) {
+          // found a match
+          isMatch = true;
+          break;
+        }
+      }
+      if (!isMatch) {
+        linesSkipped++;
+      }
+
+      if (isMatch) {
+        // need to write the num of lines skipped
+        if (linesSkipped != 0) {
+          newBuffer += '\n...lines skipped {'+linesSkipped+'}';
+        }
+        // keep the line
+        newBuffer += '\n'+line;
+        // cleanup
+        linesSkipped = 0;
+        prevLineSkipped = false;
+      } else {
+        prevLineSkipped = true;
+      }
+
+    }
+    // need to check if last few lines were skipped
+    if (linesSkipped != 0) {
+      newBuffer += '\n...lines skipped {'+linesSkipped+'}';
+    }
+
+    this.foldedBuffer = newBuffer;     
+    this.updateOutputDiv();
+  }
+
+  unfold() {
+    // Reset the folded members to their defaults
+    this.isFolded = false;
+    this.foldedMatches = [];
+    this.foldedBuffer = "";
+
+    // Reset the formatted buffer
+    this.updateOutputDiv();    
+  }
 }
 
 function listAllOutputViewProcessNames() {
@@ -389,13 +549,16 @@ function createView(processname) {
     return false;
   }
 
-  outputviews[processname] = new OutputView(processname);
+  // outputviews[processname] = new OutputView(processname);
 
   // the view-group is currently hardcoded 
   let viewgroupdiv = document.getElementById("view-group-0");
+  let viewgroup = viewgroups[viewgroupdiv.id];
+  console.log("createNewOutputView " + processname)
+  viewgroup.createNewOutputView(processname);
 
-  createTab(processname, viewgroupdiv);
-  createOutputDiv(processname, viewgroupdiv);
+  // createTab(processname, viewgroupdiv);
+  // createOutputDiv(processname, viewgroupdiv);
 
   addSideBarOutputViewSection(processname);
 
@@ -496,28 +659,10 @@ function addLinesToProcess1() {
 function openProcessView(evt) {
   // get view group id
   let viewgroupdiv = evt.currentTarget.parentNode.parentNode;
-  let viewgroupId = viewgroupdiv.id
-  
+  let targetViewGroup = viewgroups[viewgroupdiv.id];
+  let tab = evt.currentTarget;
 
-  var i, tabcontent, tablinks, processName;
-  processName = evt.currentTarget.innerText
-  tabcontent = document.querySelectorAll("#"+viewgroupId+" .output-group .tabcontent, #"+viewgroupId+" .output-group .tabimage");
-  for (i = 0; i < tabcontent.length; i++) {
-      tabcontent[i].style.display = "none";
-  }
-
-  tablinks = viewgroupdiv.getElementsByClassName("tablinks");
-  for (i = 0; i < tablinks.length; i++) {
-      tablinks[i].className = tablinks[i].className.replace("active", "");
-      tablinks[i].className = tablinks[i].className.trim();
-  }
-
-  document.getElementById(processName).style.display = "block";
-  if (document.getElementById('img'+processName)) {
-      document.getElementById('img'+processName).style.display = "block";
-  } 
-  
-  evt.currentTarget.className += " active";
+  targetViewGroup.setActiveTab(tab);
 }
 
 ////// DRAGGGING
@@ -628,6 +773,7 @@ function handleDropArea(e) {
   
   // get direction area dropped on
   let viewgroup = viewgroups[this.parentNode.id];
+  let srcViewGroup = viewgroups[dragSrcEl.parentNode.parentNode.id];
   let outputgroupdiv = viewgroup.div.getElementsByClassName('output-group')[0];
   let direction = null
   
@@ -668,11 +814,45 @@ function handleDropArea(e) {
     return false;
   }
 
+  // if there is 1 tab in the src viewgroup there are a bunch of edge cases
+  if (srcViewGroup.getTabCount() <= 1) {
+    // check if the targetViewGroup matches the src viewgroup
+    let srcViewGroupId = dragSrcEl.parentNode.parentNode.id;
+    if (srcViewGroupId == viewgroup.div.id) {
+      dragSrcEl = null;
+      return false;
+    }
+    let viewDiv = document.getElementById("views");
+    const viewGroupArray = Array.from(viewDiv.children).filter(
+      child => child.tagName === "DIV" && child.classList.contains("viewgroup")
+    );
+    if (viewGroupArray.length >= 2) {
+      // if the srcViewGroup is on the far left, target is next to it and direction is left
+      if (srcViewGroupId == viewGroupArray[0].id &&
+         direction == 'beforebegin' &&
+          viewgroup.div.id == viewGroupArray[1].id)
+      {
+        dragSrcEl = null;
+        return false;
+      }
+      // if the srcViewGroup is on the far right, target is next to it and direction is right
+      const lastPos = viewGroupArray.length - 1;
+      if (srcViewGroupId == viewGroupArray[lastPos].id &&
+        direction == 'afterend' &&
+        viewgroup.div.id == viewGroupArray[lastPost-1].id)
+      {
+        dragSrcEl = null;
+        return false;
+      }
+    }
+  }
+  
   let newviewgroup = createViewGroup();
   viewgroup.applyViewGroupRelToSelf(newviewgroup, direction);
 
   // move tab to new group
   newviewgroup.moveTab(dragSrcEl);
+  newviewgroup.createViewGroupDividers();
   dragSrcEl = null;
   return false;
 }

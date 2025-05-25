@@ -44,7 +44,7 @@ pub fn parse_config_env(allocator: std.mem.Allocator, env_object: std.json.Objec
 
 pub fn pullpushLoop(alloc: std.mem.Allocator, childproc: std.process.Child, processname: []const u8) !void {
     const chunk_size: usize = 1024;
-    std.debug.print("starting pushpull\n", .{});
+    std.debug.print("starting pushpull: {s}\n", .{processname});
 
     std.debug.assert(childproc.stdout_behavior == .Pipe);
     std.debug.assert(childproc.stderr_behavior == .Pipe);

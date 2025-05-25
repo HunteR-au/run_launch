@@ -4,16 +4,31 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="sidebar.css">
+  <link rel="stylesheet" href="cmdline.css">
   <title>Line-by-Line Renderer</title>
   <style>
     /* General styles for the body */
     body {
-      margin: 0;
       /* height: 99vh; Full viewport height */
       /* display: flex; */
       /* flex-direction: column; */
       background-color: #0d1015;
       color: white;
+      display: flex;
+      flex-direction: column;
+      height: 99vh;
+      width: 99vw;
+      padding: 1px 1px 1px 1px;
+      box-sizing: border-box;
+      margin: 0px 0px 0px 0px;
+    }
+    #pageview {
+      box-sizing: border-box;
+      height: 100%;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      flex-wrap: nowrap;
     }
     #order {
       /* flex: 1;
@@ -29,9 +44,10 @@
     }
     #views {
       display: flex;
+      height: 100%;
+      overflow: hidden;
       /* flex: 0 1 auto; Prevents growing or shrinking  */
-      height: 85vh;  /* Forces the container to fill the full viewport height */
-      width: 99vw;
+      flex: 1 1 auto;
       flex-direction: row;
       align-items: stretch;
     }
@@ -39,16 +55,23 @@
       overflow-y:hidden;
       /* flex:auto; */
       /* min-content: 3 */
+      height: 100%;
       flex-grow:1;
       flex-basis:50%;
+      display: flex;
+      flex-direction: column;
       /* resize: horizontal; */
     }
     .output-group {
       /*position:relative;  Fixed positioning ensures it stays at the bottom */
-      display:contents;
+      display: flex;
+      height: 100%;
+      flex-direction: column;
+      flex-wrap: nowrap;
+      overflow-y: hidden;
       /* display: flex; */
       /* height:min-content; */
-      border: 1px solid #272323;
+      /* border: 1px solid #272323; */
       padding: 5px;
       margin-bottom: 5px;
       margin-left: 5px;
@@ -56,14 +79,15 @@
     }
     .output {
       white-space: pre-wrap; /* Preserve newlines */
-      height: 95%;
+      flex-grow: 1;
+      height: calc( 100% - 24px);
       font-family: monospace; /* For a command-line-like look */
       border: 1px solid #272323;
       /* padding: 10px; */
       margin-bottom: 10px;
       margin-left: 1px;
       margin-right: 1px;
-      margin-bottom: 10px;
+      margin-bottom: 0px;
       overflow-y: scroll;
       background-color: black;
       color: white;
@@ -113,9 +137,11 @@
       <a href="#" class="addRulebtn" onclick="addSideBarRuleBox('rule-list-global')">+ add rule</a>
     </div>
   </div>
-  <br/>
-  <button id="nextLine">Next Line</button>
-  <div id="views">
+  <!-- <div id="pageview"> -->
+    <br/>
+    <button id="nextLine">Next Line</button>
+    <div id="views">
+  <!-- </div> -->
     <!-- <div id="view-group-0" class="viewgroup"> -->
       <!-- <div class="tab-group", id="process_tabs"> -->
         <!-- <button class="tablinks" draggable="true" onclick="openProcessView(event);">Process1</button> -->
@@ -132,6 +158,7 @@
 <script src="js/color.js"></script>
   <script src="js/script.js"></script>
   <script src="js/sidebar.js"></script>
+  <script src="js/cmdline.js"></script>
   <script src="js/viewgroup-divider.js"></script>
   <script src="/webui.js"></script>
 </body>

@@ -5,6 +5,7 @@ const utils = @import("utils.zig");
 const Launch = @import("launch.zig");
 const Task = @import("task.zig");
 const uiview = @import("ui/uiview.zig");
+const runner = @import("runner/runner.zig");
 
 const RunLaunchErrors = error{
     BadPositionals,
@@ -69,82 +70,143 @@ pub fn main() !void {
     try writer.print("version: {s}\n", .{launchdata.version});
     try writer.print("first config name: {?s}\n", .{launchdata.configurations[0].name});
 
-    const nameMatch = launchdata.find_by_name(taskNameToRun) orelse {
-        return RunLaunchErrors.NoConfigWithName;
-    };
+    _ = try runner.run(allocator, taskNameToRun, launchdata, tasks, uiview.createProcessView);
+    // const nameMatch = launchdata.find_by_name(taskNameToRun) orelse {
+    //     return RunLaunchErrors.NoConfigWithName;
+    // };
 
-    switch (nameMatch) {
-        .config => |config| {
-            if (tasks != null and config.*.preLaunchTask != null) {
-                if (tasks.?.find_by_label(config.preLaunchTask.?)) |task| {
-                    try writer.print("Running task: {s}\n", .{config.preLaunchTask.?});
-                    uiview.createProcessView(task.label.?);
-                    try task.run_task(allocator);
-                }
-            }
+    // switch (nameMatch) {
+    //     .config => |config| {
+    //         if (tasks != null and config.*.preLaunchTask != null) {
+    //             if (tasks.?.find_by_label(config.preLaunchTask.?)) |task| {
+    //                 try writer.print("Running task: {s}\n", .{config.preLaunchTask.?});
+    //                 uiview.createProcessView(task.label.?);
+    //                 try task.run_task(allocator);
+    //             }
+    //         }
 
-            if (config.*.type != null and std.mem.eql(u8, config.*.type.?, "debugpy")) {
-                if (config.*.module) |m| {
-                    const empty: []const []const u8 = &[_][]const u8{};
-                    if (config.*.args) |args| {
-                        uiview.createProcessView(m);
-                        try run_python_module(allocator, m, args);
-                    } else {
-                        uiview.createProcessView(m);
-                        try run_python_module(allocator, m, empty);
-                    }
-                }
-            }
+    //         if (config.*.type != null and std.mem.eql(u8, config.*.type.?, "debugpy")) {
+    //             if (config.*.module) |m| {
+    //                 const empty: []const []const u8 = &[_][]const u8{};
+    //                 if (config.*.args) |args| {
+    //                     uiview.createProcessView(m);
+    //                     try run_python_module(allocator, m, args);
+    //                 } else {
+    //                     uiview.createProcessView(m);
+    //                     try run_python_module(allocator, m, empty);
+    //                 }
+    //             }
+    //         }
 
-            if (tasks != null and config.postDebugTask != null) {
-                if (tasks.?.find_by_label(config.postDebugTask.?)) |task| {
-                    uiview.createProcessView(task.label.?);
-                    try task.run_task(allocator);
-                }
-            }
-        },
-        .compound => |compound| {
-            if (tasks != null and compound.*.preLaunchTask != null) {
-                if (tasks.?.find_by_label(compound.*.preLaunchTask.?)) |task| {
-                    try writer.print("Running task: {s}\n", .{compound.*.preLaunchTask.?});
-                    uiview.createProcessView(task.label.?);
-                    try task.run_task(allocator);
-                }
+    //         if (tasks != null and config.postDebugTask != null) {
+    //             if (tasks.?.find_by_label(config.postDebugTask.?)) |task| {
+    //                 uiview.createProcessView(task.label.?);
+    //                 try task.run_task(allocator);
+    //             }
+    //         }
+    //     },
+    //     .compound => |compound| {
+    //         if (tasks != null and compound.*.preLaunchTask != null) {
+    //             if (tasks.?.find_by_label(compound.*.preLaunchTask.?)) |task| {
+    //                 try writer.print("Running task: {s}\n", .{compound.*.preLaunchTask.?});
+    //                 uiview.createProcessView(task.label.?);
+    //                 try task.run_task(allocator);
+    //             }
 
-                var childArray = std.ArrayList(std.process.Child).init(allocator);
+    //             var childArray = std.ArrayList(std.process.Child).init(allocator);
 
-                for (compound.configurations.?) |configname| {
-                    const config = launchdata.find_config_by_name(configname);
+    //             for (compound.configurations.?) |configname| {
+    //                 const config = launchdata.find_config_by_name(configname);
 
-                    if (config) |c| {
-                        std.debug.print("Running config: {s}\n", .{configname});
-                        if (c.type != null and std.mem.eql(u8, c.type.?, "debugpy")) {
-                            if (c.module) |m| {
-                                const empty: []const []const u8 = &[_][]const u8{};
-                                if (c.args) |args| {
-                                    uiview.createProcessView(m);
-                                    const child = try run_python_module_nowait(allocator, m, args);
-                                    try childArray.append(child);
-                                } else {
-                                    uiview.createProcessView(m);
-                                    const child = try run_python_module_nowait(allocator, m, empty);
-                                    try childArray.append(child);
-                                }
-                            }
-                        }
-                    }
+    //                 if (config) |c| {
+    //                     std.debug.print("Running config: {s}\n", .{configname});
+    //                     if (c.type != null and std.mem.eql(u8, c.type.?, "debugpy")) {
+    //                         if (c.module) |m| {
+    //                             const empty: []const []const u8 = &[_][]const u8{};
+    //                             if (c.args) |args| {
+    //                                 uiview.createProcessView(m);
+    //                                 const child = try run_python_module_nowait(allocator, m, args);
+    //                                 try childArray.append(child);
+    //                             } else {
+    //                                 uiview.createProcessView(m);
+    //                                 const child = try run_python_module_nowait(allocator, m, empty);
+    //                                 try childArray.append(child);
+    //                             }
+    //                         }
+    //                     }
+    //                 }
 
-                    try writer.print("Waiting for each process to finish...\n", .{});
-                    // Wait for each child process to finish
-                    for (childArray.items) |*child| {
-                        _ = try child.wait();
-                    }
-                }
-            }
-        },
-    }
+    //                 try writer.print("Waiting for each process to finish...\n", .{});
+    //                 // Wait for each child process to finish
+    //                 for (childArray.items) |*child| {
+    //                     _ = try child.wait();
+    //                 }
+    //             }
+    //         }
+    //     },
+    // }
 
     uiview.closeWebUI();
+}
+
+pub fn run_python_script_nowait(allocator: std.mem.Allocator, script: []const u8, args: []const []const u8) !std.process.Child {
+    var argv: [][]const u8 = try allocator.alloc([]u8, args.len + 2);
+    defer allocator.free(argv);
+    argv[0] = "py";
+    argv[1] = script;
+    for (args, 2..argv.len) |arg, i| {
+        argv[i] = arg;
+    }
+
+    var child = std.process.Child.init(argv, allocator);
+    child.stdout_behavior = std.process.Child.StdIo.Pipe;
+    child.stderr_behavior = std.process.Child.StdIo.Pipe;
+
+    try child.spawn();
+    std.debug.print("Spawning child process: {d}\n", .{child.id});
+
+    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, child, script });
+    return child;
+}
+
+pub fn run_python_script(allocator: std.mem.Allocator, script: []const u8, args: []const []const u8) !void {
+    var argv: [][]const u8 = try allocator.alloc([]u8, args.len + 2);
+    defer allocator.free(argv);
+    argv[0] = "py";
+    argv[1] = script;
+    for (args, 2..argv.len) |arg, i| {
+        argv[i] = arg;
+    }
+
+    var child = std.process.Child.init(argv, allocator);
+    child.stdout_behavior = std.process.Child.StdIo.Pipe;
+    child.stderr_behavior = std.process.Child.StdIo.Pipe;
+    child.spawn() catch |e| {
+        std.debug.print("Spawning module {any} failed.\n", .{e});
+        return e;
+    };
+
+    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, child, script });
+
+    const term = child.wait() catch |e| {
+        std.debug.print("Waiting for child {any} failed.\n", .{e});
+        return e;
+    };
+
+    switch (term) {
+        .Exited => |v| {
+            std.debug.print("Python exited with code {d}\n", .{v});
+        },
+        .Signal => |v| {
+            std.debug.print("Python signaled with code {d}\n", .{v});
+        },
+        .Stopped => |v| {
+            std.debug.print("Python stopped with code: {d}\n", .{v});
+        },
+        .Unknown => |v| {
+            std.debug.print("Unknown process error: {d}\n", .{v});
+        },
+    }
 }
 
 pub fn run_python_module_nowait(allocator: std.mem.Allocator, module: []const u8, args: []const []const u8) !std.process.Child {
@@ -160,7 +222,7 @@ pub fn run_python_module_nowait(allocator: std.mem.Allocator, module: []const u8
     var child = std.process.Child.init(argv, allocator);
     child.stdout_behavior = std.process.Child.StdIo.Pipe;
     child.stderr_behavior = std.process.Child.StdIo.Pipe;
-    //TODO: create thread that pulls from stdout and pushes to pushLogging()
+
     try child.spawn();
     std.debug.print("Spawning child process: {d}\n", .{child.id});
 
@@ -237,6 +299,8 @@ pub fn run_python_module(allocator: std.mem.Allocator, module: []const u8, args:
 
 // this would convert to python -m debugpy --listen 5678 ./myscript.py
 
+// TODO: currently can only run python modules!!! We need to be able to run python scripts
+
 // TODO: python - force no debug (ie no debugpy in process execute)
 // TODO: python - deal with connect fields
 // TODO: Add env dot file arg
@@ -244,7 +308,9 @@ pub fn run_python_module(allocator: std.mem.Allocator, module: []const u8, args:
 // TODO: tasks
 // TODO: tasks - problemMatcher - pretty complex data and logic...
 // TODO: use webUI to print debug output to a brower (have to create a cli prompt in html/js/web-tech :(   )
+// TODO: make the main thread tear down if webui clicks exit
 
+// TODO: BUG - current settings don't apply to non-active outputs (need to refresh)
 // TODO: add grep notifications to the UI with config (pattern, contification color)
 // TODO: add line numbers to each debug view
 // TODO: add the ability to jump to a line via js
@@ -253,6 +319,8 @@ pub fn run_python_module(allocator: std.mem.Allocator, module: []const u8, args:
 // TODO: create command line at the bottom to do actions such as search, jump, add colorgrep
 // TODO: change HR to DIV
 // TODO: format process names in some more useful way...
+// TODO: expand/collapse settings by clicking on the process headers on the sidebar
+// TODO: signal to the UI when a process ends!!!
 //
 // IDEA: be able to set a target over ssh...might be too hard for such a project :D
 
