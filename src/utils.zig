@@ -42,6 +42,16 @@ pub fn parse_config_env(allocator: std.mem.Allocator, env_object: std.json.Objec
     return envs;
 }
 
+pub fn create_env_map(alloc: std.mem.Allocator, envtuples: []const EnvTuple) !std.process.EnvMap {
+    var env_map = try std.process.getEnvMap(alloc);
+    errdefer env_map.deinit();
+
+    for (envtuples) |*env| {
+        try env_map.put(env.key, env.val);
+    }
+    return env_map;
+}
+
 pub fn pullpushLoop(alloc: std.mem.Allocator, childproc: std.process.Child, processname: []const u8) !void {
     const chunk_size: usize = 1024;
     std.debug.print("starting pushpull: {s}\n", .{processname});

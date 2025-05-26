@@ -3,6 +3,7 @@ const utils = @import("../utils.zig");
 const Launch = @import("../launch.zig");
 const Task = @import("../task.zig");
 const debugpy = @import("pydebug.zig");
+const native = @import("native.zig");
 
 pub const RunnerConfig = union(enum) {
     config: Launch.Configuration,
@@ -19,6 +20,8 @@ pub const Runner = struct {
 
 const RunnerType = enum {
     debugpy,
+    cppdbg,
+    cppvsdbg,
 };
 
 pub fn run(alloc: std.mem.Allocator, name: []const u8, launchconfig: Launch.Launch, tasks: ?Task.TaskJson, createviewprocessfn: fn ([]const u8) void) !Runner {
@@ -117,6 +120,12 @@ fn runRunnerType(
             // work out if we need to run a module or script...
             try debugpy.run(alloc, config, runnerif, createviewprocessfn);
         },
+        .cppdbg => {
+            try native.run(alloc, config, runnerif, createviewprocessfn);
+        },
+        .cppvsdbg => {
+            try native.run(alloc, config, runnerif, createviewprocessfn);
+        },
     }
 }
 
@@ -131,6 +140,12 @@ fn runRunnerTypeNonBlocking(
         .debugpy => {
             // work out if we need to run a module or script...
             return debugpy.runNonBlocking(alloc, config, runnerif, createviewprocessfn);
+        },
+        .cppdbg => {
+            return native.runNonBlocking(alloc, config, runnerif, createviewprocessfn);
+        },
+        .cppvsdbg => {
+            return native.runNonBlocking(alloc, config, runnerif, createviewprocessfn);
         },
     }
 }

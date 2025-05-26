@@ -106,11 +106,10 @@ pub fn main() !void {
 
 // TODO: python - force no debug (ie no debugpy in process execute)
 // TODO: python - deal with connect fields
-// TODO: Add env dot file arg
+// TODO: Add env dot file arg!!!!!!!
 // TODO: Add support for dry-run
 // TODO: tasks
 // TODO: tasks - problemMatcher - pretty complex data and logic...
-// TODO: use webUI to print debug output to a brower (have to create a cli prompt in html/js/web-tech :(   )
 // TODO: make the main thread tear down if webui clicks exit
 
 // TODO: BUG - current settings don't apply to non-active outputs (need to refresh)
