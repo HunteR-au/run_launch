@@ -10,7 +10,7 @@ pub fn run(
     createprocessview: fn ([]const u8) void,
 ) !void {
     var envmap: ?std.process.EnvMap = null;
-    if (config.envs) |envs| {
+    if (config.env) |envs| {
         envmap = try utils.create_env_map(alloc, envs);
     }
     defer {
@@ -40,7 +40,7 @@ pub fn runNonBlocking(
     createprocessview: fn ([]const u8) void,
 ) !std.process.Child {
     var envmap: ?std.process.EnvMap = null;
-    if (config.envs) |envs| {
+    if (config.env) |envs| {
         envmap = try utils.create_env_map(alloc, envs);
     }
     defer {

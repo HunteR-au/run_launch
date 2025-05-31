@@ -4,16 +4,19 @@ const utils = @import("utils.zig");
 const EnvTuple = utils.EnvTuple;
 
 pub const Configuration = struct {
-    name: ?[]const u8 = null,
-    type: ?[]const u8 = null,
-    request: ?[]const u8 = null,
+    name: ?[]const u8 = null, // mandatory
+    type: ?[]const u8 = null, // mandatory
+    request: ?[]const u8 = null, // mandatory
+    consoleTitle: ?[]const u8 = null,
     module: ?[]const u8 = null,
     program: ?[]const u8 = null,
     console: ?[]const u8 = null,
+    stopOnEntry: ?[]const u8 = null,
     preLaunchTask: ?[]const u8 = null,
     postDebugTask: ?[]const u8 = null,
     args: ?[]const []const u8 = null,
-    envs: ?[]const EnvTuple = null,
+    env: ?[]const EnvTuple = null,
+    envFile: ?[]const u8 = null,
     connect: struct {
         host: ?[]const u8 = null,
         port: u16 = 0,
@@ -151,7 +154,7 @@ pub const Launch = struct {
                     allocator.free(a);
                 }
                 // Free env if it exists
-                if (i.envs) |e| {
+                if (i.env) |e| {
                     for (e) |*tuple| {
                         allocator.free(tuple.key);
                         allocator.free(tuple.val);
@@ -212,7 +215,7 @@ pub fn parse_json(allocator: std.mem.Allocator, filepath: []const u8) !Launch {
                 errdefer if (@field(allocated_configs[i], fieldname)) |x| allocator.free(x);
             }
 
-            const optionalfields = comptime .{ "program", "module", "preLaunchTask", "postDebugTask" };
+            const optionalfields = comptime .{ "program", "module", "preLaunchTask", "postDebugTask", "consoleTitle", "console", "envFile" };
             inline for (optionalfields) |fieldname| {
                 if (item.object.get(fieldname)) |value| {
                     @field(allocated_configs[i], fieldname) = try allocator.dupe(u8, value.string);
@@ -243,7 +246,7 @@ pub fn parse_json(allocator: std.mem.Allocator, filepath: []const u8) !Launch {
 
             // Parse the env arguments if they are present
             if (item.object.get("env")) |e| {
-                allocated_configs[i].envs = try utils.parse_config_env(allocator, e.object);
+                allocated_configs[i].env = try utils.parse_config_env(allocator, e.object);
                 // NOTE: no error defer - will cause mem bug - probably should create a deinit instead of writing the code here
             }
 

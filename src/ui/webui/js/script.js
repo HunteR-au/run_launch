@@ -562,6 +562,9 @@ function createView(processname) {
 
   addSideBarOutputViewSection(processname);
 
+  // If this is the first outputview, set active
+  viewgroup.setActiveTab(document.getElementsByClassName('tablinks')[0])
+
   return true;
 }
 
@@ -699,8 +702,31 @@ function handleDragLeave(e) {
 function handleDrop(e) {
   e.stopPropagation();
   if (dragSrcEl !== this) {
-    dragSrcEl.innerHTML = this.innerHTML;
-    this.innerHTML = e.dataTransfer.getData('text/html');
+    // swap element dragSrcEl with this 
+    var el1 = this;
+    var el2 = dragSrcEl;
+
+    // check that they have the same parent
+    // we don't want to switch if they are in different
+    // view groups
+    if (el1.parentNode === el2.parentNode) {
+      swapNodes(el1, el2);
+    }
+
+    // const parent = el1.parentNode;
+    // const next = el2.nextSibling === el1 ? el2 : el1.nextSibling;
+    // // const nextSibling = el1.nextSibling;
+    // parent.insertBefore(el2, el1);
+    // parent.insertBefore(el1, next);
+    // if (nextSibling) {
+    //   parent.insertBefore(el2, nextSibling);
+    // } else {
+    //   parent.appendChild(el2);
+    // }
+    // el2.replaceWith(el1);
+    
+    // dragSrcEl.innerHTML = this.innerHTML;
+    // this.innerHTML = e.dataTransfer.getData('text/html');
   }
 
   return false;
@@ -920,20 +946,31 @@ function addDropAreaEvents(dropzoneEl) {
 
 
 document.addEventListener('DOMContentLoaded', (event) => {
+  if (typeof webui !== 'undefined') {
+    // Set events callback
+    webui.setEventCallback((e) => {
+      if (e == webui.event.CONNECTED) {
+        // Connection to the backend is established
+      } else if (e == webui.event.DISCONNECTED) {
+        // windows.close();
+      }
+    });
+  }
+    
   // Create Jimmy-ed content
   let viewgroup = createViewGroup();
   document.getElementById('views').appendChild(viewgroup.div);
-  viewgroup.createNewOutputView("Process1");
-  viewgroup.createNewOutputView("Process2");
-  viewgroup.createNewOutputView("Process3");
+  // viewgroup.createNewOutputView("Process1");
+  // viewgroup.createNewOutputView("Process2");
+  // viewgroup.createNewOutputView("Process3");
   viewgroup.setActiveTab(document.getElementsByClassName('tablinks')[0])
 
-  addSideBarOutputViewSection("Process1")
-  addSideBarOutputViewSection("Process2")
-  addSideBarOutputViewSection("Process3")
+  // addSideBarOutputViewSection("Process1")
+  // addSideBarOutputViewSection("Process2")
+  // addSideBarOutputViewSection("Process3")
 
   // jimmy data
-  outputviews["Process1"].addToBuffer(buffer2);
+  // outputviews["Process1"].addToBuffer(buffer2);
   // currentLines["Process1"] = 0;
   // outputviews["Process2"] = "";
   // currentLines["Process2"] = 0;
@@ -941,10 +978,10 @@ document.addEventListener('DOMContentLoaded', (event) => {
   // currentLines["Process3"] = 0;
 
   // Add event listener to the button
-  nextLineButton.addEventListener("click", addLinesToProcess1);
+  // nextLineButton.addEventListener("click", addLinesToProcess1);
 
   // Optionally, render the first line automatically
-  renderNextLine("Process1");
+  // renderNextLine("Process1");
 
 
   let items = document.querySelectorAll('.tablinks');
@@ -957,3 +994,29 @@ document.addEventListener('DOMContentLoaded', (event) => {
     addDropAreaEvents(item);
   });
 });
+
+function swapNodes(n1, n2) {
+
+    var p1 = n1.parentNode;
+    var p2 = n2.parentNode;
+    var i1, i2;
+
+    if ( !p1 || !p2 || p1.isEqualNode(n2) || p2.isEqualNode(n1) ) return;
+
+    for (var i = 0; i < p1.children.length; i++) {
+        if (p1.children[i].isEqualNode(n1)) {
+            i1 = i;
+        }
+    }
+    for (var i = 0; i < p2.children.length; i++) {
+        if (p2.children[i].isEqualNode(n2)) {
+            i2 = i;
+        }
+    }
+
+    if ( p1.isEqualNode(p2) && i1 < i2 ) {
+        i2++;
+    }
+    p1.insertBefore(n2, p1.children[i1]);
+    p2.insertBefore(n1, p2.children[i2]);
+}

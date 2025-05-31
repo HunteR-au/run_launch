@@ -85,8 +85,6 @@ pub fn main() !void {
 // program, args, env, envFile, cwd, port, stopOnEntry, console
 
 // QUESTIONS: how to do variable substitution... I have no idea. Maybe manually setting env vars + extra args
-// QUESTIONS,  can I support compounds?
-// TODO: parse and execute tasks
 
 // PYTHON OPTIONS
 //
@@ -102,28 +100,32 @@ pub fn main() !void {
 
 // this would convert to python -m debugpy --listen 5678 ./myscript.py
 
-// TODO: currently can only run python modules!!! We need to be able to run python scripts (DONE)
-
 // TODO: python - force no debug (ie no debugpy in process execute)
 // TODO: python - deal with connect fields
-// TODO: Add env dot file arg!!!!!!!
+// TODO: Add env dot file arg!!!!!!! (envFile) (DONE)
 // TODO: Add support for dry-run
 // TODO: tasks
 // TODO: tasks - problemMatcher - pretty complex data and logic...
 // TODO: make the main thread tear down if webui clicks exit
+//
+// TODO: create code to parse and run envFile (DONE)
+// TODO: add labels to configuration logic (DONE)
+// TODO: try webview-zig
+// TODO: for tui mode try - libvaxis
 
 // TODO: BUG - current settings don't apply to non-active outputs (need to refresh)
+// TODO: BUG - there is an extra count in the last fold that shouldn't be there
 // TODO: add grep notifications to the UI with config (pattern, contification color)
 // TODO: add line numbers to each debug view
 // TODO: add the ability to jump to a line via js
 // TODO: add the ability to fold between lines with a pattern (DONE)
 // TODO: add config on disk to read from user folder or local folder (DONE)
 // TODO: create command line at the bottom to do actions such as search, jump, add colorgrep
-// TODO: change HR to DIV
 // TODO: format process names in some more useful way...
 // TODO: expand/collapse settings by clicking on the process headers on the sidebar
 // TODO: signal to the UI when a process ends!!!
-// TODO: add timestamp to lines so that you can merge two or more feeds into 1 view
+// TODO: add timestamp to lines so that you can merge two or more feeds into 1 view merge: name name
+// TODO: help command that shows a debug view with all the help output
 //
 // IDEA: be able to set a target over ssh...might be too hard for such a project :D
 

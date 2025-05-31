@@ -19,12 +19,19 @@ pub const Runner = struct {
 };
 
 const RunnerType = enum {
+    python,
     debugpy,
     cppdbg,
     cppvsdbg,
 };
 
-pub fn run(alloc: std.mem.Allocator, name: []const u8, launchconfig: Launch.Launch, tasks: ?Task.TaskJson, createviewprocessfn: fn ([]const u8) void) !Runner {
+pub fn run(
+    alloc: std.mem.Allocator,
+    name: []const u8,
+    launchconfig: Launch.Launch,
+    tasks: ?Task.TaskJson,
+    createviewprocessfn: fn ([]const u8) void,
+) !Runner {
     const match = launchconfig.find_by_name(name) orelse {
         return error.NoConfigWithName;
     };
@@ -120,6 +127,9 @@ fn runRunnerType(
             // work out if we need to run a module or script...
             try debugpy.run(alloc, config, runnerif, createviewprocessfn);
         },
+        .python => {
+            try debugpy.run(alloc, config, runnerif, createviewprocessfn);
+        },
         .cppdbg => {
             try native.run(alloc, config, runnerif, createviewprocessfn);
         },
@@ -139,6 +149,9 @@ fn runRunnerTypeNonBlocking(
     switch (runtype) {
         .debugpy => {
             // work out if we need to run a module or script...
+            return debugpy.runNonBlocking(alloc, config, runnerif, createviewprocessfn);
+        },
+        .python => {
             return debugpy.runNonBlocking(alloc, config, runnerif, createviewprocessfn);
         },
         .cppdbg => {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const uiview = @import("ui/uiview.zig");
+const builtin = @import("builtin");
 
 pub const EnvTuple = struct {
     key: []u8,
@@ -50,6 +51,50 @@ pub fn create_env_map(alloc: std.mem.Allocator, envtuples: []const EnvTuple) !st
         try env_map.put(env.key, env.val);
     }
     return env_map;
+}
+
+pub fn parse_dotenv_file(alloc: std.mem.Allocator, filepath: []const u8) ![]EnvTuple {
+    var filebuf: []u8 = undefined;
+
+    if (std.fs.path.isAbsolute(filepath)) {
+        var file = try std.fs.openFileAbsolute(filepath, .{ .mode = .read_only });
+        defer file.close();
+        filebuf = try file.readToEndAlloc(alloc, std.math.maxInt(usize));
+    } else {
+        var file = try std.fs.cwd().openFile(filepath, .{ .mode = .read_only });
+        defer file.close();
+        filebuf = try file.readToEndAlloc(alloc, std.math.maxInt(usize));
+    }
+    defer alloc.free(filebuf);
+
+    var split_iter = undefined;
+    switch (builtin.target.os.tag) {
+        .windows => {
+            split_iter = std.mem.splitScalar(u8, filebuf, std.fs.path.set_windows);
+        },
+        else => {
+            split_iter = std.mem.splitScalar(u8, filebuf, std.fs.path.sep_posix);
+        },
+    }
+
+    var linecount = 0;
+    while (split_iter.next()) |_| {
+        linecount = linecount + 1;
+    }
+
+    var tuples = try alloc(EnvTuple, linecount);
+    errdefer alloc.free(tuples);
+    split_iter.reset();
+    var i: usize = 0;
+    while (split_iter.next()) |line| : (i += 1) {
+        // find first '=' char
+        const idx = try std.mem.indexOfScalar(u8, line, "=");
+        const first = alloc.dupe(u8, line[0..idx]);
+        const second = alloc.dupe(u8, line[idx..line.len]);
+        tuples[i] = EnvTuple{ .key = first, .val = second };
+    }
+
+    return tuples;
 }
 
 pub fn pullpushLoop(alloc: std.mem.Allocator, childproc: std.process.Child, processname: []const u8) !void {

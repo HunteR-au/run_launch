@@ -91,6 +91,7 @@
       overflow-y: scroll;
       background-color: black;
       color: white;
+      scrollbar-color: #454545 black;
     }
     #process_tabs {
       position: 10px 10px;
@@ -107,15 +108,47 @@
       background-image: linear-gradient(to right, rgba(0,0,0,0) 30%, rgb(63, 62, 63) 30%, rgb(63, 62, 63) 70%, rgba(0,0,0,0) 70%);
     }
     .tablinks {
-      cursor: move;
+      /* cursor: move; */
+      background-color: #0d1015;
+      border: 0;
+      border-radius: .5rem;
+      box-sizing: border-box;
+      color: #cccccc;
+      font-family: "Inter var",ui-sans-serif,system-ui,-apple-system,system-ui,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans",sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";
+      font-size: .875rem;
+      font-weight: 600;
+      line-height: 1.25rem;
+      padding: .25rem 1rem;
+      text-align: center;
+      text-decoration: none #D1D5DB solid;
+      text-decoration-thickness: auto;
+      box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: manipulation;
     }
+    .tablinks:hover {
+      background-color: rgba(0, 127, 255, 20%)
+    }
+    .tablinks:focus {
+      outline: 2px solid transparent;
+      outline-offset: 2px;
+    }
+    .tablinks:focus-visible {
+      box-shadow: none;
+    }    
+    
     .box.over {
       border: 3px dotted #666;
     }
-    .active {
-      border-top-color:hsl(0, 89%, 41%);
-      border-bottom-color:hsl(0, 100%, 50%);
-      border-top-width: 3px;
+    .tablinks.active {
+      /*border-top-color:hsl(0, 89%, 41%); */
+      /*border-bottom-color:hsl(0, 100%, 50%); */
+      /*border-top-width: 3px; */
+      border-width: 2px;
+      border-style: outset;
+      border-color: buttonborder;
     }
   </style>
 </head>
@@ -139,7 +172,7 @@
   </div>
   <!-- <div id="pageview"> -->
     <br/>
-    <button id="nextLine">Next Line</button>
+    <!-- <button id="nextLine">Next Line</button> -->
     <div id="views">
   <!-- </div> -->
     <!-- <div id="view-group-0" class="viewgroup"> -->

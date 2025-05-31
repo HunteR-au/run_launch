@@ -1,4 +1,3 @@
-// TODO: change divider to div
 function newGroupDivider() {
     var newDivider = document.createElement('div');
     newDivider.className = 'viewgroup-divider'
