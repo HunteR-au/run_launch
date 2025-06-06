@@ -95,6 +95,12 @@ pub fn build(b: *std.Build) !void {
     const clap = b.dependency("clap", .{});
     exe.root_module.addImport("clap", clap.module("clap"));
 
+    const vaxis = b.dependency("vaxis", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe.root_module.addImport("vaxis", vaxis.module("vaxis"));
+
     const zig_webui = b.dependency("zig_webui", .{
         .target = target,
         .optimize = optimize,
@@ -102,6 +108,7 @@ pub fn build(b: *std.Build) !void {
         .is_static = true, // whether static link
     });
     exe.root_module.addImport("webui", zig_webui.module("webui"));
+    // For hide console window, you can set exe.subsystem = .Windows;
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default

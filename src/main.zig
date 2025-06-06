@@ -5,6 +5,7 @@ const utils = @import("utils.zig");
 const Launch = @import("launch.zig");
 const Task = @import("task.zig");
 const uiview = @import("ui/uiview.zig");
+const tui = @import("ui/tui.zig");
 const runner = @import("runner/runner.zig");
 
 const RunLaunchErrors = error{
@@ -19,6 +20,7 @@ pub fn main() !void {
 
     const allocator = gpa.allocator();
 
+    try tui.start_tui(allocator);
     try uiview.setupWebUI(allocator);
 
     const params = comptime clap.parseParamsComptime(

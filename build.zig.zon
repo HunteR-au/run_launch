@@ -33,6 +33,14 @@
             .url = "https://github.com/webui-dev/zig-webui/archive/main.tar.gz",
             .hash = "zig_webui-0.0.1-M4z7zXQnAQAptD3KpFx_dVDtNuONhgQArj6sys1RIDQg",
         },
+        .webview = .{
+            .url = "git+https://github.com/jellli/webview-zig#094f75dbc677d7202e5ee93c9eb9ed78907f2587",
+            .hash = "webview-0.1.0-I5p0phv6IAA5MPIu7R9EEnSjFX-5ye52e88tBkalrRXe",
+        },
+        .vaxis = .{
+            .url = "git+https://github.com/rockorager/libvaxis#a3b5b89aee547845226a4478efb493563b5fc187",
+            .hash = "vaxis-0.1.0-BWNV_O8OCQBC4w-MnOGaKw9zFVFgTxf3XfcvgScUagEJ",
+        },
     },
     .paths = .{
         "build.zig",
