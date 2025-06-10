@@ -1,6 +1,9 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
+const mutiStyleText = @import("tui/MultiStyleText.zig");
+const graphemedata = vaxis.grapheme.GraphemeData;
+const displaywidth = @import("DisplayWidth");
 
 /// Our main application state
 // const Model = struct {
@@ -155,6 +158,17 @@ const Model = struct {
             .surface = try text.draw(ctx),
         };
 
+        const multitext: mutiStyleText.MultiStyleText = .{};
+        try multitext.append(ctx.arena, .{
+            .bytes = "A string to be render in the output widget...\n",
+            .gd = try graphemedata.init(ctx.arena),
+            .wd = try displaywidth.DisplayWidthData.init(ctx.arena),
+        });
+
+        const multitext_child: vxfw.SubSufrace = .{
+            .origin = .{ .row = 5, .col = 5 },
+            .surface = try text.typeErasedDrawFn(ctx),
+        };
         // const text_child: vxfw.SubSurface = .{
         //     .origin = .{ .row = 0, .col = 0 },
         //     .surface = try text.draw(ctx),
@@ -168,8 +182,9 @@ const Model = struct {
         //     )),
         // };
 
-        const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
+        const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
         children[0] = text_child;
+        children[1] = multitext_child;
         // children[1] = button_child;
 
         return .{

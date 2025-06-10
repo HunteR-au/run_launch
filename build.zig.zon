@@ -38,16 +38,13 @@
             .hash = "webview-0.1.0-I5p0phv6IAA5MPIu7R9EEnSjFX-5ye52e88tBkalrRXe",
         },
         .vaxis = .{
-            .url = "git+https://github.com/rockorager/libvaxis#a3b5b89aee547845226a4478efb493563b5fc187",
-            .hash = "vaxis-0.1.0-BWNV_O8OCQBC4w-MnOGaKw9zFVFgTxf3XfcvgScUagEJ",
+            .url = "git+https://github.com/rockorager/libvaxis.git#33ae50cadca891c801eaed2039c12eae82b2c067",
+            .hash = "vaxis-0.1.0-BWNV_OYOCQBtnAkzfqqjBpeN6k6sj0c1BTTJcWQbr_qF",
         },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
-        // For example...
-        //"LICENSE",
-        //"README.md",
     },
 }

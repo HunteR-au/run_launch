@@ -1,16 +1,19 @@
 const std = @import("std");
+// const grapheme = vaxis.grapheme;
+const DisplayWidth = @import("DisplayWidth");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
-const grapheme = vaxis.grapheme;
-const DisplayWidth = @import("DisplayWidth");
+
+// TODO - refactor the MultiStyle Text and pull out the Buffer code from the widget code
+// TODO - the buffer code needs to have some mutex logic for multithreaded code
 
 pub const BufferWriter = struct {
     pub const Error = error{OutOfMemory};
     pub const Writer = std.io.GenericWriter(@This(), Error, write);
 
     allocator: std.mem.Allocator,
-    buffer: *Buffer,
-    gd: *const grapheme.GraphemeData,
+    buffer: *MultiStyleText,
+    gd: *const vaxis.grapheme.GraphemeData,
     wd: *const DisplayWidth.DisplayWidthData,
 
     pub fn write(self: @This(), bytes: []const u8) Error!usize {
@@ -23,13 +26,13 @@ pub const BufferWriter = struct {
     }
 };
 
-pub const Buffer = struct {
+pub const MultiStyleText = struct {
     const StyleList = std.ArrayListUnmanaged(vaxis.Style);
     const StyleMap = std.HashMapUnmanaged(usize, usize, std.hash_map.AutoContext(usize), std.hash_map.default_max_load_percentage);
 
     pub const Content = struct {
         bytes: []const u8,
-        gd: *const grapheme.GraphemeData,
+        gd: *const vaxis.grapheme.GraphemeData,
         wd: *const DisplayWidth.DisplayWidthData,
     };
 
@@ -41,7 +44,7 @@ pub const Buffer = struct {
 
     pub const Error = error{OutOfMemory};
 
-    grapheme: std.MultiArrayList(grapheme.Grapheme) = .{},
+    grapheme: std.MultiArrayList(vaxis.grapheme.Grapheme) = .{},
     content: std.ArrayListUnmanaged(u8) = .{},
     style_list: StyleList = .{},
     style_map: StyleMap = .{},
@@ -49,7 +52,7 @@ pub const Buffer = struct {
     cols: usize = 0,
     // used when appening to a buffer
     last_cols: usize = 0,
-    
+
     text_align: enum { left, center, right } = .left,
     softwrap: bool = true,
     overflow: enum { ellipsis, clip } = .ellipsis,
@@ -78,7 +81,7 @@ pub const Buffer = struct {
 
     pub fn append(self: *@This(), alloc: std.mem.Allocator, content: Content) Error!void {
         var cols: usize = self.last_cols;
-        var iter = grapheme.Iterator.init(content.bytes, content.gd);
+        var iter = vaxis.grapheme.Iterator.init(content.bytes, content.gd);
         const dw: DisplayWidth = .{ .data = content.wd };
         while (iter.next()) |g| {
             try self.grapheme.append(alloc, .{
@@ -122,13 +125,13 @@ pub const Buffer = struct {
     }
 
     pub fn text(self: *@This()) []u8 {
-        return self.content.bytes
+        return self.content.bytes;
     }
 
     pub fn writer(
         self: *@This(),
         alloc: std.mem.Allocator,
-        gd: *const grapheme.GraphemeData,
+        gd: *const vaxis.grapheme.GraphemeData,
         wd: *const DisplayWidth.DisplayWidthData,
     ) BufferWriter.Writer {
         return .{
@@ -141,26 +144,25 @@ pub const Buffer = struct {
         };
     }
 
-    pub fn widget(self: *Buffer) vxfw.Widget {
+    pub fn widget(self: *MultiStyleText) vxfw.Widget {
         return .{
             .userdata = self,
-            .drawFn = Buffer.typeErasedDrawFn,
+            .drawFn = MultiStyleText.typeErasedDrawFn,
         };
     }
 
-    fn get_style(self: *Buffer, byte_index: usize) vaxis.Style {
+    fn get_style(self: *MultiStyleText, byte_index: usize) vaxis.Style {
         const style: vaxis.Style = blk: {
-            if (buffer.style_map.get(byte_index)) |style_index| {
-                break :blk buffer.style_list.items[style_index];
+            if (self.style_map.get(byte_index)) |style_index| {
+                break :blk self.style_list.items[style_index];
             }
             break :blk .{};
         };
+        return style;
     }
 
     pub fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-        const self: *Buffer = @ptrCast(@alignCast(ptr));
-        // TODO - draw text similar to both vxfw.Text and widget.TextBox
-        //
+        const self: *MultiStyleText = @ptrCast(@alignCast(ptr));
         // if max.height or max.width is null, that means we are expected to take up as much room as needed
         if (ctx.max.width != null and ctx.max.width == 0) {
             return .{
@@ -195,13 +197,14 @@ pub const Buffer = struct {
         const base: vaxis.Cell = .{ .style = base_style };
         @memset(surface.buffer, base);
 
-        // TODO: track this byte_index in the loop
+        // This index is used to index into the style map
         var byte_index: usize = 0;
 
         var row: u16 = 0;
         if (self.softwrap) {
             var iter = SoftwrapIterator.init(self.text(), ctx);
             while (iter.next()) |line| {
+                byte_index = iter.index;
                 if (row >= container_size.height) break;
                 defer row += 1;
                 var col: u16 = switch (self.text_align) {
@@ -214,7 +217,7 @@ pub const Buffer = struct {
                     const grapheme = char.bytes(line.bytes);
                     if (std.mem.eql(u8, grapheme, "\t")) {
                         for (0..8) |i| {
-                            const style: vaxis.Style = blk: {
+                            byte_index = iter.index + char.offset;
                             surface.writeCell(@intCast(col + i), row, .{
                                 .char = .{ .grapheme = " ", .width = 1 },
                                 .style = self.style,
@@ -224,6 +227,7 @@ pub const Buffer = struct {
                         continue;
                     }
                     const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
+                    byte_index = iter.index + char.offset;
                     surface.writeCell(col, row, .{
                         .char = .{ .grapheme = grapheme, .width = grapheme_width },
                         .style = self.style,
@@ -254,12 +258,14 @@ pub const Buffer = struct {
                         line_width > container_size.width and
                         self.overflow == .ellipsis)
                     {
+                        byte_index = line_iter.index + char.offset;
                         surface.writeCell(col, row, .{
                             .char = .{ .grapheme = "…", .width = 1 },
                             .style = self.style,
                         });
                         col = container_size.width;
                     } else {
+                        byte_index = line_iter.index + char.offset;
                         surface.writeCell(col, row, .{
                             .char = .{ .grapheme = grapheme, .width = grapheme_width },
                             .style = self.style,
@@ -273,11 +279,11 @@ pub const Buffer = struct {
     }
 
     // pub fn typeErasedEventHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
-    //     const self: *Buffer = @ptrCast(@alignCast(ptr));
+    //     const self: *MultiStyleText = @ptrCast(@alignCast(ptr));
     // }
 
-    /// Determines the container size by finding the widest line in the viewable area
-    fn findContainerSize(self: *Buffer, ctx: vxfw.DrawContext) vxfw.Size {
+    // Determines the container size by finding the widest line in the viewable area
+    fn findContainerSize(self: *MultiStyleText, ctx: vxfw.DrawContext) vxfw.Size {
         var row: u16 = 0;
         var max_width: u16 = ctx.min.width;
         if (self.softwrap) {
@@ -349,7 +355,7 @@ pub const Buffer = struct {
             if (self.index >= self.buf.len) return;
             if (self.buf[self.index] == '\r') self.index += 1;
         }
-    }
+    };
 
     pub const SoftwrapIterator = struct {
         ctx: vxfw.DrawContext,

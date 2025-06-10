@@ -20,7 +20,7 @@ pub fn main() !void {
 
     const allocator = gpa.allocator();
 
-    // try tui.start_tui(allocator);
+    try tui.start_tui(allocator);
     try uiview.setupWebUI(allocator);
 
     const params = comptime clap.parseParamsComptime(
