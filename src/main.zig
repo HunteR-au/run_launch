@@ -20,7 +20,7 @@ pub fn main() !void {
 
     const allocator = gpa.allocator();
 
-    try tui.start_tui(allocator);
+    // try tui.start_tui(allocator);
     try uiview.setupWebUI(allocator);
 
     const params = comptime clap.parseParamsComptime(
@@ -117,6 +117,8 @@ pub fn main() !void {
 
 // TODO: BUG - current settings don't apply to non-active outputs (need to refresh)
 // TODO: BUG - there is an extra count in the last fold that shouldn't be there
+// TODO: BUG - there is an issue with cmd.exe /c dir C:\Windows blocking on pipes
+//                something is wrong with pushpull
 // TODO: add grep notifications to the UI with config (pattern, contification color)
 // TODO: add line numbers to each debug view
 // TODO: add the ability to jump to a line via js

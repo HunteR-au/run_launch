@@ -469,6 +469,7 @@ class OutputView {
     const isScrolledToBottom = processOutputDiv.scrollHeight - processOutputDiv.clientHeight <= processOutputDiv.scrollTop + 1
 
     processOutputDiv.innerHTML = this.getFormattedBuffer();
+    // processOutputDiv.textContent = this.getFormattedBuffer();
 
     // scroll to bottom if isScrolledToBottom is true
     if (isScrolledToBottom) {

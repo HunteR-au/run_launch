@@ -31,7 +31,7 @@
         },
         .zig_webui = .{
             .url = "https://github.com/webui-dev/zig-webui/archive/main.tar.gz",
-            .hash = "zig_webui-0.0.1-M4z7zXQnAQAptD3KpFx_dVDtNuONhgQArj6sys1RIDQg",
+            .hash = "zig_webui-2.5.0-beta.4-M4z7zfBUAQDEN_kHBLokzsJznoVQy0_7idTic9oiYM04",
         },
         .webview = .{
             .url = "git+https://github.com/jellli/webview-zig#094f75dbc677d7202e5ee93c9eb9ed78907f2587",

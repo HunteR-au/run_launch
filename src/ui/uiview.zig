@@ -50,7 +50,7 @@ pub fn setupWebUI(alloc: std.mem.Allocator) !void {
 
     // Set the root folder for the UI
     //_ = windowInst.?.setRootFolder("src/ui");
-    _ = windowInst.?.show(@as([:0]const u8, comptime getEmbedContent("index.html").?));
+    _ = try windowInst.?.show(@as([:0]const u8, comptime getEmbedContent("index.html").?));
 
     var config = try uiconfig.parseConfigs(alloc);
     defer config.deinit();
@@ -98,7 +98,7 @@ pub fn killProcessView(processname: []const u8) void {
 
 pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Allocator.Error!void {
     if (windowInst) |w| {
-        const encoder = std.base64.Base64Encoder.init(std.base64.url_safe.alphabet_chars, std.base64.url_safe.pad_char);
+        const encoder = std.base64.Base64Encoder.init(std.base64.standard_alphabet_chars, std.base64.url_safe.pad_char);
 
         const size = encoder.calcSize(jsonStr.len);
         const encodedBuf = try alloc.alloc(u8, size);
@@ -120,13 +120,13 @@ pub fn pushLogging(alloc: std.mem.Allocator, processname: []const u8, buffer: []
         const result = try std.mem.concat(alloc, u8, &.{ prefix, buffer, postfix });
         defer alloc.free(result);
 
-        const encoder = std.base64.Base64Encoder.init(std.base64.url_safe.alphabet_chars, std.base64.url_safe.pad_char);
+        const encoder = std.base64.Base64Encoder.init(std.base64.standard_alphabet_chars, std.base64.url_safe.pad_char);
 
         const size = encoder.calcSize(buffer.len);
         const encodedBuf = try alloc.alloc(u8, size);
         _ = encoder.encode(encodedBuf, buffer);
 
-        const buf_size = 1024 + 500; // TODO: 500 for process name should be done better!
+        const buf_size = 1024 * 100 + 500; // TODO: 500 for process name should be done better!
         var js: [buf_size]u8 = std.mem.zeroes([buf_size]u8);
         const buf = std.fmt.bufPrint(&js, "addToBufferAndRender('{s}', atob('{s}'));", .{ processname, encodedBuf }) catch unreachable;
         const content: [:0]const u8 = js[0..buf.len :0];
