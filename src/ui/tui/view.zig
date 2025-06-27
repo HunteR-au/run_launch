@@ -7,7 +7,8 @@ pub const vxfw = vaxis.vxfw;
 pub const OutputView = output_view_mod.OutputView;
 pub const Output = output_view_mod.Output;
 
-pub const OutputViewList = std.ArrayList(OutputViewTuple);
+pub const OutputViewList = std.ArrayList(*OutputView);
+pub const FlexItemList = std.ArrayList(vxfw.FlexItem);
 
 const Direction = enum {
     left,
@@ -22,6 +23,7 @@ const OutputViewTuple = struct {
 pub const View = struct {
     alloc: std.mem.Allocator,
     outputviews: OutputViewList,
+    flexitems: FlexItemList,
     flexcol: vxfw.FlexColumn,
 
     pub fn init(alloc: std.mem.Allocator) std.mem.Allocator.Error!*View {
@@ -29,6 +31,7 @@ pub const View = struct {
         v.* = .{
             .alloc = alloc,
             .outputviews = OutputViewList.init(alloc),
+            .flexitems = FlexItemList.init(alloc),
             .flexcol = .{ .children = &[_]vxfw.FlexItem{} },
         };
         return v;
@@ -41,6 +44,7 @@ pub const View = struct {
             self.alloc.destroy(t.flexitex);
         }
         self.outputviews.deinit();
+        self.flexitems.deinit();
         self.alloc.destroy(self);
     }
 
@@ -49,13 +53,14 @@ pub const View = struct {
         flexitem.* = .{
             .widget = outputview.widget(),
         };
-        try self.outputviews.insert(pos, .{ .outputview = outputview, .flexitex = flexitem });
+        try self.outputviews.insert(pos, outputview);
+        try self.flexitems.insert(pos, .{ .widget = outputview.widget() });
     }
 
     pub fn remove_outputview(self: *View, pos: usize) OutputView {
-        const tuple = self.outputviews.orderedRemove(pos);
-        self.alloc.destroy(tuple.flexitex);
-        return tuple.outputview;
+        self.flexitems.orderedRemove(pos);
+        const outputview = self.outputviews.orderedRemove(pos);
+        return outputview;
     }
 
     pub fn split_output(self: *View, output: *Output, from_pos: usize, dir: Direction) !void {
@@ -66,7 +71,7 @@ pub const View = struct {
 
         // check that the output is actually from the correct group
         var target_output: ?*Output = null;
-        for (self.outputviews.items[from_pos].outputview.outputs.items) |o| {
+        for (self.outputviews.items[from_pos].outputs.items) |o| {
             if (output == o) {
                 target_output = o;
             }
@@ -77,7 +82,7 @@ pub const View = struct {
         }
 
         const new_outputview = try OutputView.init(self.alloc);
-        const from_outputview = self.outputviews.items[from_pos].outputview;
+        const from_outputview = self.outputviews.items[from_pos];
 
         switch (dir) {
             .left => {
@@ -100,7 +105,7 @@ pub const View = struct {
 
         // check that the output is actually from the correct group
         var target_output: ?*Output = null;
-        for (self.outputviews.items[from_pos].outputview.outputs.items) |o| {
+        for (self.outputviews.items[from_pos].outputs.items) |o| {
             if (output == o) {
                 target_output = o;
             }
@@ -111,9 +116,9 @@ pub const View = struct {
         }
 
         // add, remove, set focus
-        try self.outputviews.items[to_pos].outputview.add_output(target_output.?);
-        self.outputviews.items[from_pos].outputview.remove_output(target_output.?);
-        try self.outputviews.items[to_pos].outputview.focus_output(target_output.?);
+        try self.outputviews.items[to_pos].add_output(target_output.?);
+        self.outputviews.items[from_pos].remove_output(target_output.?);
+        try self.outputviews.items[to_pos].focus_output(target_output.?);
     }
 
     pub fn widget(self: *View) vxfw.Widget {
@@ -143,8 +148,7 @@ pub const View = struct {
     pub fn draw(self: *View, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const max_size = ctx.max.size();
 
-        // TODO: I should split outputview and flexitem into two arrays
-        // so that I can get the children
+        self.flexcol.children = self.flexitems.items;
 
         const outputview_child: vxfw.SubSurface = .{
             .origin = .{ .row = 0, .col = 0 },
