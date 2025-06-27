@@ -182,7 +182,7 @@ pub fn parse_json(allocator: std.mem.Allocator, filepath: []const u8) !Launch {
     // Load the JSON data
     const max_bytes = 1024 * 1024;
     const data = try std.fs.cwd().readFileAlloc(allocator, filepath, max_bytes);
-    std.debug.print("\n{s}\n", .{data});
+    //std.debug.print("\n{s}\n", .{data});
     defer allocator.free(data);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});

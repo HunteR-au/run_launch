@@ -1,5 +1,6 @@
 const std = @import("std");
-const uiview = @import("ui/uiview.zig");
+//const uiview = @import("ui/uiview.zig");
+//const tuiview = @import("tui");
 const builtin = @import("builtin");
 
 pub const EnvTuple = struct {
@@ -97,9 +98,16 @@ pub fn parse_dotenv_file(alloc: std.mem.Allocator, filepath: []const u8) ![]EnvT
     return tuples;
 }
 
-pub fn pullpushLoop(alloc: std.mem.Allocator, childproc: std.process.Child, processname: []const u8) !void {
+pub const PushFnProto = fn (std.mem.Allocator, []const u8, []const u8) std.mem.Allocator.Error!void;
+
+pub fn pullpushLoop(
+    alloc: std.mem.Allocator,
+    pushfn: PushFnProto,
+    childproc: std.process.Child,
+    processname: []const u8,
+) !void {
     const chunk_size: usize = 1024;
-    std.debug.print("starting pushpull: {s}\n", .{processname});
+    //std.debug.print("starting pushpull: {s}\n", .{processname});
 
     std.debug.assert(childproc.stdout_behavior == .Pipe);
     std.debug.assert(childproc.stderr_behavior == .Pipe);
@@ -119,17 +127,17 @@ pub fn pullpushLoop(alloc: std.mem.Allocator, childproc: std.process.Child, proc
     });
     defer poller.deinit();
 
-    std.debug.print("polling...\n", .{});
-    while (try poller.pollTimeout(100000000)) {
+    //std.debug.print("polling...\n", .{});
+    while (try poller.pollTimeout(100_000_000)) {
         const stdout = poller.fifo(.stdout).readableSlice(0);
         if (stdout.len > 0) {
-            try uiview.pushLogging(alloc, processname, stdout);
+            try pushfn(alloc, processname, stdout);
             poller.fifo(.stdout).discard(stdout.len);
         }
 
         const stderr = poller.fifo(.stderr).readableSlice(0);
         if (stderr.len > 0) {
-            try uiview.pushLogging(alloc, processname, stderr);
+            try pushfn(alloc, processname, stderr);
             poller.fifo(.stderr).discard(stderr.len);
         }
     }

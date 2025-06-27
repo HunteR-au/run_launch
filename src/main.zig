@@ -5,8 +5,10 @@ const utils = @import("utils.zig");
 const Launch = @import("launch.zig");
 const Task = @import("task.zig");
 const uiview = @import("ui/uiview.zig");
-const tui = @import("ui/tui.zig");
+const tui = @import("tui");
 const runner = @import("runner/runner.zig");
+
+const vaxis = @import("dependencies/vaxis");
 
 const RunLaunchErrors = error{
     BadPositionals,
@@ -20,12 +22,10 @@ pub fn main() !void {
 
     const allocator = gpa.allocator();
 
-    try tui.start_tui(allocator);
-    try uiview.setupWebUI(allocator);
-
     const params = comptime clap.parseParamsComptime(
         \\-h, --help                    Display this help and exit
         \\-d, --dry-run                 Print out actions without executing them
+        \\-w, --web-ui                  Render the web ui interface
         \\-t, --tasks    <str>          The path to the tasks.json file
         \\<str>                         The path to the launch.json file
         \\<str>                         The configuration name to run
@@ -50,6 +50,12 @@ pub fn main() !void {
         return RunLaunchErrors.BadPositionals;
     }
 
+    if (res.args.@"web-ui" != 0) {
+        try uiview.setupWebUI(allocator);
+    } else {
+        try tui.start_tui(allocator);
+    }
+
     var tasks: ?Task.TaskJson = null;
     defer {
         if (tasks) |t| {
@@ -68,12 +74,22 @@ pub fn main() !void {
     const launchdata = try Launch.parse_json(allocator, launchPath);
     defer launchdata.deinit(allocator);
 
-    try writer.print("first positional arg: {s}\n", .{res.positionals[0].?});
-    try writer.print("version: {s}\n", .{launchdata.version});
-    try writer.print("first config name: {?s}\n", .{launchdata.configurations[0].name});
+    //try writer.print("first positional arg: {s}\n", .{res.positionals[0].?});
+    //try writer.print("version: {s}\n", .{launchdata.version});
+    //try writer.print("first config name: {?s}\n", .{launchdata.configurations[0].name});
 
-    _ = try runner.run(allocator, taskNameToRun, launchdata, tasks, uiview.createProcessView);
-    uiview.closeWebUI();
+    //_ = taskNameToRun;
+    if (res.args.@"web-ui" != 0) {
+        _ = try runner.run(allocator, taskNameToRun, launchdata, tasks, uiview.createProcessView, uiview.pushLogging);
+    } else {
+        _ = try runner.run(allocator, taskNameToRun, launchdata, tasks, tui.createProcessView, tui.pushLogging);
+    }
+
+    if (res.args.@"web-ui" != 0) {
+        uiview.closeWebUI();
+    } else {
+        tui.stop_tui();
+    }
 }
 
 // https://code.visualstudio.com/docs/editor/debugging#_launchjson-attributes

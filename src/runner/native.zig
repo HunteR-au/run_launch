@@ -5,9 +5,10 @@ const launch = @import("../launch.zig");
 
 pub fn run(
     alloc: std.mem.Allocator,
+    pushfn: utils.PushFnProto,
     config: *const launch.Configuration,
     _: *runner.Runner,
-    createprocessview: fn ([]const u8) void,
+    createprocessview: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
 ) !void {
     var envmap: ?std.process.EnvMap = null;
     if (config.env) |envs| {
@@ -21,12 +22,12 @@ pub fn run(
 
     if (config.program) |*program| {
         if (config.args) |*args| {
-            createprocessview(program.*);
-            return try run_native(alloc, program.*, args.*, envmap);
+            try createprocessview(alloc, program.*);
+            return try run_native(alloc, pushfn, program.*, args.*, envmap);
         } else {
             const empty: []const []const u8 = &[_][]const u8{};
-            createprocessview(program.*);
-            return try run_native(alloc, program.*, empty, envmap);
+            try createprocessview(alloc, program.*);
+            return try run_native(alloc, pushfn, program.*, empty, envmap);
         }
     } else {
         return error.MissingConfigurationFields;
@@ -35,9 +36,10 @@ pub fn run(
 
 pub fn runNonBlocking(
     alloc: std.mem.Allocator,
+    pushfn: utils.PushFnProto,
     config: *const launch.Configuration,
     _: *runner.Runner,
-    createprocessview: fn ([]const u8) void,
+    createprocessview: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
 ) !std.process.Child {
     var envmap: ?std.process.EnvMap = null;
     if (config.env) |envs| {
@@ -51,12 +53,12 @@ pub fn runNonBlocking(
 
     if (config.program) |*program| {
         if (config.args) |*args| {
-            createprocessview((program.*));
-            return try run_native_nowait(alloc, program.*, args.*, envmap);
+            try createprocessview(alloc, program.*);
+            return try run_native_nowait(alloc, pushfn, program.*, args.*, envmap);
         } else {
             const empty: []const []const u8 = &[_][]const u8{};
-            createprocessview((program.*));
-            return try run_native_nowait(alloc, program.*, empty, envmap);
+            try createprocessview(alloc, program.*);
+            return try run_native_nowait(alloc, pushfn, program.*, empty, envmap);
         }
     } else {
         return error.MissingConfigurationFields;
@@ -65,6 +67,7 @@ pub fn runNonBlocking(
 
 fn run_native_nowait(
     allocator: std.mem.Allocator,
+    pushfn: utils.PushFnProto,
     program: []const u8,
     args: []const []const u8,
     envs: ?std.process.EnvMap,
@@ -85,14 +88,15 @@ fn run_native_nowait(
     }
 
     try child.spawn();
-    std.debug.print("Spawning child process: {d}\n", .{child.id});
+    //std.debug.print("Spawning child process: {d}\n", .{child.id});
 
-    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, child, program });
+    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, program });
     return child;
 }
 
 fn run_native(
     allocator: std.mem.Allocator,
+    pushfn: utils.PushFnProto,
     program: []const u8,
     args: []const []const u8,
     envs: ?std.process.EnvMap,
@@ -112,29 +116,29 @@ fn run_native(
         child.env_map = e;
     }
     child.spawn() catch |e| {
-        std.debug.print("Spawning module {any} failed.\n", .{e});
+        //std.debug.print("Spawning module {any} failed.\n", .{e});
         return e;
     };
 
-    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, child, program });
+    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, program });
 
-    const term = child.wait() catch |e| {
-        std.debug.print("Waiting for child {any} failed.\n", .{e});
+    _ = child.wait() catch |e| {
+        //std.debug.print("Waiting for child {any} failed.\n", .{e});
         return e;
     };
 
-    switch (term) {
-        .Exited => |v| {
-            std.debug.print("Python exited with code {d}\n", .{v});
-        },
-        .Signal => |v| {
-            std.debug.print("Python signaled with code {d}\n", .{v});
-        },
-        .Stopped => |v| {
-            std.debug.print("Python stopped with code: {d}\n", .{v});
-        },
-        .Unknown => |v| {
-            std.debug.print("Unknown process error: {d}\n", .{v});
-        },
-    }
+    //switch (term) {
+    //    .Exited => |v| {
+    //        //std.debug.print("Python exited with code {d}\n", .{v});
+    //    },
+    //    .Signal => |v| {
+    //        //std.debug.print("Python signaled with code {d}\n", .{v});
+    //    },
+    //    .Stopped => |v| {
+    //        //std.debug.print("Python stopped with code: {d}\n", .{v});
+    //    },
+    //    .Unknown => |v| {
+    //        //std.debug.print("Unknown process error: {d}\n", .{v});
+    //    },
+    //}
 }

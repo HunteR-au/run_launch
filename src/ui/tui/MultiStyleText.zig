@@ -1,11 +1,13 @@
 const std = @import("std");
-// const grapheme = vaxis.grapheme;
-const DisplayWidth = @import("DisplayWidth");
 const vaxis = @import("vaxis");
+//const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
+const gwidth = vaxis.gwidth;
+const Unicode = vaxis.Unicode;
 
 // TODO - refactor the MultiStyle Text and pull out the Buffer code from the widget code
 // TODO - the buffer code needs to have some mutex logic for multithreaded code
+// TODO - refactor the unicode / gwidth to use the data from the draw context
 
 pub const BufferWriter = struct {
     pub const Error = error{OutOfMemory};
@@ -14,13 +16,13 @@ pub const BufferWriter = struct {
     allocator: std.mem.Allocator,
     buffer: *MultiStyleText,
     gd: *const vaxis.grapheme.GraphemeData,
-    wd: *const DisplayWidth.DisplayWidthData,
+    unicode: *const Unicode,
 
     pub fn write(self: @This(), bytes: []const u8) Error!usize {
         try self.buffer.append(self.allocator, .{
             .bytes = bytes,
             .gd = self.gd,
-            .wd = self.wd,
+            .unicode = self.unicode.width_data,
         });
         return bytes.len;
     }
@@ -33,7 +35,7 @@ pub const MultiStyleText = struct {
     pub const Content = struct {
         bytes: []const u8,
         gd: *const vaxis.grapheme.GraphemeData,
-        wd: *const DisplayWidth.DisplayWidthData,
+        unicode: *const Unicode,
     };
 
     pub const Style = struct {
@@ -46,8 +48,9 @@ pub const MultiStyleText = struct {
 
     grapheme: std.MultiArrayList(vaxis.grapheme.Grapheme) = .{},
     content: std.ArrayListUnmanaged(u8) = .{},
-    style_list: StyleList = .{},
-    style_map: StyleMap = .{},
+    style_list: StyleList = StyleList.empty,
+    style_map: StyleMap = StyleMap.empty,
+    style_base: vaxis.Style = .{},
     rows: usize = 0,
     cols: usize = 0,
     // used when appening to a buffer
@@ -82,7 +85,7 @@ pub const MultiStyleText = struct {
     pub fn append(self: *@This(), alloc: std.mem.Allocator, content: Content) Error!void {
         var cols: usize = self.last_cols;
         var iter = vaxis.grapheme.Iterator.init(content.bytes, content.gd);
-        const dw: DisplayWidth = .{ .data = content.wd };
+
         while (iter.next()) |g| {
             try self.grapheme.append(alloc, .{
                 .len = g.len,
@@ -94,7 +97,8 @@ pub const MultiStyleText = struct {
                 cols = 0;
                 continue;
             }
-            cols +|= dw.strWidth(cluster);
+            // cols +|= dw.strWidth(cluster);
+            cols +|= gwidth.gwidth(cluster, .unicode, &content.unicode.width_data);
         }
         try self.content.appendSlice(alloc, content.bytes);
         self.last_cols = cols;
@@ -125,21 +129,21 @@ pub const MultiStyleText = struct {
     }
 
     pub fn text(self: *@This()) []u8 {
-        return self.content.bytes;
+        return self.content.items;
     }
 
     pub fn writer(
         self: *@This(),
         alloc: std.mem.Allocator,
         gd: *const vaxis.grapheme.GraphemeData,
-        wd: *const DisplayWidth.DisplayWidthData,
+        unicode: *const Unicode,
     ) BufferWriter.Writer {
         return .{
             .context = .{
                 .allocator = alloc,
                 .buffer = self,
                 .gd = gd,
-                .wd = wd,
+                .unicode = unicode,
             },
         };
     }
@@ -151,12 +155,12 @@ pub const MultiStyleText = struct {
         };
     }
 
-    fn get_style(self: *MultiStyleText, byte_index: usize) vaxis.Style {
-        const style: vaxis.Style = blk: {
+    fn getStyle(self: *MultiStyleText, byte_index: usize) ?vaxis.Style {
+        const style: ?vaxis.Style = blk: {
             if (self.style_map.get(byte_index)) |style_index| {
                 break :blk self.style_list.items[style_index];
             }
-            break :blk .{};
+            break :blk null;
         };
         return style;
     }
@@ -181,7 +185,13 @@ pub const MultiStyleText = struct {
         //};
 
         // TODO - replace this with buffer cols and rows
+        // BUG - container_size struct is causing int overflow when width * height
+        // in the call to Surface.init below
+        // NOTE: failed on height 97, width 1258
         const container_size = self.findContainerSize(ctx);
+        std.debug.print("findContainerSize:\n", .{});
+        std.debug.print("--> width {d}\n", .{container_size.width});
+        std.debug.print("--> height {d}\n", .{container_size.height});
 
         // Create a surface of target width and max height. We'll trim the result after drawing
         const surface = try vxfw.Surface.init(
@@ -189,12 +199,12 @@ pub const MultiStyleText = struct {
             self.widget(),
             container_size,
         );
-        const base_style: vaxis.Style = .{
-            .fg = self.style.fg,
-            .bg = self.style.bg,
-            .reverse = self.style.reverse,
-        };
-        const base: vaxis.Cell = .{ .style = base_style };
+        //const base_style: vaxis.Style = .{
+        //    .fg = self.style.fg,
+        //    .bg = self.style.bg,
+        //    .reverse = self.style.reverse,
+        //};
+        const base: vaxis.Cell = .{ .style = self.style_base };
         @memset(surface.buffer, base);
 
         // This index is used to index into the style map
@@ -205,6 +215,7 @@ pub const MultiStyleText = struct {
             var iter = SoftwrapIterator.init(self.text(), ctx);
             while (iter.next()) |line| {
                 byte_index = iter.index;
+
                 if (row >= container_size.height) break;
                 defer row += 1;
                 var col: u16 = switch (self.text_align) {
@@ -218,9 +229,10 @@ pub const MultiStyleText = struct {
                     if (std.mem.eql(u8, grapheme, "\t")) {
                         for (0..8) |i| {
                             byte_index = iter.index + char.offset;
+                            const style = self.getStyle(byte_index);
                             surface.writeCell(@intCast(col + i), row, .{
                                 .char = .{ .grapheme = " ", .width = 1 },
-                                .style = self.style,
+                                .style = if (style) |s| s else self.style_base,
                             });
                         }
                         col += 8;
@@ -228,9 +240,10 @@ pub const MultiStyleText = struct {
                     }
                     const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
                     byte_index = iter.index + char.offset;
+                    const style = self.getStyle(byte_index);
                     surface.writeCell(col, row, .{
                         .char = .{ .grapheme = grapheme, .width = grapheme_width },
-                        .style = self.style,
+                        .style = if (style) |s| s else self.style_base,
                     });
                     col += grapheme_width;
                 }
@@ -259,16 +272,18 @@ pub const MultiStyleText = struct {
                         self.overflow == .ellipsis)
                     {
                         byte_index = line_iter.index + char.offset;
+                        const style = self.getStyle(byte_index);
                         surface.writeCell(col, row, .{
                             .char = .{ .grapheme = "…", .width = 1 },
-                            .style = self.style,
+                            .style = if (style) |s| s else self.style_base,
                         });
                         col = container_size.width;
                     } else {
                         byte_index = line_iter.index + char.offset;
+                        const style = self.getStyle(byte_index);
                         surface.writeCell(col, row, .{
                             .char = .{ .grapheme = grapheme, .width = grapheme_width },
-                            .style = self.style,
+                            .style = if (style) |s| s else self.style_base,
                         });
                         col += @intCast(grapheme_width);
                     }

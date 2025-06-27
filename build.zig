@@ -72,11 +72,18 @@ pub fn build(b: *std.Build) !void {
     // running `zig build`).
     //b.installArtifact(lib);
 
-    const exe = b.addExecutable(.{
-        .name = "run_launch",
+    const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+    });
+
+    const exe = b.addExecutable(.{
+        .name = "run_launch",
+        .root_module = exe_mod,
+        // .root_source_file = b.path("src/main.zig"),
+        // .target = target,
+        // .optimize = optimize,
     });
 
     // exe.root_module.addAnonymousImport("embedFiles", .{
@@ -92,14 +99,17 @@ pub fn build(b: *std.Build) !void {
         });
     }
 
-    const clap = b.dependency("clap", .{});
-    exe.root_module.addImport("clap", clap.module("clap"));
+    const tui = b.createModule(.{ .root_source_file = b.path("src/ui/tui.zig") });
+    exe_mod.addImport("tui", tui);
 
     const vaxis = b.dependency("vaxis", .{
         .target = target,
         .optimize = optimize,
     });
-    exe.root_module.addImport("vaxis", vaxis.module("vaxis"));
+    tui.addImport("vaxis", vaxis.module("vaxis"));
+
+    const clap = b.dependency("clap", .{});
+    exe_mod.addImport("clap", clap.module("clap"));
 
     const zig_webui = b.dependency("zig_webui", .{
         .target = target,
@@ -107,7 +117,7 @@ pub fn build(b: *std.Build) !void {
         .enable_tls = false, // whether enable tls support
         .is_static = true, // whether static link
     });
-    exe.root_module.addImport("webui", zig_webui.module("webui"));
+    exe_mod.addImport("webui", zig_webui.module("webui"));
     // For hide console window, you can set exe.subsystem = .Windows;
 
     // This declares intent for the executable to be installed into the

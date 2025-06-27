@@ -8,7 +8,6 @@ var windowInst: ?webui = null;
 pub fn getEmbedContent(path: []const u8) ?[:0]const u8 {
     inline for (embedFiles.EmbededFiles) |t| {
         if (std.mem.eql(u8, t.name, path)) {
-            //std.debug.print("{s}\n", .{t.name});
             return t.ptr;
         }
     }
@@ -77,7 +76,7 @@ pub fn closeWebUI() void {
     webui.clean();
 }
 
-pub fn createProcessView(processname: []const u8) void {
+pub fn createProcessView(_: std.mem.Allocator, processname: []const u8) std.mem.Allocator.Error!void {
     if (windowInst) |w| {
         const buf_size = 1024 * 2;
         var js: [buf_size]u8 = std.mem.zeroes([buf_size]u8);
@@ -86,6 +85,7 @@ pub fn createProcessView(processname: []const u8) void {
         w.run(content);
     }
 }
+
 pub fn killProcessView(processname: []const u8) void {
     if (windowInst) |w| {
         const buf_size = 1024 * 2;
@@ -102,6 +102,7 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 
         const size = encoder.calcSize(jsonStr.len);
         const encodedBuf = try alloc.alloc(u8, size);
+        defer alloc.free(encodedBuf);
         _ = encoder.encode(encodedBuf, jsonStr);
 
         const buf_size = 1024 * 1024;

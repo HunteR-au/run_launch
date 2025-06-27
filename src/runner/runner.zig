@@ -30,7 +30,8 @@ pub fn run(
     name: []const u8,
     launchconfig: Launch.Launch,
     tasks: ?Task.TaskJson,
-    createviewprocessfn: fn ([]const u8) void,
+    createviewprocessfn: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
+    pushfn: utils.PushFnProto,
 ) !Runner {
     const match = launchconfig.find_by_name(name) orelse {
         return error.NoConfigWithName;
@@ -46,7 +47,7 @@ pub fn run(
     switch (match) {
         .config => |config| {
             // check if there is a preLaunchTask to run
-            try runPreLaunchTask(alloc, *const Launch.Configuration, config, tasks);
+            try runPreLaunchTask(alloc, *const Launch.Configuration, config, tasks, pushfn);
             // if (config.preLaunchTask != null) {
             //     try findRunTask(alloc, config.preLaunchTask.?, tasks);
             // }
@@ -55,28 +56,28 @@ pub fn run(
             const runnertype = std.meta.stringToEnum(RunnerType, config.type.?) orelse {
                 return error.InvalidChoice;
             };
-            try runRunnerType(alloc, runnertype, config, &runnerif, createviewprocessfn);
+            try runRunnerType(alloc, runnertype, config, &runnerif, createviewprocessfn, pushfn);
 
             // check if there is a post debug task to run
-            try runPostLaunchTask(alloc, *const Launch.Configuration, config, tasks);
+            try runPostLaunchTask(alloc, *const Launch.Configuration, config, tasks, pushfn);
             // if (config.postDebugTask != null) {
             //     try findRunTask(alloc, config.postDebugTask.?, tasks);
             // }
         },
         .compound => |compound| {
-            try runPreLaunchTask(alloc, *const Launch.Compound, compound, tasks);
+            try runPreLaunchTask(alloc, *const Launch.Compound, compound, tasks, pushfn);
 
             for (compound.configurations.?) |configname| {
                 const configmatch = launchconfig.find_config_by_name(configname);
                 if (configmatch) |config| {
-                    std.debug.print("Running config: {s}\n", .{configname});
+                    //std.debug.print("Running config: {s}\n", .{configname});
 
                     // TODO - we probably want to run each config's pre/post tasks
 
                     const runnertype = std.meta.stringToEnum(RunnerType, config.type.?) orelse {
                         return error.InvalidChoice;
                     };
-                    const child = try runRunnerTypeNonBlocking(alloc, runnertype, config, &runnerif, createviewprocessfn);
+                    const child = try runRunnerTypeNonBlocking(alloc, runnertype, config, &runnerif, createviewprocessfn, pushfn);
                     try runnerif.children.append(child);
                 }
             }
@@ -87,7 +88,7 @@ pub fn run(
                 _ = try child.wait();
             }
 
-            try runPostLaunchTask(alloc, *const Launch.Compound, compound, tasks);
+            try runPostLaunchTask(alloc, *const Launch.Compound, compound, tasks, pushfn);
         },
     }
     // not even sure if returning runner interface makes sense...
@@ -95,22 +96,39 @@ pub fn run(
     return runnerif;
 }
 
-fn runPreLaunchTask(alloc: std.mem.Allocator, T: type, launchdata: T, tasks: ?Task.TaskJson) !void {
+fn runPreLaunchTask(
+    alloc: std.mem.Allocator,
+    T: type,
+    launchdata: T,
+    tasks: ?Task.TaskJson,
+    pushfn: utils.PushFnProto,
+) !void {
     if (launchdata.preLaunchTask != null) {
-        try findRunTask(alloc, launchdata.preLaunchTask.?, tasks);
+        try findRunTask(alloc, launchdata.preLaunchTask.?, tasks, pushfn);
     }
 }
 
-fn runPostLaunchTask(alloc: std.mem.Allocator, T: type, launchdata: T, tasks: ?Task.TaskJson) !void {
+fn runPostLaunchTask(
+    alloc: std.mem.Allocator,
+    T: type,
+    launchdata: T,
+    tasks: ?Task.TaskJson,
+    pushfn: utils.PushFnProto,
+) !void {
     if (launchdata.postDebugTask != null) {
-        try findRunTask(alloc, launchdata.postDebugTask.?, tasks);
+        try findRunTask(alloc, launchdata.postDebugTask.?, tasks, pushfn);
     }
 }
 
-fn findRunTask(alloc: std.mem.Allocator, taskname: []const u8, tasks: ?Task.TaskJson) !void {
+fn findRunTask(
+    alloc: std.mem.Allocator,
+    taskname: []const u8,
+    tasks: ?Task.TaskJson,
+    pushfn: utils.PushFnProto,
+) !void {
     if (tasks != null) {
         if (tasks.?.find_by_label(taskname)) |task| {
-            try task.run_task(alloc);
+            try task.run_task(alloc, pushfn);
         }
     }
 }
@@ -120,21 +138,22 @@ fn runRunnerType(
     runtype: RunnerType,
     config: *const Launch.Configuration,
     runnerif: *Runner,
-    createviewprocessfn: fn ([]const u8) void,
+    createviewprocessfn: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
+    pushfn: utils.PushFnProto,
 ) !void {
     switch (runtype) {
         .debugpy => {
             // work out if we need to run a module or script...
-            try debugpy.run(alloc, config, runnerif, createviewprocessfn);
+            try debugpy.run(alloc, pushfn, config, runnerif, createviewprocessfn);
         },
         .python => {
-            try debugpy.run(alloc, config, runnerif, createviewprocessfn);
+            try debugpy.run(alloc, pushfn, config, runnerif, createviewprocessfn);
         },
         .cppdbg => {
-            try native.run(alloc, config, runnerif, createviewprocessfn);
+            try native.run(alloc, pushfn, config, runnerif, createviewprocessfn);
         },
         .cppvsdbg => {
-            try native.run(alloc, config, runnerif, createviewprocessfn);
+            try native.run(alloc, pushfn, config, runnerif, createviewprocessfn);
         },
     }
 }
@@ -144,21 +163,22 @@ fn runRunnerTypeNonBlocking(
     runtype: RunnerType,
     config: *const Launch.Configuration,
     runnerif: *Runner,
-    createviewprocessfn: fn ([]const u8) void,
+    createviewprocessfn: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
+    pushfn: utils.PushFnProto,
 ) !std.process.Child {
     switch (runtype) {
         .debugpy => {
             // work out if we need to run a module or script...
-            return debugpy.runNonBlocking(alloc, config, runnerif, createviewprocessfn);
+            return debugpy.runNonBlocking(alloc, pushfn, config, runnerif, createviewprocessfn);
         },
         .python => {
-            return debugpy.runNonBlocking(alloc, config, runnerif, createviewprocessfn);
+            return debugpy.runNonBlocking(alloc, pushfn, config, runnerif, createviewprocessfn);
         },
         .cppdbg => {
-            return native.runNonBlocking(alloc, config, runnerif, createviewprocessfn);
+            return native.runNonBlocking(alloc, pushfn, config, runnerif, createviewprocessfn);
         },
         .cppvsdbg => {
-            return native.runNonBlocking(alloc, config, runnerif, createviewprocessfn);
+            return native.runNonBlocking(alloc, pushfn, config, runnerif, createviewprocessfn);
         },
     }
 }

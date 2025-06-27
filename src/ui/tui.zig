@@ -1,10 +1,12 @@
 const std = @import("std");
-const vaxis = @import("vaxis");
-const vxfw = vaxis.vxfw;
-const mutiStyleText = @import("tui/MultiStyleText.zig");
-const graphemedata = vaxis.grapheme.GraphemeData;
-const displaywidth = @import("DisplayWidth");
+pub const vaxis = @import("vaxis");
+pub const outputview = @import("tui/outputview.zig");
+pub const mutiStyleText = @import("tui/multistyletext.zig");
 
+pub const vxfw = vaxis.vxfw;
+const Unicode = vaxis.Unicode;
+const graphemedata = vaxis.grapheme.GraphemeData;
+pub const Output = outputview.Output;
 /// Our main application state
 // const Model = struct {
 //     /// State of the counter
@@ -118,6 +120,7 @@ const displaywidth = @import("DisplayWidth");
 // };
 
 const Model = struct {
+    output_view: *outputview.OutputView,
     // views: vxfw.Surface,
     // views -> view-group -> tab-group && output-group
 
@@ -133,15 +136,43 @@ const Model = struct {
     /// This function will be called from the vxfw runtime.
     fn typeErasedEventHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         const self: *Model = @ptrCast(@alignCast(ptr));
+
+        // For some reason tick doesn't seem to be triggered
+        if (!keep_running.load(.seq_cst)) {
+            ctx.quit = true;
+            return;
+        }
+
         switch (event) {
-            .init => return ctx.requestFocus(self.widget()),
+            .init => {
+                try self.output_view.eventHandler(ctx, event);
+                try self.output_view.focused_output.?.handleEvent(ctx, event);
+            },
             .key_press => |key| {
-                if (key.matches('c', .{ .ctrl = true })) {
+                if (key.matches('c', .{ .ctrl = false })) {
+                    // This will current kill the tui but not kill the program...
                     ctx.quit = true;
                     return;
+                } else if (key.matches('w', .{})) {
+                    self.output_view.focus_prev();
+                    try ctx.requestFocus(self.output_view.focused_output.?.widget());
+                    return ctx.consumeAndRedraw();
+                } else if (key.matches('e', .{})) {
+                    self.output_view.focus_next();
+                    try ctx.requestFocus(self.output_view.focused_output.?.widget());
+                    return ctx.consumeAndRedraw();
+                } else if (key.matches('q', .{ .ctrl = false })) {
+                    try ctx.addCmd(.queue_refresh);
                 }
             },
-            .focus_in => return ctx.requestFocus(self.widget()),
+            .mouse => |mouse| {
+                std.debug.print("model: mouse type {?}\n", .{mouse.type});
+                std.debug.print("mouse x {?}\n", .{mouse.col});
+                std.debug.print("mouse y {?}\n", .{mouse.row});
+            },
+            .focus_in => {
+                return ctx.requestFocus(self.widget());
+            },
             else => {},
         }
     }
@@ -150,42 +181,20 @@ const Model = struct {
         const self: *Model = @ptrCast(@alignCast(ptr));
         const max_size = ctx.max.size();
 
-        // const count_text = try std.fmt.allocPrint(ctx.arena, "{d}", .{self.count});
-        // const text: vxfw.Text = .{ .text = count_text };
-        const text: vxfw.Text = .{ .text = "aaaaa" };
-        const text_child: vxfw.SubSurface = .{
-            .origin = .{ .row = 1, .col = 1 },
-            .surface = try text.draw(ctx),
-        };
-
-        const multitext: mutiStyleText.MultiStyleText = .{};
-        try multitext.append(ctx.arena, .{
-            .bytes = "A string to be render in the output widget...\n",
-            .gd = try graphemedata.init(ctx.arena),
-            .wd = try displaywidth.DisplayWidthData.init(ctx.arena),
+        const child_ctx = ctx.withConstraints(ctx.min, .{
+            .width = 150,
+            .height = 100,
         });
 
-        const multitext_child: vxfw.SubSufrace = .{
-            .origin = .{ .row = 5, .col = 5 },
-            .surface = try text.typeErasedDrawFn(ctx),
+        const output_child: vxfw.SubSurface = .{
+            .origin = .{ .row = 1, .col = 1 },
+            .surface = try self.output_view.draw(child_ctx),
         };
-        // const text_child: vxfw.SubSurface = .{
-        //     .origin = .{ .row = 0, .col = 0 },
-        //     .surface = try text.draw(ctx),
-        // };
 
-        // const button_child: vxfw.SubSurface = .{
-        //     .origin = .{ .row = 2, .col = 0 },
-        //     .surface = try self.button.draw(ctx.withConstraints(
-        //         ctx.min,
-        //         .{ .width = 16, .height = 3 },
-        //     )),
-        // };
+        const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
+        children[0] = output_child;
 
-        const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
-        children[0] = text_child;
-        children[1] = multitext_child;
-        // children[1] = button_child;
+        //return try vxfw.Surface.initWithChildren(ctx.arena, self.widget(), vxfw.Size{ .height = 50, .width = 10 }, children);
 
         return .{
             // A Surface must have a size. Our root widget is the size of the screen
@@ -197,27 +206,83 @@ const Model = struct {
     }
 };
 
-pub fn start_tui(alloc: std.mem.Allocator) !void {
-    var app = try vxfw.App.init(alloc);
+var model: *Model = undefined;
+var unicode: *Unicode = undefined;
+
+var keep_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true);
+var thread: ?std.Thread = null;
+var app: vxfw.App = undefined;
+fn run_tui(alloc: std.mem.Allocator) !void {
+    app = try vxfw.App.init(alloc);
     defer app.deinit();
 
-    // We heap allocate our model because we will require a stable pointer to it in our Button
-    // widget
-    const model = try alloc.create(Model);
+    app.vx.refresh = true;
+    unicode = &app.vx.unicode;
+
+    const output_view = try outputview.OutputView.init(alloc);
+    defer output_view.deinit();
+
+    try output_view.add_output(try Output.init(alloc, "default_output"));
+
+    model = try alloc.create(Model);
+    model.* = .{
+        .output_view = output_view,
+    };
     defer alloc.destroy(model);
 
-    // Set the initial state of our button
-    model.* = .{
-        // .views = .{
-        //     .{},
-        // },
-        // .count = 0,
-        // .button = .{
-        //     .label = "Click me!",
-        //     .onClick = Model.onClick,
-        //     .userdata = model,
-        // },
-    };
-
+    //vxfw.DrawContext.init(unicode, .unicode);
+    std.debug.print("color_scheme_updates : {?}\n", .{app.vx.caps.color_scheme_updates});
+    std.debug.print("explicit_width : {?}\n", .{app.vx.caps.explicit_width});
+    std.debug.print("kitty_graphics : {?}\n", .{app.vx.caps.kitty_graphics});
+    std.debug.print("kitty_keyboard : {?}\n", .{app.vx.caps.kitty_keyboard});
+    std.debug.print("rgb : {?}\n", .{app.vx.caps.rgb});
+    std.debug.print("scaled_text : {?}\n", .{app.vx.caps.scaled_text});
+    std.debug.print("sgr_pixels : {?}\n", .{app.vx.caps.sgr_pixels});
+    try app.vx.setMouseMode(app.tty.anyWriter(), true);
     try app.run(model.widget(), .{});
+}
+
+pub fn start_tui(alloc: std.mem.Allocator) !void {
+    thread = try std.Thread.spawn(.{ .allocator = alloc }, run_tui, .{alloc});
+}
+
+pub fn stop_tui() void {
+    if (thread) |t| {
+        keep_running.store(false, .seq_cst); // Signal the thread to stop
+        t.join();
+    }
+}
+
+pub fn createProcessView(alloc: std.mem.Allocator, processname: []const u8) std.mem.Allocator.Error!void {
+    // check that a process with the same name doesn't exist
+    const p_output = try Output.init(alloc, processname);
+    errdefer p_output.deinit();
+
+    std.debug.print("creating output: {s}\n", .{processname});
+    try model.output_view.add_output(p_output);
+}
+
+pub fn killProcessView(processname: []const u8) void {
+    _ = processname;
+}
+
+pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Allocator.Error!void {
+    _ = alloc;
+    _ = jsonStr;
+}
+
+pub fn pushLogging(alloc: std.mem.Allocator, processname: []const u8, buffer: []const u8) std.mem.Allocator.Error!void {
+    _ = alloc;
+
+    // This is not thread safe atm
+    const target_output = model.output_view.get_output(processname);
+    if (target_output) |output| {
+        if (keep_running.load(.seq_cst)) {
+            try output.text.append(model.output_view.alloc, .{
+                .bytes = buffer,
+                .gd = &unicode.width_data.g_data,
+                .unicode = unicode,
+            });
+        }
+    }
 }

@@ -11,9 +11,10 @@ const python_default_path = switch (builtin.target.os.tag) {
 
 pub fn run(
     alloc: std.mem.Allocator,
+    pushfn: utils.PushFnProto,
     config: *const launch.Configuration,
     _: *runner.Runner,
-    createprocessview: fn ([]const u8) void,
+    createprocessview: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
 ) !void {
     var envmap: ?std.process.EnvMap = null;
     if (config.env) |envs| {
@@ -27,22 +28,22 @@ pub fn run(
 
     if (config.module) |*module| {
         if (config.args) |*args| {
-            createprocessview(module.*);
-            return try run_python_module(alloc, config, module.*, args.*, envmap);
+            try createprocessview(alloc, module.*);
+            return try run_python_module(alloc, pushfn, config, module.*, args.*, envmap);
         } else {
             const empty: []const []const u8 = &[_][]const u8{};
-            createprocessview(module.*);
-            return try run_python_module(alloc, config, module.*, empty, envmap);
+            try createprocessview(alloc, module.*);
+            return try run_python_module(alloc, pushfn, config, module.*, empty, envmap);
         }
     }
     if (config.program) |*program| {
         if (config.args) |*args| {
-            createprocessview(program.*);
-            return try run_python_script(alloc, config, program.*, args.*, envmap);
+            try createprocessview(alloc, program.*);
+            return try run_python_script(alloc, pushfn, config, program.*, args.*, envmap);
         } else {
             const empty: []const []const u8 = &[_][]const u8{};
-            createprocessview(program.*);
-            return try run_python_script(alloc, config, program.*, empty, envmap);
+            try createprocessview(alloc, program.*);
+            return try run_python_script(alloc, pushfn, config, program.*, empty, envmap);
         }
     } else {
         return error.MissingConfigurationFields;
@@ -51,9 +52,10 @@ pub fn run(
 
 pub fn runNonBlocking(
     alloc: std.mem.Allocator,
+    pushfn: utils.PushFnProto,
     config: *const launch.Configuration,
     _: *runner.Runner,
-    createprocessview: fn ([]const u8) void,
+    createprocessview: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
 ) !std.process.Child {
     var envmap: ?std.process.EnvMap = null;
     if (config.env) |envs| {
@@ -68,22 +70,22 @@ pub fn runNonBlocking(
     // TODO - if module and program set (program points to the python exe to run)
     if (config.module) |*module| {
         if (config.args) |*args| {
-            createprocessview((module.*));
-            return try run_python_module_nowait(alloc, config, module.*, args.*, envmap);
+            try createprocessview(alloc, module.*);
+            return try run_python_module_nowait(alloc, pushfn, config, module.*, args.*, envmap);
         } else {
             const empty: []const []const u8 = &[_][]const u8{};
-            createprocessview((module.*));
-            return try run_python_module_nowait(alloc, config, module.*, empty, envmap);
+            try createprocessview(alloc, module.*);
+            return try run_python_module_nowait(alloc, pushfn, config, module.*, empty, envmap);
         }
     }
     if (config.program) |*program| {
         if (config.args) |*args| {
-            createprocessview((program.*));
-            return try run_python_script_nowait(alloc, config, program.*, args.*, envmap);
+            try createprocessview(alloc, program.*);
+            return try run_python_script_nowait(alloc, pushfn, config, program.*, args.*, envmap);
         } else {
             const empty: []const []const u8 = &[_][]const u8{};
-            createprocessview((program.*));
-            return try run_python_script_nowait(alloc, config, program.*, empty, envmap);
+            try createprocessview(alloc, program.*);
+            return try run_python_script_nowait(alloc, pushfn, config, program.*, empty, envmap);
         }
     } else {
         return error.MissingConfigurationFields;
@@ -92,6 +94,7 @@ pub fn runNonBlocking(
 
 fn run_python_script_nowait(
     allocator: std.mem.Allocator,
+    pushfn: utils.PushFnProto,
     config: *const launch.Configuration,
     script: []const u8,
     args: []const []const u8,
@@ -115,15 +118,16 @@ fn run_python_script_nowait(
     }
 
     try child.spawn();
-    std.debug.print("Spawning child process: {d}\n", .{child.id});
+    //std.debug.print("Spawning child process: {d}\n", .{child.id});
 
     const dbgview_name = if (config.consoleTitle != null) config.consoleTitle.? else script;
-    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, child, dbgview_name });
+    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, dbgview_name });
     return child;
 }
 
 fn run_python_script(
     allocator: std.mem.Allocator,
+    pushfn: utils.PushFnProto,
     config: *const launch.Configuration,
     script: []const u8,
     args: []const []const u8,
@@ -146,36 +150,37 @@ fn run_python_script(
         child.env_map = e;
     }
     child.spawn() catch |e| {
-        std.debug.print("Spawning module {any} failed.\n", .{e});
+        //std.debug.print("Spawning module {any} failed.\n", .{e});
         return e;
     };
 
     const dbgview_name = if (config.consoleTitle != null) config.consoleTitle.? else script;
-    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, child, dbgview_name });
+    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, dbgview_name });
 
-    const term = child.wait() catch |e| {
-        std.debug.print("Waiting for child {any} failed.\n", .{e});
+    _ = child.wait() catch |e| {
+        //std.debug.print("Waiting for child {any} failed.\n", .{e});
         return e;
     };
 
-    switch (term) {
-        .Exited => |v| {
-            std.debug.print("Python exited with code {d}\n", .{v});
-        },
-        .Signal => |v| {
-            std.debug.print("Python signaled with code {d}\n", .{v});
-        },
-        .Stopped => |v| {
-            std.debug.print("Python stopped with code: {d}\n", .{v});
-        },
-        .Unknown => |v| {
-            std.debug.print("Unknown process error: {d}\n", .{v});
-        },
-    }
+    //switch (term) {
+    //    .Exited => |v| {
+    //        //std.debug.print("Python exited with code {d}\n", .{v});
+    //    },
+    //    .Signal => |v| {
+    //        //std.debug.print("Python signaled with code {d}\n", .{v});
+    //    },
+    //    .Stopped => |v| {
+    //        //std.debug.print("Python stopped with code: {d}\n", .{v});
+    //    },
+    //    .Unknown => |v| {
+    //        //std.debug.print("Unknown process error: {d}\n", .{v});
+    //    },
+    //}
 }
 
 pub fn run_python_module_nowait(
     allocator: std.mem.Allocator,
+    pushfn: utils.PushFnProto,
     config: *const launch.Configuration,
     module: []const u8,
     args: []const []const u8,
@@ -204,15 +209,16 @@ pub fn run_python_module_nowait(
     }
 
     try child.spawn();
-    std.debug.print("Spawning child process: {d}\n", .{child.id});
+    //std.debug.print("Spawning child process: {d}\n", .{child.id});
 
     const dbgview_name = if (config.consoleTitle != null) config.consoleTitle.? else module;
-    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, child, dbgview_name });
+    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, dbgview_name });
     return child;
 }
 
 pub fn run_python_module(
     allocator: std.mem.Allocator,
+    pushfn: utils.PushFnProto,
     config: *const launch.Configuration,
     module: []const u8,
     args: []const []const u8,
@@ -240,30 +246,30 @@ pub fn run_python_module(
         child.env_map = e;
     }
     child.spawn() catch |e| {
-        std.debug.print("Spawning module {any} failed.\n", .{e});
+        //std.debug.print("Spawning module {any} failed.\n", .{e});
         return e;
     };
 
     const dbgview_name = if (config.consoleTitle != null) config.consoleTitle.? else module;
-    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, child, dbgview_name });
+    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, dbgview_name });
 
-    const term = child.wait() catch |e| {
-        std.debug.print("Waiting for child {any} failed.\n", .{e});
+    _ = child.wait() catch |e| {
+        //std.debug.print("Waiting for child {any} failed.\n", .{e});
         return e;
     };
 
-    switch (term) {
-        .Exited => |v| {
-            std.debug.print("Python exited with code {d}\n", .{v});
-        },
-        .Signal => |v| {
-            std.debug.print("Python signaled with code {d}\n", .{v});
-        },
-        .Stopped => |v| {
-            std.debug.print("Python stopped with code: {d}\n", .{v});
-        },
-        .Unknown => |v| {
-            std.debug.print("Unknown process error: {d}\n", .{v});
-        },
-    }
+    //switch (term) {
+    //    .Exited => |v| {
+    //        //std.debug.print("Python exited with code {d}\n", .{v});
+    //    },
+    //    .Signal => |v| {
+    //        //std.debug.print("Python signaled with code {d}\n", .{v});
+    //    },
+    //    .Stopped => |v| {
+    //        //std.debug.print("Python stopped with code: {d}\n", .{v});
+    //    },
+    //    .Unknown => |v| {
+    //        //std.debug.print("Unknown process error: {d}\n", .{v});
+    //    },
+    //}
 }

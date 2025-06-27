@@ -14,7 +14,7 @@ pub const Task = struct {
     presentation: ?TaskPresentation = null,
     problemMatcher: ?[]const u8 = null,
 
-    pub fn run_task(self: *const Task, allocator: std.mem.Allocator) !void {
+    pub fn run_task(self: *const Task, allocator: std.mem.Allocator, pushfn: utils.PushFnProto) !void {
         var argv: [][]const u8 = try allocator.alloc([]const u8, self.args.?.len + 1);
         defer allocator.free(argv);
         argv[0] = self.command.?;
@@ -29,31 +29,31 @@ pub const Task = struct {
         child.stdout_behavior = std.process.Child.StdIo.Pipe;
         child.stderr_behavior = std.process.Child.StdIo.Pipe;
         child.spawn() catch |e| {
-            std.debug.print("Spawning task {any} failed.\n", .{e});
+            //std.debug.print("Spawning task {any} failed.\n", .{e});
             return e;
         };
 
-        _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, child, self.label.? });
+        _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, self.label.? });
 
-        const term = child.spawnAndWait() catch |e| {
-            std.debug.print("Spawning module {any} failed.\n", .{e});
+        _ = child.spawnAndWait() catch |e| {
+            //std.debug.print("Spawning module {any} failed.\n", .{e});
             return e;
         };
 
-        switch (term) {
-            .Exited => |v| {
-                std.debug.print("Task exited with code {d}\n", .{v});
-            },
-            .Signal => |v| {
-                std.debug.print("Task signaled with code {d}\n", .{v});
-            },
-            .Stopped => |v| {
-                std.debug.print("Task stopped with code: {d}\n", .{v});
-            },
-            .Unknown => |v| {
-                std.debug.print("Task returned unknown process error: {d}\n", .{v});
-            },
-        }
+        //switch (term) {
+        //    .Exited => |v| {
+        //        //std.debug.print("Task exited with code {d}\n", .{v});
+        //    },
+        //    .Signal => |v| {
+        //        //std.debug.print("Task signaled with code {d}\n", .{v});
+        //    },
+        //    .Stopped => |v| {
+        //        //std.debug.print("Task stopped with code: {d}\n", .{v});
+        //    },
+        //    .Unknown => |v| {
+        //        //std.debug.print("Task returned unknown process error: {d}\n", .{v});
+        //    },
+        //}
     }
 };
 
@@ -62,8 +62,8 @@ pub const TaskJson = struct {
     tasks: ?[]const Task,
     arena: std.heap.ArenaAllocator,
 
-    pub fn init(alloc_gpa: std.mem.Allocator) !TaskJson {
-        var arena = std.heap.ArenaAllocator.init(alloc_gpa);
+    pub fn init(alloc: std.mem.Allocator) !TaskJson {
+        var arena = std.heap.ArenaAllocator.init(alloc);
         errdefer arena.deinit();
 
         const task = TaskJson{ .arena = arena, .tasks = null, .version = "" };
@@ -91,7 +91,7 @@ pub const TaskJson = struct {
         const max_bytes = 1024 * 1024;
         const data = try std.fs.cwd().readFileAlloc(self.arena.child_allocator, filepath, max_bytes);
         defer self.arena.child_allocator.free(data);
-        std.debug.print("\n{s}\n", .{data});
+        //std.debug.print("\n{s}\n", .{data});
 
         var parsed = try std.json.parseFromSlice(std.json.Value, self.arena.child_allocator, data, .{});
         defer parsed.deinit();
