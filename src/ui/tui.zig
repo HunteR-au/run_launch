@@ -1,12 +1,13 @@
 const std = @import("std");
 pub const vaxis = @import("vaxis");
-pub const outputview = @import("tui/outputview.zig");
+pub const view = @import("tui/view.zig");
 pub const mutiStyleText = @import("tui/multistyletext.zig");
 
+pub const OutputView = view.OutputView;
 pub const vxfw = vaxis.vxfw;
 const Unicode = vaxis.Unicode;
 const graphemedata = vaxis.grapheme.GraphemeData;
-pub const Output = outputview.Output;
+pub const Output = view.Output;
 /// Our main application state
 // const Model = struct {
 //     /// State of the counter
@@ -120,7 +121,8 @@ pub const Output = outputview.Output;
 // };
 
 const Model = struct {
-    output_view: *outputview.OutputView,
+    modelview: *view.View,
+    output_view: *OutputView,
     // views: vxfw.Surface,
     // views -> view-group -> tab-group && output-group
 
@@ -188,7 +190,7 @@ const Model = struct {
 
         const output_child: vxfw.SubSurface = .{
             .origin = .{ .row = 1, .col = 1 },
-            .surface = try self.output_view.draw(child_ctx),
+            .surface = try self.modelview.draw(child_ctx),
         };
 
         const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
@@ -219,14 +221,21 @@ fn run_tui(alloc: std.mem.Allocator) !void {
     app.vx.refresh = true;
     unicode = &app.vx.unicode;
 
-    const output_view = try outputview.OutputView.init(alloc);
-    defer output_view.deinit();
+    const model_view = try view.View.init(alloc);
+    //defer model_view.deinit();
+
+    const output_view = try OutputView.init(alloc);
+    const output_view2 = try OutputView.init(alloc);
+    try model_view.add_outputview(output_view, 0);
+    try model_view.add_outputview(output_view2, 1);
 
     try output_view.add_output(try Output.init(alloc, "default_output"));
+    try output_view2.add_output(try Output.init(alloc, "default_output2"));
 
     model = try alloc.create(Model);
     model.* = .{
         .output_view = output_view,
+        .modelview = model_view,
     };
     defer alloc.destroy(model);
 
@@ -240,6 +249,9 @@ fn run_tui(alloc: std.mem.Allocator) !void {
     std.debug.print("sgr_pixels : {?}\n", .{app.vx.caps.sgr_pixels});
     try app.vx.setMouseMode(app.tty.anyWriter(), true);
     try app.run(model.widget(), .{});
+    defer keep_running.store(false, .seq_cst);
+    std.debug.print("APP FINISHED!\n", .{});
+    // set the singal that the app as stopped
 }
 
 pub fn start_tui(alloc: std.mem.Allocator) !void {
@@ -259,7 +271,8 @@ pub fn createProcessView(alloc: std.mem.Allocator, processname: []const u8) std.
     errdefer p_output.deinit();
 
     std.debug.print("creating output: {s}\n", .{processname});
-    try model.output_view.add_output(p_output);
+    try model.modelview.outputviews.items[0].add_output(p_output);
+    //try model.output_view.add_output(p_output);
 }
 
 pub fn killProcessView(processname: []const u8) void {
@@ -275,14 +288,25 @@ pub fn pushLogging(alloc: std.mem.Allocator, processname: []const u8, buffer: []
     _ = alloc;
 
     // This is not thread safe atm
-    const target_output = model.output_view.get_output(processname);
+    std.debug.print("ping1\n", .{});
+    std.debug.print("{p}\n", .{&model});
+    std.debug.print("{p}\n", .{&model.modelview});
+    //const target_output = model.modelview.outputviews.items[0].get_output(processname);
+    const mv = model.modelview;
+    std.debug.print("ping1.1\n", .{});
+    const ov = mv.outputviews.items[0];
+    std.debug.print("ping1.2\n", .{});
+    const target_output = ov.get_output(processname);
+    std.debug.print("ping2\n", .{});
     if (target_output) |output| {
         if (keep_running.load(.seq_cst)) {
+            std.debug.print("ping3\n", .{});
             try output.text.append(model.output_view.alloc, .{
                 .bytes = buffer,
                 .gd = &unicode.width_data.g_data,
                 .unicode = unicode,
             });
+            std.debug.print("ping4\n", .{});
         }
     }
 }

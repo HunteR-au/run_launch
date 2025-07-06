@@ -14,11 +14,15 @@ pub const BufferWriter = struct {
     pub const Writer = std.io.GenericWriter(@This(), Error, write);
 
     allocator: std.mem.Allocator,
+    m: std.Thread.Mutex,
     buffer: *MultiStyleText,
     gd: *const vaxis.grapheme.GraphemeData,
     unicode: *const Unicode,
 
     pub fn write(self: @This(), bytes: []const u8) Error!usize {
+        self.m.lock();
+        defer self.m.unlock();
+
         try self.buffer.append(self.allocator, .{
             .bytes = bytes,
             .gd = self.gd,
@@ -46,6 +50,7 @@ pub const MultiStyleText = struct {
 
     pub const Error = error{OutOfMemory};
 
+    m: std.Thread.Mutex = .{},
     grapheme: std.MultiArrayList(vaxis.grapheme.Grapheme) = .{},
     content: std.ArrayListUnmanaged(u8) = .{},
     style_list: StyleList = StyleList.empty,
@@ -77,12 +82,18 @@ pub const MultiStyleText = struct {
 
     // Replace the content of buffers, all previous buffer data is lost
     pub fn update(self: *@This(), alloc: std.mem.Allocator, content: Content) Error!void {
+        self.m.lock();
+        defer self.m.unlock();
+
         self.clear(alloc);
         errdefer self.clear(alloc);
         try self.append(alloc, content);
     }
 
     pub fn append(self: *@This(), alloc: std.mem.Allocator, content: Content) Error!void {
+        self.m.lock();
+        defer self.m.unlock();
+
         var cols: usize = self.last_cols;
         var iter = vaxis.grapheme.Iterator.init(content.bytes, content.gd);
 
@@ -108,12 +119,18 @@ pub const MultiStyleText = struct {
 
     // Clears all styling data.
     pub fn clearStyle(self: *@This(), allocator: std.mem.Allocator) void {
+        self.m.lock();
+        defer self.m.unlock();
+
         self.style_list.deinit(allocator);
         self.style_map.deinit(allocator);
     }
 
     /// Update style for range of the buffer contents.
     pub fn updateStyle(self: *@This(), allocator: std.mem.Allocator, style: Style) Error!void {
+        self.m.lock();
+        defer self.m.unlock();
+
         const style_index = blk: {
             for (self.style_list.items, 0..) |s, i| {
                 if (std.meta.eql(s, style.style)) {
@@ -132,6 +149,13 @@ pub const MultiStyleText = struct {
         return self.content.items;
     }
 
+    pub fn copyText(self: *@This(), alloc: std.mem.Allocator) ![]u8 {
+        self.m.lock();
+        defer self.m.unlock();
+
+        return try alloc.dupe(u8, self.content.items);
+    }
+
     pub fn writer(
         self: *@This(),
         alloc: std.mem.Allocator,
@@ -141,6 +165,7 @@ pub const MultiStyleText = struct {
         return .{
             .context = .{
                 .allocator = alloc,
+                .m = self.m,
                 .buffer = self,
                 .gd = gd,
                 .unicode = unicode,

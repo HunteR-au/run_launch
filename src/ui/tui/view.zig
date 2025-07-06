@@ -24,7 +24,7 @@ pub const View = struct {
     alloc: std.mem.Allocator,
     outputviews: OutputViewList,
     flexitems: FlexItemList,
-    flexcol: vxfw.FlexColumn,
+    flexrow: vxfw.FlexRow,
 
     pub fn init(alloc: std.mem.Allocator) std.mem.Allocator.Error!*View {
         const v = try alloc.create(View);
@@ -32,16 +32,16 @@ pub const View = struct {
             .alloc = alloc,
             .outputviews = OutputViewList.init(alloc),
             .flexitems = FlexItemList.init(alloc),
-            .flexcol = .{ .children = &[_]vxfw.FlexItem{} },
+            .flexrow = .{ .children = &[_]vxfw.FlexItem{} },
         };
         return v;
     }
 
     pub fn deinit(self: *View) void {
+        std.debug.print("deinit view", .{});
         // free any outputviews this view contains
         for (self.outputviews.items) |t| {
-            t.outputview.deinit();
-            self.alloc.destroy(t.flexitex);
+            t.deinit();
         }
         self.outputviews.deinit();
         self.flexitems.deinit();
@@ -148,11 +148,11 @@ pub const View = struct {
     pub fn draw(self: *View, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const max_size = ctx.max.size();
 
-        self.flexcol.children = self.flexitems.items;
+        self.flexrow.children = self.flexitems.items;
 
         const outputview_child: vxfw.SubSurface = .{
             .origin = .{ .row = 0, .col = 0 },
-            .surface = try self.flexcol.draw(ctx),
+            .surface = try self.flexrow.draw(ctx),
         };
         const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
         children[0] = outputview_child;

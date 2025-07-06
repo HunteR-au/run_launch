@@ -187,10 +187,20 @@ pub const OutputView = struct {
     }
 
     pub fn draw(self: *OutputView, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-        const max_size = ctx.max.size();
+        const max_size = ctx.max;
 
-        const height = if (max_size.height < 20) max_size.height else 20;
-        const width = if (max_size.width < 100) max_size.height else 100;
+        var height: u16 = undefined;
+        var width: u16 = undefined;
+        if (max_size.height) |h| {
+            height = if (h < 20) h else 20;
+        } else {
+            height = 20;
+        }
+        if (max_size.width) |w| {
+            width = if (w < 100) w else 100;
+        } else {
+            width = 100;
+        }
 
         const self_ctx = ctx.withConstraints(
             .{},

@@ -92,9 +92,9 @@ pub const Output = struct {
     fn getScrollItems(ptr: *const anyopaque, idx: usize, _: usize) ?vxfw.Widget {
         const self: *Output = @constCast(@ptrCast(@alignCast(ptr)));
         if (idx == 0) {
-            self.temp = .{
-                .text = self.text.content.items,
-            };
+            //self.temp = .{
+            //    .text = self.text.content.items,
+            //};
             return self.temp.widget();
         } else return null;
         //if (idx == 0) {
@@ -159,6 +159,10 @@ pub const Output = struct {
 
     pub fn draw(self: *Output, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const max_size = ctx.max.size();
+
+        self.temp = .{
+            .text = try self.text.copyText(ctx.arena),
+        };
 
         //self.border = .{ .child = self.scroll_bars.widget() };
         const border_child: vxfw.SubSurface = .{
