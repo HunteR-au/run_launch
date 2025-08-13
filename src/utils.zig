@@ -1,6 +1,4 @@
 const std = @import("std");
-//const uiview = @import("ui/uiview.zig");
-//const tuiview = @import("tui");
 const builtin = @import("builtin");
 
 pub const EnvTuple = struct {
@@ -42,6 +40,73 @@ pub fn parse_config_env(allocator: std.mem.Allocator, env_object: std.json.Objec
         }
     }
     return envs;
+}
+
+pub fn parseTripleInt(input: []const u8) ![3]u32 {
+    var parts: [3]u32 = undefined;
+    var part_index: usize = 0;
+    var start: usize = 0;
+
+    var i: usize = 0;
+    while (i <= input.len) {
+        if (i == input.len or input[i] == ',') {
+            if (part_index >= 3) return error.TooManyParts;
+
+            const slice = input[start..i];
+            if (slice.len == 0) return error.InvalidFormat;
+
+            parts[part_index] = std.fmt.parseInt(u32, slice, 10) catch return error.InvalidNumber;
+            part_index += 1;
+            start = i + 1;
+        }
+        i += 1;
+    }
+
+    if (part_index != 3) return error.TooFewParts;
+    return parts;
+}
+
+pub fn parseArgsLineWithQuoteGroups(alloc: std.mem.Allocator, input: []const u8) ![]const []const u8 {
+    var list = std.ArrayList([]const u8).init(alloc);
+    var i: usize = 0;
+
+    while (i < input.len) {
+        // Skip whitespace
+        while (i < input.len and std.ascii.isWhitespace(input[i])) : (i += 1) {}
+
+        if (i >= input.len) break;
+
+        // Handle quoted string with escapes
+        if (input[i] == '"') {
+            i += 1;
+            var buffer = std.ArrayList(u8).init(alloc);
+
+            while (i < input.len) {
+                if (input[i] == '\\') {
+                    i += 1;
+                    if (i < input.len) {
+                        try buffer.append(input[i]);
+                        i += 1;
+                    }
+                } else if (input[i] == '"') {
+                    i += 1;
+                    break;
+                } else {
+                    try buffer.append(input[i]);
+                    i += 1;
+                }
+            }
+
+            try list.append(try buffer.toOwnedSlice());
+        } else {
+            // Handle unquoted work
+            const start = i;
+            while (i < input.len and !std.ascii.isWhitespace(input[i])) : (i += 1) {}
+            try list.append(try alloc.dupe(u8, input[start..i]));
+        }
+    }
+
+    return list.toOwnedSlice();
 }
 
 pub fn create_env_map(alloc: std.mem.Allocator, envtuples: []const EnvTuple) !std.process.EnvMap {
@@ -141,4 +206,76 @@ pub fn pullpushLoop(
             poller.fifo(.stderr).discard(stderr.len);
         }
     }
+}
+
+pub fn cloneHashMap(
+    comptime K: type,
+    comptime V: type,
+    comptime Context: type,
+    comptime LoadPercentage: comptime_float,
+    alloc: std.mem.Allocator,
+    source: *std.HashMap(K, V, Context, LoadPercentage),
+) !std.HashMap(K, V, Context, LoadPercentage) {
+    var target = std.HashMap(K, V, Context, LoadPercentage).init(alloc);
+
+    var it = source.iterator();
+    while (it.next()) |entry| {
+        try target.put(entry.key_ptr.*, entry.value_ptr.*);
+    }
+
+    return target;
+}
+
+const testing = std.testing;
+test "parseArgsLineWithQuoteGroups: with quotes" {
+    const alloc = testing.allocator_instance.allocator();
+
+    const results = try parseArgsLineWithQuoteGroups(alloc, "arg1 arg2 \"arg3 arg3\"");
+    defer {
+        for (results) |s| alloc.free(s);
+        alloc.free(results);
+    }
+
+    try testing.expectEqualStrings("arg1", results[0]);
+    try testing.expectEqualStrings("arg2", results[1]);
+    try testing.expectEqualStrings("arg3 arg3", results[2]);
+}
+
+test "parseArgsLineWithQuoteGroups: with escaped quotes" {
+    const alloc = testing.allocator_instance.allocator();
+
+    const results = try parseArgsLineWithQuoteGroups(alloc, "arg1 \"\\\"quote\\\" not quote\"");
+    defer {
+        for (results) |s| alloc.free(s);
+        alloc.free(results);
+    }
+
+    try testing.expectEqualStrings("arg1", results[0]);
+    try testing.expectEqualStrings("\"quote\" not quote", results[1]);
+}
+
+test "parseTripleInt" {
+    const input1 = "1,2,3";
+    const parts1 = try parseTripleInt(input1);
+    const expected1: [3]u32 = .{ 1, 2, 3 };
+
+    const input2 = "255,255,255";
+    const parts2 = try parseTripleInt(input2);
+    const expected2: [3]u32 = .{ 255, 255, 255 };
+
+    const input3 = "1,2";
+    const parts3 = parseTripleInt(input3);
+
+    const input4 = "1,2,3,4";
+    const parts4 = parseTripleInt(input4);
+
+    const input5 = "001,100,3";
+    const parts5 = try parseTripleInt(input5);
+    const expected5: [3]u32 = .{ 1, 100, 3 };
+
+    try testing.expectEqualSlices(u32, &expected1, &parts1);
+    try testing.expectEqualSlices(u32, &expected2, &parts2);
+    try testing.expectError(error.TooFewParts, parts3);
+    try testing.expectError(error.TooManyParts, parts4);
+    try testing.expectEqualSlices(u32, &expected5, &parts5);
 }

@@ -1,5 +1,5 @@
 const std = @import("std");
-const utils = @import("../utils.zig");
+const utils = @import("utils");
 const runner = @import("runner.zig");
 const launch = @import("../launch.zig");
 const builtin = @import("builtin");

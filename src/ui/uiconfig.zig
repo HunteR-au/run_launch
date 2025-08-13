@@ -201,7 +201,7 @@ pub fn parseConfigs(
 
     const userConfigPath = switch (builtin.target.os.tag) {
         .windows => "\\%userprofile%\\.debugUi.json",
-        else => null,
+        else => "~\\.debugUi.json",
     };
 
     const userConfig: ?std.fs.File = blk2: {

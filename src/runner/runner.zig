@@ -1,5 +1,5 @@
 const std = @import("std");
-const utils = @import("../utils.zig");
+const utils = @import("utils");
 const Launch = @import("../launch.zig");
 const Task = @import("../task.zig");
 const debugpy = @import("pydebug.zig");
@@ -47,7 +47,7 @@ pub fn run(
     switch (match) {
         .config => |config| {
             // check if there is a preLaunchTask to run
-            try runPreLaunchTask(alloc, *const Launch.Configuration, config, tasks, pushfn);
+            try runPreLaunchTask(alloc, *const Launch.Configuration, config, tasks, createviewprocessfn, pushfn);
             // if (config.preLaunchTask != null) {
             //     try findRunTask(alloc, config.preLaunchTask.?, tasks);
             // }
@@ -65,7 +65,7 @@ pub fn run(
             // }
         },
         .compound => |compound| {
-            try runPreLaunchTask(alloc, *const Launch.Compound, compound, tasks, pushfn);
+            try runPreLaunchTask(alloc, *const Launch.Compound, compound, tasks, createviewprocessfn, pushfn);
 
             for (compound.configurations.?) |configname| {
                 const configmatch = launchconfig.find_config_by_name(configname);
@@ -101,10 +101,11 @@ fn runPreLaunchTask(
     T: type,
     launchdata: T,
     tasks: ?Task.TaskJson,
+    createviewprocessfn: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
     pushfn: utils.PushFnProto,
 ) !void {
     if (launchdata.preLaunchTask != null) {
-        try findRunTask(alloc, launchdata.preLaunchTask.?, tasks, pushfn);
+        try findRunTask(alloc, launchdata.preLaunchTask.?, tasks, createviewprocessfn, pushfn);
     }
 }
 
@@ -116,7 +117,7 @@ fn runPostLaunchTask(
     pushfn: utils.PushFnProto,
 ) !void {
     if (launchdata.postDebugTask != null) {
-        try findRunTask(alloc, launchdata.postDebugTask.?, tasks, pushfn);
+        try findRunTask(alloc, launchdata.postDebugTask.?, tasks, null, pushfn);
     }
 }
 
@@ -124,10 +125,14 @@ fn findRunTask(
     alloc: std.mem.Allocator,
     taskname: []const u8,
     tasks: ?Task.TaskJson,
+    createviewprocessfn: ?fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
     pushfn: utils.PushFnProto,
 ) !void {
     if (tasks != null) {
         if (tasks.?.find_by_label(taskname)) |task| {
+            if (createviewprocessfn) |create_fn| {
+                try create_fn(alloc, taskname);
+            }
             try task.run_task(alloc, pushfn);
         }
     }

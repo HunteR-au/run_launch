@@ -16,7 +16,7 @@ pub const BufferWriter = struct {
     allocator: std.mem.Allocator,
     m: std.Thread.Mutex,
     buffer: *MultiStyleText,
-    gd: *const vaxis.grapheme.GraphemeData,
+    //gd: *const vaxis.grapheme.GraphemeData,
     unicode: *const Unicode,
 
     pub fn write(self: @This(), bytes: []const u8) Error!usize {
@@ -25,7 +25,7 @@ pub const BufferWriter = struct {
 
         try self.buffer.append(self.allocator, .{
             .bytes = bytes,
-            .gd = self.gd,
+            //.gd = self.gd,
             .unicode = self.unicode.width_data,
         });
         return bytes.len;
@@ -38,7 +38,7 @@ pub const MultiStyleText = struct {
 
     pub const Content = struct {
         bytes: []const u8,
-        gd: *const vaxis.grapheme.GraphemeData,
+        //gd: *const vaxis.Graphemes,
         unicode: *const Unicode,
     };
 
@@ -51,7 +51,7 @@ pub const MultiStyleText = struct {
     pub const Error = error{OutOfMemory};
 
     m: std.Thread.Mutex = .{},
-    grapheme: std.MultiArrayList(vaxis.grapheme.Grapheme) = .{},
+    grapheme: std.MultiArrayList(vaxis.Graphemes.Grapheme) = .{},
     content: std.ArrayListUnmanaged(u8) = .{},
     style_list: StyleList = StyleList.empty,
     style_map: StyleMap = StyleMap.empty,
@@ -95,7 +95,9 @@ pub const MultiStyleText = struct {
         defer self.m.unlock();
 
         var cols: usize = self.last_cols;
-        var iter = vaxis.grapheme.Iterator.init(content.bytes, content.gd);
+        // TODO: fix
+        var iter = content.unicode.graphemeIterator(content.bytes);
+        //var iter2 = vaxis.Unicode.graphemeIterator(self: *const Unicode, str: []const u8)
 
         while (iter.next()) |g| {
             try self.grapheme.append(alloc, .{
@@ -159,7 +161,7 @@ pub const MultiStyleText = struct {
     pub fn writer(
         self: *@This(),
         alloc: std.mem.Allocator,
-        gd: *const vaxis.grapheme.GraphemeData,
+        //gd: *const vaxis.Graphemes,
         unicode: *const Unicode,
     ) BufferWriter.Writer {
         return .{
@@ -167,7 +169,7 @@ pub const MultiStyleText = struct {
                 .allocator = alloc,
                 .m = self.m,
                 .buffer = self,
-                .gd = gd,
+                //.gd = gd,
                 .unicode = unicode,
             },
         };
@@ -238,9 +240,7 @@ pub const MultiStyleText = struct {
         var row: u16 = 0;
         if (self.softwrap) {
             var iter = SoftwrapIterator.init(self.text(), ctx);
-            while (iter.next()) |line| {
-                byte_index = iter.index;
-
+            while (iter.next()) |line| : (byte_index = iter.index + 1) {
                 if (row >= container_size.height) break;
                 defer row += 1;
                 var col: u16 = switch (self.text_align) {
@@ -253,7 +253,7 @@ pub const MultiStyleText = struct {
                     const grapheme = char.bytes(line.bytes);
                     if (std.mem.eql(u8, grapheme, "\t")) {
                         for (0..8) |i| {
-                            byte_index = iter.index + char.offset;
+                            byte_index = iter.index + 1 + char.offset;
                             const style = self.getStyle(byte_index);
                             surface.writeCell(@intCast(col + i), row, .{
                                 .char = .{ .grapheme = " ", .width = 1 },
@@ -264,7 +264,7 @@ pub const MultiStyleText = struct {
                         continue;
                     }
                     const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
-                    byte_index = iter.index + char.offset;
+                    byte_index = iter.index + 1 + char.offset;
                     const style = self.getStyle(byte_index);
                     surface.writeCell(col, row, .{
                         .char = .{ .grapheme = grapheme, .width = grapheme_width },
@@ -275,7 +275,7 @@ pub const MultiStyleText = struct {
             }
         } else {
             var line_iter: LineIterator = .{ .buf = self.text() };
-            while (line_iter.next()) |line| {
+            while (line_iter.next()) |line| : (byte_index = line_iter.index + 1) {
                 if (row >= container_size.height) break;
                 // \t is default 1 wide. We add 7x the count of tab characters to get the full width
                 const line_width = ctx.stringWidth(line) + 7 * std.mem.count(u8, line, "\t");
@@ -296,7 +296,7 @@ pub const MultiStyleText = struct {
                         line_width > container_size.width and
                         self.overflow == .ellipsis)
                     {
-                        byte_index = line_iter.index + char.offset;
+                        byte_index = line_iter.index + 1 + char.offset;
                         const style = self.getStyle(byte_index);
                         surface.writeCell(col, row, .{
                             .char = .{ .grapheme = "…", .width = 1 },
@@ -304,7 +304,7 @@ pub const MultiStyleText = struct {
                         });
                         col = container_size.width;
                     } else {
-                        byte_index = line_iter.index + char.offset;
+                        byte_index = line_iter.index + 1 + char.offset;
                         const style = self.getStyle(byte_index);
                         surface.writeCell(col, row, .{
                             .char = .{ .grapheme = grapheme, .width = grapheme_width },

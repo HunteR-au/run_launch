@@ -5,12 +5,12 @@ pub const output_view_mod = @import("outputview.zig");
 
 pub const vxfw = vaxis.vxfw;
 pub const OutputView = output_view_mod.OutputView;
-pub const Output = output_view_mod.Output;
+pub const OutputWidget = output_view_mod.OutputWidget;
 
 pub const OutputViewList = std.ArrayList(*OutputView);
 pub const FlexItemList = std.ArrayList(vxfw.FlexItem);
 
-const Direction = enum {
+pub const Direction = enum {
     left,
     right,
 };
@@ -25,6 +25,13 @@ pub const View = struct {
     outputviews: OutputViewList,
     flexitems: FlexItemList,
     flexrow: vxfw.FlexRow,
+    //focused_outputview_pos: usize = 0,
+    focused_outputview: ?*OutputView = null,
+
+    pub const ViewErrors = error{
+        InvalidArg,
+        OutputNotFound,
+    };
 
     pub fn init(alloc: std.mem.Allocator) std.mem.Allocator.Error!*View {
         const v = try alloc.create(View);
@@ -38,7 +45,6 @@ pub const View = struct {
     }
 
     pub fn deinit(self: *View) void {
-        std.debug.print("deinit view", .{});
         // free any outputviews this view contains
         for (self.outputviews.items) |t| {
             t.deinit();
@@ -48,77 +54,193 @@ pub const View = struct {
         self.alloc.destroy(self);
     }
 
-    pub fn add_outputview(self: *View, outputview: *OutputView, pos: usize) std.mem.Allocator.Error!void {
-        const flexitem = try self.alloc.create(vxfw.FlexItem);
-        flexitem.* = .{
-            .widget = outputview.widget(),
-        };
-        try self.outputviews.insert(pos, outputview);
-        try self.flexitems.insert(pos, .{ .widget = outputview.widget() });
+    pub fn focus_outputview_by_idx(self: *View, pos: usize) !void {
+        if (pos >= self.outputviews.items.len) {
+            std.debug.print("view.move_output: from_pos {d}\n", .{pos});
+            return ViewErrors.InvalidArg;
+        }
+
+        // unfocus previous focused_outputview if it exists
+        if (self.focused_outputview) |f_ov| {
+            f_ov.unfocus_self();
+        }
+
+        self.focused_outputview = self.outputviews.items[pos];
+        self.focused_outputview.?.focus_self();
     }
 
-    pub fn remove_outputview(self: *View, pos: usize) OutputView {
-        self.flexitems.orderedRemove(pos);
+    fn focus_move(
+        self: *View,
+        dir: Direction,
+    ) ?*OutputView {
+        if (self.outputviews.items.len == 0) {
+            return null;
+        } else if (self.focused_outputview == null) {
+            self.focused_outputview = self.outputviews.items[0];
+            self.focused_outputview.?.focus_self();
+            return self.focused_outputview;
+        }
+
+        // find the curent idx
+        var idx = blk: {
+            for (self.outputviews.items, 0..) |o, i| {
+                if (o == self.focused_outputview.?) {
+                    break :blk i;
+                }
+            }
+            unreachable;
+        };
+
+        switch (dir) {
+            .right => {
+                if (idx == self.outputviews.items.len - 1) {
+                    idx = 0;
+                } else {
+                    idx += 1;
+                }
+            },
+            .left => {
+                if (idx == 0) {
+                    idx = self.outputviews.items.len - 1;
+                } else {
+                    idx -= 1;
+                }
+            },
+        }
+
+        //self.focused_outputview = self.outputviews.items[idx];
+        //self.focused_outputview.?.focus_self();
+        self.focus_outputview_by_idx(idx) catch {
+            unreachable;
+        };
+        return self.focused_outputview;
+    }
+
+    pub fn focus_prev(self: *View) ?*OutputView {
+        return self.focus_move(Direction.left);
+    }
+
+    pub fn focus_next(self: *View) ?*OutputView {
+        return self.focus_move(Direction.right);
+    }
+
+    pub fn get_focused(self: *View) ?*OutputView {
+        return self.focused_outputview;
+    }
+
+    pub fn get_position(self: *View, outputview: *OutputView) !usize {
+        for (self.outputviews.items, 0..) |o, i| {
+            if (outputview == o) {
+                return i;
+            }
+        }
+
+        return ViewErrors.OutputNotFound;
+    }
+
+    pub fn add_outputview(self: *View, outputview: *OutputView, pos: usize) !void {
+        try self.outputviews.insert(pos, outputview);
+        try self.flexitems.insert(pos, .{ .widget = outputview.widget() });
+
+        std.debug.print("view: add_outputview -> {d}\n", .{self.outputviews.items.len});
+        if (self.outputviews.items.len == 1) {
+            try self.focus_outputview_by_idx(0);
+        }
+    }
+
+    pub fn remove_outputview(self: *View, pos: usize) *OutputView {
+        std.debug.assert(pos < self.outputviews.items.len);
+
+        _ = self.flexitems.orderedRemove(pos);
         const outputview = self.outputviews.orderedRemove(pos);
+        if (outputview == self.focused_outputview) {
+            self.focused_outputview = null;
+        }
         return outputview;
     }
 
-    pub fn split_output(self: *View, output: *Output, from_pos: usize, dir: Direction) !void {
+    pub fn split_output(self: *View, output: *OutputWidget, from_pos: usize, dir: Direction) !void {
         if (from_pos >= self.outputviews.items.len) {
-            // TODO: raise error
-            return;
+            std.debug.print("view.split_output: from_pos {d} items.len {d}\n", .{ from_pos, self.outputviews.items.len });
+            return ViewErrors.InvalidArg;
         }
 
+        const from_outputview = self.outputviews.items[from_pos];
+
         // check that the output is actually from the correct group
-        var target_output: ?*Output = null;
-        for (self.outputviews.items[from_pos].outputs.items) |o| {
+        var target_output: ?*OutputWidget = null;
+        for (from_outputview.outputs.items) |o| {
             if (output == o) {
                 target_output = o;
             }
         }
         if (target_output == null) {
-            // TODO: raise error
+            return ViewErrors.OutputNotFound;
+        }
+
+        // don't split if the from outputview has only 1 group
+        if (from_outputview.outputs.items.len == 1) {
             return;
         }
 
         const new_outputview = try OutputView.init(self.alloc);
-        const from_outputview = self.outputviews.items[from_pos];
-
+        var to_pos: usize = undefined;
+        var new_from_pos: usize = undefined;
         switch (dir) {
             .left => {
-                self.add_outputview(new_outputview, from_pos);
+                to_pos = from_pos;
+                new_from_pos = from_pos +| 1;
             },
             .right => {
-                self.add_outputview(new_outputview, from_pos + 1);
+                to_pos = from_pos +| 1;
+                new_from_pos = from_pos;
             },
         }
 
+        try self.add_outputview(new_outputview, to_pos);
         try new_outputview.add_output(output);
         from_outputview.remove_output(output);
+
+        // set focus to outputview output moved to
+        try self.focus_outputview_by_idx(to_pos);
+
+        // remove outputview moved from if it has no outputs
+        if (self.outputviews.items[new_from_pos].outputs.items.len == 0) {
+            var ov_to_del = self.remove_outputview(new_from_pos);
+            ov_to_del.deinit();
+        }
     }
 
-    pub fn move_output(self: *View, output: *Output, from_pos: usize, to_pos: usize) !void {
+    pub fn move_output(self: *View, output: *OutputWidget, from_pos: usize, to_pos: usize) !void {
         if (from_pos >= self.outputviews.items.len or to_pos >= self.outputviews.items.len) {
-            // TODO: raise error
-            return;
+            std.debug.print("view.move_output: from_pos {d} to_pos {d} items.len {d}\n", .{ from_pos, to_pos, self.outputviews.items.len });
+            return ViewErrors.InvalidArg;
         }
 
         // check that the output is actually from the correct group
-        var target_output: ?*Output = null;
+        var target_output: ?*OutputWidget = null;
         for (self.outputviews.items[from_pos].outputs.items) |o| {
             if (output == o) {
                 target_output = o;
             }
         }
         if (target_output == null) {
-            // TODO: raise error
-            return;
+            return ViewErrors.OutputNotFound;
         }
 
-        // add, remove, set focus
+        // add, remove, set outputview focus
         try self.outputviews.items[to_pos].add_output(target_output.?);
         self.outputviews.items[from_pos].remove_output(target_output.?);
-        try self.outputviews.items[to_pos].focus_output(target_output.?);
+        self.outputviews.items[to_pos].focus_output(target_output.?);
+
+        // set focus to outputview output moved to
+        try self.focus_outputview_by_idx(to_pos);
+
+        // remove outputview moved from if it has no outputs
+        if (self.outputviews.items[from_pos].outputs.items.len == 0) {
+            var ov_to_del = self.remove_outputview(from_pos);
+            ov_to_del.deinit();
+        }
     }
 
     pub fn widget(self: *View) vxfw.Widget {
@@ -152,7 +274,12 @@ pub const View = struct {
 
         const outputview_child: vxfw.SubSurface = .{
             .origin = .{ .row = 0, .col = 0 },
-            .surface = try self.flexrow.draw(ctx),
+            .surface = try self.flexrow.draw(
+                ctx.withConstraints(
+                    ctx.min,
+                    .{ .width = max_size.width -| 1, .height = max_size.height -| 1 },
+                ),
+            ),
         };
         const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
         children[0] = outputview_child;

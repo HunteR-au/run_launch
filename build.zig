@@ -30,22 +30,10 @@ pub fn createArgsForGenEmbedFilesStruct(alloc: std.mem.Allocator) !std.ArrayList
 // declaratively construct a build graph that will be executed by an external
 // runner.
 pub fn build(b: *std.Build) !void {
-    // const tool = b.addExecutable(.{
-    //     .name = "gen_embedFiles_struct",
-    //     .root_source_file = b.path("tools/gen_embedFiles_struct.zig"),
-    //     .target = b.graph.host,
-    // });
-
-    // const tool_step = b.addRunArtifact(tool);
-    // tool_step.setCwd(b.path("."));
-    // const embedFilesOutput = tool_step.addOutputFileArg("embedFiles.zig");
-    // tool_step.addArg("embedFiles.zig");
-
     var arena_state = std.heap.ArenaAllocator.init(b.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const embededArgs = try createArgsForGenEmbedFilesStruct(arena);
-    //tool_step.addArgs(embededArgs.items);
 
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
@@ -58,37 +46,45 @@ pub fn build(b: *std.Build) !void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    // _ = b.createModule(.{
-    //     //.name = "run_launch",
-    //     // In this case the main source file is merely a path, however, in more
-    //     // complicated build scripts, this could be a generated file.
-    //     .root_source_file = b.path("src/root.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
+    // Dependencies
+    const vaxis_dep = b.dependency("vaxis", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const zig_webui_dep = b.dependency("zig_webui", .{
+        .target = target,
+        .optimize = optimize,
+        .enable_tls = false, // whether enable tls support
+        .is_static = true, // whether static link
+    });
+    const regex_dep = b.dependency("regex", .{});
+    const clap_dep = b.dependency("clap", .{});
 
-    // This declares intent for the library to be installed into the standard
-    // location when the user invokes the "install" step (the default step when
-    // running `zig build`).
-    //b.installArtifact(lib);
+    // Modules
+    const utils = b.createModule(.{ .root_source_file = b.path("src/utils.zig") });
+    const tui = b.createModule(.{
+        .root_source_file = b.path("src/ui/tui.zig"),
+    });
+    const vaxis = vaxis_dep.module("vaxis");
+    const regex = regex_dep.module("regex");
+    const clap = clap_dep.module("clap");
+    const webui = zig_webui_dep.module("webui");
 
+    // Setup tui
+    tui.addImport("vaxis", vaxis);
+    tui.addImport("utils", utils);
+    tui.addImport("regex", regex);
+
+    // Setup the EXE
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-
     const exe = b.addExecutable(.{
         .name = "run_launch",
         .root_module = exe_mod,
-        // .root_source_file = b.path("src/main.zig"),
-        // .target = target,
-        // .optimize = optimize,
     });
-
-    // exe.root_module.addAnonymousImport("embedFiles", .{
-    // .root_source_file = embedFilesOutput,
-    // });
 
     // Add files from ui folder recursively using the embededArgs
     for (embededArgs.items) |item| {
@@ -99,26 +95,11 @@ pub fn build(b: *std.Build) !void {
         });
     }
 
-    const tui = b.createModule(.{ .root_source_file = b.path("src/ui/tui.zig") });
+    // Add EXE modules
+    exe_mod.addImport("utils", utils);
+    exe_mod.addImport("clap", clap);
+    exe_mod.addImport("webui", webui);
     exe_mod.addImport("tui", tui);
-
-    const vaxis = b.dependency("vaxis", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    tui.addImport("vaxis", vaxis.module("vaxis"));
-
-    const clap = b.dependency("clap", .{});
-    exe_mod.addImport("clap", clap.module("clap"));
-
-    const zig_webui = b.dependency("zig_webui", .{
-        .target = target,
-        .optimize = optimize,
-        .enable_tls = false, // whether enable tls support
-        .is_static = true, // whether static link
-    });
-    exe_mod.addImport("webui", zig_webui.module("webui"));
-    // For hide console window, you can set exe.subsystem = .Windows;
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -150,27 +131,51 @@ pub fn build(b: *std.Build) !void {
 
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.
-    const lib_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/root.zig"),
+    //const lib_unit_tests = b.addTest(.{
+    //    .root_source_file = b.path("src/root.zig"),
+    //    .target = target,
+    //    .optimize = optimize,
+    //});
+
+    //const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+    //lib_unit_tests.root_module.addImport("utils", utils);
+    //lib_unit_tests.root_module.addImport("tui", tui);
+    //lib_unit_tests.root_module.addImport("vaxis", vaxis);
+    const output_unit_tests = b.addTest(.{
+        .root_source_file = b.path("src/unit_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
+    output_unit_tests.root_module.addImport("utils", utils);
+    output_unit_tests.root_module.addImport("vaxis", vaxis);
+    output_unit_tests.root_module.addImport("tui", tui);
+    output_unit_tests.root_module.addImport("regex", regex);
 
-    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+    //const output_unit_tests = b.addTest(.{
+    //    .root_source_file = b.path("src/ui/tui/output.zig"),
+    //    .target = target,
+    //    .optimize = optimize,
+    //});
+    //output_unit_tests.root_module.addImport("utils", utils);
+    //output_unit_tests.root_module.addImport("vaxis", vaxis);
+    //output_unit_tests.root_module.addImport("regex", regex);
 
     const exe_unit_tests = b.addTest(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    exe_unit_tests.root_module.addImport("vaxis", vaxis.module("vaxis"));
+    exe_unit_tests.root_module.addImport("tui", tui);
+    exe_unit_tests.root_module.addImport("utils", utils);
+    exe_unit_tests.root_module.addImport("vaxis", vaxis);
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
+    const run_tui_unit_tests = b.addRunArtifact(output_unit_tests);
 
     // Similar to creating the run step earlier, this exposes a `test` step to
     // the `zig build --help` menu, providing a way for the user to request
     // running the unit tests.
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_lib_unit_tests.step);
+    test_step.dependOn(&run_tui_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
 }

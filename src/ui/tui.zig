@@ -1,13 +1,16 @@
 const std = @import("std");
+const builtin = @import("builtin");
 pub const vaxis = @import("vaxis");
 pub const view = @import("tui/view.zig");
 pub const mutiStyleText = @import("tui/multistyletext.zig");
+pub const cmdwidget = @import("tui/cmdwidget.zig");
 
 pub const OutputView = view.OutputView;
 pub const vxfw = vaxis.vxfw;
 const Unicode = vaxis.Unicode;
 const graphemedata = vaxis.grapheme.GraphemeData;
-pub const Output = view.Output;
+pub const OutputWidget = view.OutputWidget;
+pub const ProcessBuffer = view.output_view_mod.ProcessBuffer;
 /// Our main application state
 // const Model = struct {
 //     /// State of the counter
@@ -120,9 +123,15 @@ pub const Output = view.Output;
 //     }
 // };
 
+const ModelState = enum { main, cmdview, jsonview };
+
 const Model = struct {
     modelview: *view.View,
     output_view: *OutputView,
+    process_buffers: std.StringHashMap(*ProcessBuffer),
+    arena: std.heap.ArenaAllocator,
+    cmd_view: cmdwidget.CmdWidget,
+    mode: ModelState = .main,
     // views: vxfw.Surface,
     // views -> view-group -> tab-group && output-group
 
@@ -131,8 +140,36 @@ const Model = struct {
         return .{
             .userdata = self,
             .eventHandler = Model.typeErasedEventHandler,
+            .captureHandler = Model.typeErasedCaptureHandler,
             .drawFn = Model.typeErasedDrawFn,
         };
+    }
+
+    fn typeErasedCaptureHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
+        const self: *Model = @ptrCast(@alignCast(ptr));
+        return self.handleCapture(ctx, event);
+    }
+
+    pub fn handleCapture(self: *Model, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
+        switch (event) {
+            .key_press => |key| {
+                if (key.matches('/', .{})) {
+                    if (self.mode == .main) {
+                        self.mode = .cmdview;
+                        try ctx.requestFocus(self.cmd_view.widget());
+                        return ctx.consumeAndRedraw();
+                    }
+                } else if (key.matches(vaxis.Key.escape, .{})) {
+                    if (self.mode == .cmdview) {
+                        std.debug.print("setting mode back to main\n", .{});
+                        self.mode = .main;
+                        try ctx.requestFocus(self.widget());
+                        return ctx.consumeEvent();
+                    }
+                }
+            },
+            else => {},
+        }
     }
 
     /// This function will be called from the vxfw runtime.
@@ -147,6 +184,30 @@ const Model = struct {
 
         switch (event) {
             .init => {
+                switch (builtin.target.os.tag) {
+                    .windows => {},
+                    else => {
+                        // This is a HACK since the framework doesn't detect capability correctly
+                        // for Ubuntu via WSL
+                        var colorterm = std.posix.getenv("COLORTERM") orelse "";
+
+                        if (std.mem.eql(u8, colorterm, "truecolor") or
+                            std.mem.eql(u8, colorterm, "24bit"))
+                        {
+                            app.vx.caps.rgb = true;
+                        }
+
+                        colorterm = std.posix.getenv("TERM") orelse "";
+
+                        if (std.mem.eql(u8, colorterm, "xterm-256color") or
+                            std.mem.eql(u8, colorterm, "screen"))
+                        {
+                            app.vx.sgr = .legacy;
+                            app.vx.caps.rgb = true;
+                        }
+                    },
+                }
+
                 try self.output_view.eventHandler(ctx, event);
                 try self.output_view.focused_output.?.handleEvent(ctx, event);
             },
@@ -156,14 +217,92 @@ const Model = struct {
                     ctx.quit = true;
                     return;
                 } else if (key.matches('w', .{})) {
-                    self.output_view.focus_prev();
-                    try ctx.requestFocus(self.output_view.focused_output.?.widget());
+                    const output_view = self.modelview.get_focused();
+                    if (output_view) |ov| {
+                        const output = ov.focus_prev();
+                        if (output) |o| {
+                            try ctx.requestFocus(o.widget());
+                            return ctx.consumeAndRedraw();
+                        }
+                    }
+                    return;
+                } else if (key.matches('w', .{ .shift = true })) {
+                    _ = self.modelview.focus_prev();
+                    return ctx.consumeAndRedraw();
+                } else if (key.matches('e', .{ .shift = true })) {
+                    _ = self.modelview.focus_next();
                     return ctx.consumeAndRedraw();
                 } else if (key.matches('e', .{})) {
-                    self.output_view.focus_next();
-                    try ctx.requestFocus(self.output_view.focused_output.?.widget());
-                    return ctx.consumeAndRedraw();
-                } else if (key.matches('q', .{ .ctrl = false })) {
+                    const output_view = self.modelview.get_focused();
+                    if (output_view) |ov| {
+                        const output = ov.focus_next();
+                        if (output) |o| {
+                            try ctx.requestFocus(o.widget());
+                            return ctx.consumeAndRedraw();
+                        }
+                    }
+                    return;
+                } else if (key.matches('s', .{})) {
+                    const output_view = self.modelview.get_focused();
+                    if (output_view) |ov| {
+                        const output = ov.focused_output;
+                        if (output) |o| {
+                            const from = try self.modelview.get_position(ov);
+                            self.modelview.move_output(o, from, from -| 1) catch |err|
+                                switch (err) {
+                                    view.View.ViewErrors.InvalidArg => {
+                                        return;
+                                    },
+                                    else => {
+                                        return err;
+                                    },
+                                };
+                            try ctx.requestFocus(o.widget());
+                            return ctx.consumeAndRedraw();
+                        }
+                    }
+                } else if (key.matches('s', .{ .shift = true })) {
+                    const output_view = self.modelview.get_focused();
+                    if (output_view) |ov| {
+                        const output = ov.focused_output;
+                        if (output) |o| {
+                            const from = try self.modelview.get_position(ov);
+                            try self.modelview.split_output(o, from, view.Direction.left);
+                            try ctx.requestFocus(o.widget());
+                            return ctx.consumeAndRedraw();
+                        }
+                    }
+                } else if (key.matches('d', .{})) {
+                    const output_view = self.modelview.get_focused();
+                    if (output_view) |ov| {
+                        const output = ov.focused_output;
+                        if (output) |o| {
+                            const from = try self.modelview.get_position(ov);
+                            self.modelview.move_output(o, from, from +| 1) catch |err|
+                                switch (err) {
+                                    view.View.ViewErrors.InvalidArg => {
+                                        return;
+                                    },
+                                    else => {
+                                        return err;
+                                    },
+                                };
+                            try ctx.requestFocus(o.widget());
+                            return ctx.consumeAndRedraw();
+                        }
+                    }
+                } else if (key.matches('d', .{ .shift = true })) {
+                    const output_view = self.modelview.get_focused();
+                    if (output_view) |ov| {
+                        const output = ov.focused_output;
+                        if (output) |o| {
+                            const from = try self.modelview.get_position(ov);
+                            try self.modelview.split_output(o, from, view.Direction.right);
+                            try ctx.requestFocus(o.widget());
+                            return ctx.consumeAndRedraw();
+                        }
+                    }
+                } else if (key.matches('q', .{})) {
                     try ctx.addCmd(.queue_refresh);
                 }
             },
@@ -183,18 +322,40 @@ const Model = struct {
         const self: *Model = @ptrCast(@alignCast(ptr));
         const max_size = ctx.max.size();
 
-        const child_ctx = ctx.withConstraints(ctx.min, .{
-            .width = 150,
-            .height = 100,
-        });
+        //const child_ctx = ctx.withConstraints(ctx.min, .{
+        //    .width = 150,
+        //    .height = 100,
+        //});
 
-        const output_child: vxfw.SubSurface = .{
-            .origin = .{ .row = 1, .col = 1 },
-            .surface = try self.modelview.draw(child_ctx),
-        };
+        var children: []vxfw.SubSurface = undefined;
 
-        const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
-        children[0] = output_child;
+        switch (self.mode) {
+            .main => {
+                children = try ctx.arena.alloc(vxfw.SubSurface, 1);
+                const output_child: vxfw.SubSurface = .{
+                    .origin = .{ .row = 1, .col = 1 },
+                    .surface = try self.modelview.draw(ctx),
+                };
+
+                children[0] = output_child;
+            },
+            .cmdview => {
+                children = try ctx.arena.alloc(vxfw.SubSurface, 2);
+                const output_child: vxfw.SubSurface = .{
+                    .origin = .{ .row = 1, .col = 1 },
+                    .surface = try self.modelview.draw(ctx),
+                };
+
+                const cmdwidget_child: vxfw.SubSurface = .{
+                    .origin = .{ .row = max_size.height - 3, .col = 0 },
+                    .surface = try self.cmd_view.draw(ctx),
+                };
+
+                children[0] = output_child;
+                children[1] = cmdwidget_child;
+            },
+            .jsonview => {},
+        }
 
         //return try vxfw.Surface.initWithChildren(ctx.arena, self.widget(), vxfw.Size{ .height = 50, .width = 10 }, children);
 
@@ -211,7 +372,7 @@ const Model = struct {
 var model: *Model = undefined;
 var unicode: *Unicode = undefined;
 
-var keep_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true);
+var keep_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var thread: ?std.Thread = null;
 var app: vxfw.App = undefined;
 fn run_tui(alloc: std.mem.Allocator) !void {
@@ -222,22 +383,36 @@ fn run_tui(alloc: std.mem.Allocator) !void {
     unicode = &app.vx.unicode;
 
     const model_view = try view.View.init(alloc);
-    //defer model_view.deinit();
+    defer model_view.deinit();
 
     const output_view = try OutputView.init(alloc);
     const output_view2 = try OutputView.init(alloc);
     try model_view.add_outputview(output_view, 0);
     try model_view.add_outputview(output_view2, 1);
 
-    try output_view.add_output(try Output.init(alloc, "default_output"));
-    try output_view2.add_output(try Output.init(alloc, "default_output2"));
+    const buf = try ProcessBuffer.init(alloc);
+    defer buf.deinit();
+    const buf2 = try ProcessBuffer.init(alloc);
+    defer buf2.deinit();
+
+    try output_view.add_output(try OutputWidget.init(alloc, "default_output", buf, unicode));
+    try output_view2.add_output(try OutputWidget.init(alloc, "default_output2", buf2, unicode));
 
     model = try alloc.create(Model);
     model.* = .{
         .output_view = output_view,
         .modelview = model_view,
+        .process_buffers = std.StringHashMap(*ProcessBuffer).init(alloc),
+        .cmd_view = try cmdwidget.CmdWidget.init(alloc, unicode),
+        .arena = std.heap.ArenaAllocator.init(alloc),
     };
     defer alloc.destroy(model);
+    keep_running.store(true, .seq_cst);
+
+    try model.process_buffers.put("default_output", buf);
+    try model.process_buffers.put("default_output2", buf);
+    defer model.process_buffers.deinit();
+    defer model.arena.deinit();
 
     //vxfw.DrawContext.init(unicode, .unicode);
     std.debug.print("color_scheme_updates : {?}\n", .{app.vx.caps.color_scheme_updates});
@@ -247,15 +422,40 @@ fn run_tui(alloc: std.mem.Allocator) !void {
     std.debug.print("rgb : {?}\n", .{app.vx.caps.rgb});
     std.debug.print("scaled_text : {?}\n", .{app.vx.caps.scaled_text});
     std.debug.print("sgr_pixels : {?}\n", .{app.vx.caps.sgr_pixels});
+
+    std.debug.print("width: {d}\n", .{app.vx.screen.width});
+    std.debug.print("height: {d}\n", .{app.vx.screen.height});
+
+    //switch (builtin.target.os.tag) {
+    //    .windows => {},
+    //    else => {
+    //        const colorterm = std.posix.getenv("COLORTERM") orelse "";
+    //        if (std.mem.eql(u8, colorterm, "truecolor") or
+    //            std.mem.eql(u8, colorterm, "24bit"))
+    //        {
+    //            if (@hasField(vxfw.Event, "cap_rgb")) {
+    //                vaxis.Vaxis. .postEvent(.cap_rgb);
+    //            }
+    //        }
+    //    },
+    //}
+
     try app.vx.setMouseMode(app.tty.anyWriter(), true);
     try app.run(model.widget(), .{});
-    defer keep_running.store(false, .seq_cst);
+    keep_running.store(false, .seq_cst);
     std.debug.print("APP FINISHED!\n", .{});
-    // set the singal that the app as stopped
 }
 
 pub fn start_tui(alloc: std.mem.Allocator) !void {
     thread = try std.Thread.spawn(.{ .allocator = alloc }, run_tui, .{alloc});
+
+    // wait till the tui app has started
+    var timer = try std.time.Timer.start();
+    while (!keep_running.load(.seq_cst)) {
+        if (timer.read() > 10_000_000_000) {
+            return;
+        }
+    }
 }
 
 pub fn stop_tui() void {
@@ -266,13 +466,30 @@ pub fn stop_tui() void {
 }
 
 pub fn createProcessView(alloc: std.mem.Allocator, processname: []const u8) std.mem.Allocator.Error!void {
-    // check that a process with the same name doesn't exist
-    const p_output = try Output.init(alloc, processname);
-    errdefer p_output.deinit();
-
+    // FIX: terrible hack to avoid a race condition which actually hits on nix
+    //std.time.sleep(10_000_000_000);
     std.debug.print("creating output: {s}\n", .{processname});
-    try model.modelview.outputviews.items[0].add_output(p_output);
-    //try model.output_view.add_output(p_output);
+    if (keep_running.load(.seq_cst)) {
+        const aa = model.arena.allocator();
+
+        // check that a process with the same name doesn't exist
+        const buf = try ProcessBuffer.init(alloc);
+        try model.process_buffers.put(try aa.dupe(u8, processname), buf);
+        errdefer {
+            const keyvalue = model.process_buffers.fetchRemove(processname);
+            if (keyvalue) |kv| {
+                kv.value.deinit();
+            }
+        }
+
+        const p_output = try OutputWidget.init(alloc, processname, buf, unicode);
+        errdefer p_output.deinit();
+
+        // Add a reference to the cmd
+        try p_output.output.subscribeHandlersToCmd(&model.cmd_view.cmd);
+        try model.modelview.outputviews.items[0].add_output(p_output);
+        app.vx.setMouseMode(app.tty.anyWriter(), true) catch {};
+    }
 }
 
 pub fn killProcessView(processname: []const u8) void {
@@ -287,26 +504,28 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 pub fn pushLogging(alloc: std.mem.Allocator, processname: []const u8, buffer: []const u8) std.mem.Allocator.Error!void {
     _ = alloc;
 
-    // This is not thread safe atm
-    std.debug.print("ping1\n", .{});
-    std.debug.print("{p}\n", .{&model});
-    std.debug.print("{p}\n", .{&model.modelview});
-    //const target_output = model.modelview.outputviews.items[0].get_output(processname);
-    const mv = model.modelview;
-    std.debug.print("ping1.1\n", .{});
-    const ov = mv.outputviews.items[0];
-    std.debug.print("ping1.2\n", .{});
-    const target_output = ov.get_output(processname);
-    std.debug.print("ping2\n", .{});
-    if (target_output) |output| {
-        if (keep_running.load(.seq_cst)) {
-            std.debug.print("ping3\n", .{});
-            try output.text.append(model.output_view.alloc, .{
-                .bytes = buffer,
-                .gd = &unicode.width_data.g_data,
-                .unicode = unicode,
-            });
-            std.debug.print("ping4\n", .{});
+    if (keep_running.load(.seq_cst)) {
+        const target_buffer = model.process_buffers.get(processname);
+
+        if (target_buffer) |output| {
+            try output.append(buffer);
         }
     }
 }
+
+// TODOs
+// TODO fix...can't draw the whole buffer when it is big (we need to only render a partial view)
+// TODO make sure output commands only take effect on selected output
+// TODO Windows powershell has rendering errors...
+// TODO color title for selected outputview
+// TODO make tabs
+
+// TODO find_replace str cmd
+// TODO goto top/bottom of buffer
+// TODO fast move up/down
+// TODO parse ui config in TUI
+// ---> options
+// ------> when process starts, run color commands
+// ------> when matching output starts, run setup function
+
+// TODO BUG - bg colors match space before word

@@ -15,7 +15,7 @@
         {
             "name": "Print",
             "type": "debugpy",
-            "program": "data\\printlines.py",
+            "program": "./data/printlines.py",
             "request": "attach",
             "preLaunchTask": "list",
             "connect": {

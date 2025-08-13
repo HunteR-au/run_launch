@@ -1,7 +1,7 @@
 const std = @import("std");
 const clap = @import("clap");
 
-const utils = @import("utils.zig");
+const utils = @import("utils");
 const Launch = @import("launch.zig");
 const Task = @import("task.zig");
 const uiview = @import("ui/uiview.zig");

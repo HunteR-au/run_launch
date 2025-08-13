@@ -1,19 +1,21 @@
 const std = @import("std");
 pub const vaxis = @import("vaxis");
 //pub const mutiStyleText = @import("tui/multistyletext.zig");
-pub const Output = @import("output.zig").Output;
+pub const outputmod = @import("outputwidget.zig");
+pub const OutputWidget = outputmod.OutputWidget;
+pub const ProcessBuffer = outputmod.ProcessBuffer;
 
 pub const vxfw = vaxis.vxfw;
-pub const OutputList = std.ArrayList(*Output);
+pub const OutputList = std.ArrayList(*OutputWidget);
 
 pub const OutputView = struct {
     alloc: std.mem.Allocator,
     outputs: OutputList,
-    focused_output: ?*Output = null,
+    focused_output: ?*OutputWidget = null,
+    is_focused: bool = false,
 
     // TODO: create a tab group
 
-    // init, deinint
     // add process
     // remove process
     // get process
@@ -41,31 +43,36 @@ pub const OutputView = struct {
         self.alloc.destroy(self);
     }
 
-    pub fn add_output(self: *OutputView, output: *Output) std.mem.Allocator.Error!void {
+    pub fn add_output(self: *OutputView, output: *OutputWidget) std.mem.Allocator.Error!void {
         // TODO: create a tab for the corresponding output
         try self.outputs.append(output);
 
         if (self.outputs.items.len == 1) {
             self.focused_output = output;
+            self.focused_output.?.is_focused = self.is_focused;
         }
     }
 
-    pub fn remove_output(self: *OutputView, output: *Output) void {
+    pub fn remove_output(self: *OutputView, output: *OutputWidget) void {
         // TODO: remove the tab for the corresponding output
         for (self.outputs.items, 0..) |o, i| {
             if (o == output) {
+                std.debug.print("ping1 - len {d}\n", .{self.outputs.items.len});
+                output.is_focused = false;
                 _ = self.outputs.swapRemove(i);
 
                 if (o == self.focused_output and self.outputs.items.len > 0) {
                     self.focused_output = self.outputs.items[0];
+                    self.focused_output.?.is_focused = self.is_focused;
                 } else if (self.outputs.items.len == 0) {
                     self.focused_output = null;
                 }
+                break;
             }
         }
     }
 
-    pub fn get_output(self: *OutputView, processname: []const u8) ?*Output {
+    pub fn get_output(self: *OutputView, processname: []const u8) ?*OutputWidget {
         for (self.outputs.items) |o| {
             if (std.mem.eql(u8, processname, o.process_name)) {
                 return o;
@@ -74,11 +81,19 @@ pub const OutputView = struct {
         return null;
     }
 
-    pub fn focus_output(self: *OutputView, output: *Output) void {
+    pub fn focus_output(self: *OutputView, output: *OutputWidget) void {
         for (self.outputs.items) |o| {
             if (o == output) {
+                // unfocus the previous output
+                if (self.focused_output) |fo| {
+                    fo.is_focused = false;
+                }
+
                 self.focused_output = o;
-                // TODO set the correct tab to be focused
+
+                // if the current outputview is focused we want to render
+                // the output as focused
+                self.focused_output.?.is_focused = self.is_focused;
             }
         }
     }
@@ -88,14 +103,30 @@ pub const OutputView = struct {
         backward,
     };
 
+    pub fn focus_self(self: *OutputView) void {
+        self.is_focused = true;
+        if (self.focused_output) |o| {
+            o.is_focused = true;
+        }
+    }
+
+    pub fn unfocus_self(self: *OutputView) void {
+        self.is_focused = false;
+        if (self.focused_output) |o| {
+            o.is_focused = false;
+        }
+    }
+
     fn focus_move(
         self: *OutputView,
         dir: Direction,
-    ) void {
+    ) ?*OutputWidget {
         if (self.outputs.items.len == 0) {
-            return;
+            return null;
         } else if (self.focused_output == null) {
             self.focused_output = self.outputs.items[0];
+            self.focused_output.?.is_focused = self.is_focused;
+            return self.focused_output;
         }
 
         // find the current idx
@@ -107,6 +138,8 @@ pub const OutputView = struct {
             }
             unreachable;
         };
+
+        self.focused_output.?.is_focused = false;
 
         switch (dir) {
             .forward => {
@@ -126,14 +159,16 @@ pub const OutputView = struct {
         }
 
         self.focused_output = self.outputs.items[idx];
+        self.focused_output.?.is_focused = self.is_focused;
+        return self.focused_output;
     }
 
-    pub fn focus_prev(self: *OutputView) void {
-        self.focus_move(Direction.backward);
+    pub fn focus_prev(self: *OutputView) ?*OutputWidget {
+        return self.focus_move(Direction.backward);
     }
 
-    pub fn focus_next(self: *OutputView) void {
-        self.focus_move(Direction.forward);
+    pub fn focus_next(self: *OutputView) ?*OutputWidget {
+        return self.focus_move(Direction.forward);
     }
 
     pub fn widget(self: *OutputView) vxfw.Widget {
@@ -192,9 +227,10 @@ pub const OutputView = struct {
         var height: u16 = undefined;
         var width: u16 = undefined;
         if (max_size.height) |h| {
-            height = if (h < 20) h else 20;
+            //height = if (h < 20) h else 50;
+            height = h;
         } else {
-            height = 20;
+            height = 50;
         }
         if (max_size.width) |w| {
             width = if (w < 100) w else 100;
@@ -210,15 +246,17 @@ pub const OutputView = struct {
         // TODO: draw tab group
 
         var output_child: vxfw.SubSurface = undefined;
+        var children: []vxfw.SubSurface = undefined;
         if (self.focused_output) |focused| {
             output_child = .{
                 .origin = .{ .row = 0, .col = 0 },
                 .surface = try focused.draw(self_ctx),
             };
-        } else unreachable;
-
-        const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
-        children[0] = output_child;
+            children = try ctx.arena.alloc(vxfw.SubSurface, 1);
+            children[0] = output_child;
+        } else {
+            children = &.{};
+        }
 
         return .{
             .size = .{ .height = height, .width = width },

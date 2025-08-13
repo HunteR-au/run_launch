@@ -1,5 +1,5 @@
 const std = @import("std");
-const utils = @import("utils.zig");
+const utils = @import("utils");
 
 pub const TaskPresentation = struct {
     reveal: ?[]const u8,
@@ -35,7 +35,7 @@ pub const Task = struct {
 
         _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, self.label.? });
 
-        _ = child.spawnAndWait() catch |e| {
+        _ = child.wait() catch |e| {
             //std.debug.print("Spawning module {any} failed.\n", .{e});
             return e;
         };

@@ -38,8 +38,12 @@
             .hash = "webview-0.1.0-I5p0phv6IAA5MPIu7R9EEnSjFX-5ye52e88tBkalrRXe",
         },
         .vaxis = .{
-            .url = "git+https://github.com/rockorager/libvaxis.git#33ae50cadca891c801eaed2039c12eae82b2c067",
-            .hash = "vaxis-0.1.0-BWNV_OYOCQBtnAkzfqqjBpeN6k6sj0c1BTTJcWQbr_qF",
+            .url = "git+https://github.com/rockorager/libvaxis.git#7d8015ee82bd547e92b433fc698ce86a0d87b18b",
+            .hash = "vaxis-0.5.1-BWNV_CIVCQC3Bk1-nguTPlKtXmm7AyPOZd95Ut2KYLVD",
+        },
+        .regex = .{
+            .url = "git+https://github.com/tiehuis/zig-regex.git#88105ccfb6d679111b91d798d97cd4eb95617452",
+            .hash = "regex-0.1.2-axC356XdAQCrReHJQmJLbCDBoYVvzj8y-wE1PXUjT4V6",
         },
     },
     .paths = .{

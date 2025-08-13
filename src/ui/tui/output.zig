@@ -1,208 +1,576 @@
 const std = @import("std");
-//const MultiStyleText = @import("multistyletext.zig").MultiStyleText;
+const utils = @import("utils");
 
+const process_buffer_mod = @import("pipeline/processbuffer.zig");
+const cmd_mod = @import("cmd.zig");
+
+// ui data structures
 const vaxis = @import("vaxis");
-const vxfw = vaxis.vxfw;
-const Border = vxfw.Border;
-//const grapheme = vaxis.grapheme;
-const ScrollBar = vxfw.ScrollBars;
-const ScrollView = vxfw.ScrollView;
-//const Text = vxfw.Text;
-const graphemedata = vaxis.grapheme.GraphemeData;
-const Unicode = vaxis.Unicode;
-const MultiStyleText = @import("multistyletext.zig").MultiStyleText;
+pub const StyleMap = std.HashMap(usize, usize, std.hash_map.AutoContext(usize), std.hash_map.default_max_load_percentage);
+pub const StyleList = std.ArrayList(vaxis.Style);
 
-// This widget should be the interface for a box that renders text for text input stream
-// It contains a multistyletext - which should be an interface to render text in a container
-//      - with multiple styles for different ranges
-// It should manage text selection, scolling and the interface to manage the buffer
+pub const Output = @This();
+const Regex = @import("regex").Regex;
+pub const ProcessBuffer = process_buffer_mod.ProcessBuffer;
+pub const Filter = process_buffer_mod.Filter;
+pub const Pipeline = process_buffer_mod.Pipeline;
+pub const Reviewer = process_buffer_mod.Reviewer;
+pub const Cmd = cmd_mod.Cmd;
+const Handler = cmd_mod.Handler;
 
-// Steps
-// 1) - draw a border
-// 2) - draw text in border
-// 3) - set up scrolling
-// 4) - set up text selection and copy
-// 5) - output should create a bufferwriter that calls the multistyletext bufferwriter
-//          - this bufferwriter should inject style into the data AND add other meta data
-//          - that the output should track (ie timestamps)
+// output contain the process buffer
+// output will manage handlers
 
-pub const Output = struct {
-    alloc: std.mem.Allocator,
-    text: *MultiStyleText,
-    scroll_bars: ScrollBar,
-    border: Border,
-    process_name: []const u8,
-    temp: vxfw.Text = undefined,
+arena: std.heap.ArenaAllocator,
+nonowned_process_buffer: *ProcessBuffer,
+cmd_ref: ?*Cmd = null,
+handlers_ids: std.ArrayList(cmd_mod.HandleId),
+filter_ids: std.ArrayList(Filter.HandleId),
+reviewer_ids: std.ArrayList(Reviewer.HandleId),
 
-    pub fn init(alloc: std.mem.Allocator, processname: []const u8) !*Output {
-        const multistyletext = try alloc.create(MultiStyleText);
-        errdefer alloc.destroy(multistyletext);
-        multistyletext.* = .{};
-        const pname = try alloc.dupe(u8, processname);
-        errdefer alloc.free(pname);
-        var output = try alloc.create(Output);
-        errdefer alloc.destroy(output);
-        output.* = .{
-            .alloc = alloc,
-            .text = multistyletext,
-            .process_name = pname,
-            .scroll_bars = undefined,
-            .border = undefined,
+style_list: StyleList,
+style_map: StyleMap,
+
+const UnfoldHandlerData = .{ .event_str = "unfold", .handle = handleUnfoldCmd };
+const FoldHandlerData = .{ .event_str = "fold", .handle = handleFoldCmd };
+const FoldFilterData = struct { regexs: []Regex };
+
+const UncolorHandlerData = .{ .event_str = "uncolor", .handle = handleUncolorCmd };
+const ColorHandlerData = .{ .event_str = "color", .handle = handleColorCmd };
+const ColorPattern = struct { regex: Regex, style: vaxis.Style, full_line: bool = false };
+const ColorReviewerData = struct { style_patterns: []ColorPattern, output: *Output };
+
+pub fn init(alloc: std.mem.Allocator, process_buf: *ProcessBuffer) Output {
+    return .{
+        .arena = std.heap.ArenaAllocator.init(alloc),
+        .handlers_ids = std.ArrayList(cmd_mod.HandleId).init(alloc),
+        .filter_ids = std.ArrayList(Filter.HandleId).init(alloc),
+        .reviewer_ids = std.ArrayList(Reviewer.HandleId).init(alloc),
+        .nonowned_process_buffer = process_buf,
+        .style_list = StyleList.init(alloc),
+        .style_map = StyleMap.init(alloc),
+    };
+}
+
+pub fn deinit(self: *Output) void {
+    if (self.cmd_ref != null) {
+        self.unsubscribeHandlersFromCmd();
+    }
+    self.handlers_ids.deinit();
+    for (self.filter_ids.items) |fId| {
+        var filter = self.nonowned_process_buffer.pipeline.removeFilter(fId);
+        if (filter) |*f| {
+            f.deinit();
+        }
+    }
+    self.filter_ids.deinit();
+    for (self.reviewer_ids.items) |rId| {
+        var reviewer = self.nonowned_process_buffer.pipeline.removeReviewer(rId);
+        if (reviewer) |*r| {
+            r.deinit();
+        }
+    }
+    self.reviewer_ids.deinit();
+    self.style_map.deinit();
+    self.style_list.deinit();
+    self.arena.deinit();
+}
+
+fn handleFoldCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @alignCast(@ptrCast(listener));
+
+    //TODO: check if active first
+
+    const alloc = self.arena.allocator();
+
+    // parse the arguments
+    const arguments = try utils.parseArgsLineWithQuoteGroups(alloc, args);
+    defer {
+        for (arguments) |s| alloc.free(s);
+        alloc.free(arguments);
+    }
+
+    // create a list of compiled regex objects
+    var regex_list = std.ArrayList(Regex).init(alloc);
+    for (arguments) |arg| {
+        const re = Regex.compile(alloc, arg) catch {
+            continue;
         };
-        output.text.softwrap = false;
-        output.scroll_bars = .{
-            .scroll_view = .{
-                .wheel_scroll = 1,
-                .children = .{
-                    .builder = .{
-                        .userdata = output,
-                        .buildFn = Output.getScrollItems,
-                    },
-                },
-            },
-            .estimated_content_height = 20,
-            .estimated_content_width = 30,
+        try regex_list.append(re);
+    }
+
+    const filter_data = try alloc.create(FoldFilterData);
+    filter_data.* = .{ .regexs = try regex_list.toOwnedSlice() };
+
+    // we need to recalculate the color styles
+    self.clearStyle();
+
+    // Create the filter and add to the pipeline
+    const filter = try Filter.init(self.arena.allocator(), filter_data, fold);
+    try self.filter_ids.append(filter.id);
+    try self.nonowned_process_buffer.addFilter(filter);
+}
+
+fn handleUnfoldCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @alignCast(@ptrCast(listener));
+    // we need to recalculate the color styles
+    self.clearStyle();
+
+    try self.nonowned_process_buffer.removeAllFilters();
+    self.filter_ids.clearAndFree();
+}
+
+fn handleUncolorCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @alignCast(@ptrCast(listener));
+    self.clearStyle();
+    try self.nonowned_process_buffer.removeAllReviewers();
+    self.reviewer_ids.clearAndFree();
+}
+
+fn fold(_: *const Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.Error!Filter.TransformResult {
+    if (line.len == 0) return Filter.TransformResult{ .empty = {} };
+
+    const fold_data: *FoldFilterData = @ptrCast(@alignCast(data));
+
+    for (fold_data.regexs) |*re| {
+        std.debug.print("Output:fold() comparing \"{s}\"\n", .{line});
+        if (try re.partialMatch(line) == true) {
+            std.debug.print("Output:fold -> regex found a match on line {s}\n", .{line});
+
+            // found match
+            return Filter.TransformResult{ .line = line };
+        }
+    }
+    return Filter.TransformResult{ .empty = {} };
+}
+
+// a rule
+//"pattern": "\\[Error\\]",
+//"just_pattern": true,
+//"foreground_color": "220,6,6", or null
+//"background_color": "200,184,208" or null
+const ColorGround = enum { Fg, Bg };
+const Red = vaxis.Color{ .rgb = .{ 255, 0, 0 } };
+const Green = vaxis.Color{ .rgb = .{ 0, 255, 0 } };
+const Blue = vaxis.Color{ .rgb = .{ 0, 0, 255 } };
+const Yellow = vaxis.Color{ .rgb = .{ 255, 255, 0 } };
+const Magenta = vaxis.Color{ .rgb = .{ 255, 0, 255 } };
+const Cyan = vaxis.Color{ .rgb = .{ 0, 255, 255 } };
+const White = vaxis.Color{ .rgb = .{ 255, 255, 255 } };
+const Black = vaxis.Color{ .rgb = .{ 0, 0, 0 } };
+fn parseColor(arg: []const u8, ground: ColorGround) !vaxis.Style {
+    if (std.mem.eql(u8, arg, "red")) {
+        return switch (ground) {
+            .Bg => return vaxis.Style{ .bg = Red },
+            .Fg => return vaxis.Style{ .fg = Red },
+        };
+    } else if (std.mem.eql(u8, arg, "green")) {
+        return switch (ground) {
+            .Bg => return vaxis.Style{ .bg = Green },
+            .Fg => return vaxis.Style{ .fg = Green },
+        };
+    } else if (std.mem.eql(u8, arg, "yellow")) {
+        return switch (ground) {
+            .Bg => return vaxis.Style{ .bg = Yellow },
+            .Fg => return vaxis.Style{ .fg = Yellow },
+        };
+    } else if (std.mem.eql(u8, arg, "blue")) {
+        return switch (ground) {
+            .Bg => return vaxis.Style{ .bg = Blue },
+            .Fg => return vaxis.Style{ .fg = Blue },
+        };
+    } else if (std.mem.eql(u8, arg, "magenta")) {
+        return switch (ground) {
+            .Bg => return vaxis.Style{ .bg = Magenta },
+            .Fg => return vaxis.Style{ .fg = Magenta },
+        };
+    } else if (std.mem.eql(u8, arg, "cyan")) {
+        return switch (ground) {
+            .Bg => return vaxis.Style{ .bg = Cyan },
+            .Fg => return vaxis.Style{ .fg = Cyan },
+        };
+    } else if (std.mem.eql(u8, arg, "white")) {
+        return switch (ground) {
+            .Bg => return vaxis.Style{ .bg = White },
+            .Fg => return vaxis.Style{ .fg = White },
+        };
+    } else if (std.mem.eql(u8, arg, "black")) {
+        return switch (ground) {
+            .Bg => return vaxis.Style{ .bg = Black },
+            .Fg => return vaxis.Style{ .fg = Black },
+        };
+    } else {
+        const parts = utils.parseTripleInt(arg) catch {
+            // invalid RGB code
+            return error.InvalidRGBFormat;
         };
 
-        output.border = .{ .child = output.scroll_bars.widget() };
+        // check if each part is within range
+        for (parts) |part| {
+            if (part > 255) return error.InvalidRGBFormat;
+        }
 
-        const unicode = try vaxis.Unicode.init(alloc);
-        const grapheme = try graphemedata.init(alloc);
-        output.text.style_base = .{ .fg = .{ .rgb = [3]u8{ 100, 50, 50 } } };
-        try output.text.append(alloc, .{
-            .bytes = "A string to be render in the output widget...\n",
-            .gd = &grapheme,
-            .unicode = &unicode,
-        });
-        try output.text.append(alloc, .{
-            .bytes = "A somewhat different string to be render in the output widget...\n",
-            .gd = &grapheme,
-            .unicode = &unicode,
-        });
-
-        return output;
-    }
-
-    pub fn deinit(self: *Output) void {
-        self.text.deinit(self.alloc);
-        self.alloc.destroy(self.text);
-        self.alloc.destroy(self);
-    }
-
-    fn getScrollItems(ptr: *const anyopaque, idx: usize, _: usize) ?vxfw.Widget {
-        const self: *Output = @constCast(@ptrCast(@alignCast(ptr)));
-        if (idx == 0) {
-            //self.temp = .{
-            //    .text = self.text.content.items,
-            //};
-            return self.temp.widget();
-        } else return null;
-        //if (idx == 0) {
-        //    var multistyletext = self.text;
-        //    return multistyletext.widget();
-        //} else return null;
-    }
-
-    pub fn widget(self: *Output) vxfw.Widget {
-        return .{
-            .userdata = self,
-            .eventHandler = Output.typeErasedEventHandler,
-            .captureHandler = Output.typeErasedCaptureHandler,
-            .drawFn = Output.typeErasedDrawFn,
+        const u8_parts: [3]u8 = .{
+            @intCast(parts[0]),
+            @intCast(parts[1]),
+            @intCast(parts[2]),
+        };
+        return switch (ground) {
+            .Bg => return vaxis.Style{ .bg = .{ .rgb = u8_parts } },
+            .Fg => return vaxis.Style{ .fg = .{ .rgb = u8_parts } },
         };
     }
+    return error.InvalidArgument;
+}
 
-    pub fn typeErasedCaptureHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
-        _ = ptr;
-        _ = ctx;
-        _ = event;
+const ArgStateMachine = enum {
+    Empty,
+    Fg,
+    Bg,
+};
+fn createStyleFromArg(arg: []const u8) ?ColorPattern {
+    // fg:color:bg:color:line
+
+    var state = ArgStateMachine.Empty;
+    var parsedBg = false;
+    var parsedFg = false;
+    var color_line = false;
+    var isFirstSegment = true;
+    var it = std.mem.tokenizeScalar(u8, arg, ':');
+    var result_style: ?vaxis.Style = null;
+    while (it.next()) |segment| {
+        switch (state) {
+            .Fg => {
+                const style = parseColor(segment, .Fg) catch {
+                    return null;
+                };
+                if (result_style) |*s| {
+                    s.fg = style.fg;
+                } else {
+                    result_style = style;
+                }
+                state = .Empty;
+            },
+            .Bg => {
+                const style = parseColor(segment, .Bg) catch {
+                    return null;
+                };
+                if (result_style) |*s| {
+                    s.bg = style.bg;
+                } else {
+                    result_style = style;
+                }
+                state = .Empty;
+            },
+            .Empty => {
+                if (std.mem.eql(u8, segment, "fg")) {
+                    if (parsedFg) {
+                        // invalid arg, can't have fg twice
+                        return null;
+                    } else {
+                        parsedFg = true;
+                        state = .Fg;
+                    }
+                    continue;
+                } else if (std.mem.eql(u8, segment, "bg")) {
+                    if (parsedBg) {
+                        // invalid arg, can't have fg twice
+                        return null;
+                    } else {
+                        parsedBg = true;
+                        state = .Bg;
+                    }
+                    continue;
+                } else if (std.mem.eql(u8, segment, "line") and !isFirstSegment) {
+                    // we need to parse this to make sure it is a valid
+                    std.debug.print("print full line\n", .{});
+                    color_line = true;
+                    state = .Empty;
+                    continue;
+                } else if (isFirstSegment) {
+                    // if it is the first segment we accept a color and assume fg
+                    const style = parseColor(segment, .Fg) catch {
+                        return null;
+                    };
+                    if (result_style) |*s| {
+                        s.bg = style.bg;
+                    } else {
+                        result_style = style;
+                    }
+                    state = .Empty;
+                }
+            },
+        }
+        isFirstSegment = false;
     }
 
-    pub fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-        var self: *Output = @ptrCast(@alignCast(ptr));
-        return self.draw(ctx);
+    if (result_style) |res| {
+        return ColorPattern{ .regex = undefined, .full_line = color_line, .style = res };
+    } else return null;
+}
+
+fn handleColorCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @alignCast(@ptrCast(listener));
+    const alloc = self.arena.allocator();
+
+    // parse the arguments for the color command
+    const arg_array = try utils.parseArgsLineWithQuoteGroups(alloc, args);
+    defer {
+        for (arg_array) |s| alloc.free(s);
+        alloc.free(arg_array);
     }
 
-    pub fn typeErasedEventHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
-        const self: *Output = @ptrCast(@alignCast(ptr));
-        return try self.handleEvent(ctx, event);
+    if (arg_array.len % 2 != 0) {
+        // don't parse any arguments if the full line is invalid
+        return;
     }
 
-    pub fn handleEvent(self: *Output, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
-        switch (event) {
-            .tick => {
-                ctx.redraw = true;
-            },
-            .mouse_enter => {
-                std.debug.print("mouse enter output\n", .{});
-                try self.scroll_bars.handleEvent(ctx, event);
-                try self.scroll_bars.scroll_view.handleEvent(ctx, event);
-            },
-            .mouse_leave => {
-                std.debug.print("mouse leave output\n", .{});
-                try self.scroll_bars.handleEvent(ctx, event);
-                try self.scroll_bars.scroll_view.handleEvent(ctx, event);
-            },
-            .mouse => |mouse| {
-                std.debug.print("output: mouse type {?}\n", .{mouse.type});
-                try self.scroll_bars.handleEvent(ctx, event);
-                try self.scroll_bars.scroll_view.handleEvent(ctx, event);
-            },
-            .key_press => {
-                std.debug.print("key press\n", .{});
-                try self.scroll_bars.handleEvent(ctx, event);
-                try self.scroll_bars.scroll_view.handleEvent(ctx, event);
-            },
-            else => {},
+    // each pair comes in the form of `regex` `style`
+    // add each pair
+    var color_patterns = std.ArrayList(ColorPattern).init(alloc);
+    for (0..arg_array.len / 2) |i| {
+        const regex_arg = arg_array[i * 2];
+        const style_arg = arg_array[i * 2 + 1];
+
+        const re = Regex.compile(alloc, regex_arg) catch {
+            continue;
+        };
+        var color_pattern = createStyleFromArg(style_arg);
+        if (color_pattern == null) continue;
+
+        color_pattern.?.regex = re;
+        try color_patterns.append(color_pattern.?);
+    }
+
+    // Create the data object for the colorReviewer
+    const reviewer_data = try alloc.create(ColorReviewerData);
+    reviewer_data.* = .{
+        .output = self,
+        .style_patterns = try color_patterns.toOwnedSlice(),
+    };
+
+    // Create and add the reviewer to the process buffer
+    const reviewer = try Reviewer.init(self.arena.allocator(), reviewer_data, color);
+    try self.reviewer_ids.append(reviewer.id);
+    try self.nonowned_process_buffer.addReviewer(reviewer);
+}
+
+fn color(_: *const Reviewer, data: *anyopaque, metadata: Pipeline.MetaData, line: []const u8) std.mem.Allocator.Error!void {
+    const color_data: *ColorReviewerData = @ptrCast(@alignCast(data));
+
+    for (color_data.style_patterns) |*pattern| {
+        if (try pattern.regex.captures(line)) |c| {
+            if (pattern.full_line) {
+                std.debug.print("match full line {s}\n", .{pattern.regex.string});
+                std.debug.print("start of match = {d}\n", .{metadata.bufferOffset});
+                std.debug.print("end of match = {d}\n", .{metadata.bufferOffset + line.len - 1});
+                try color_data.output.updateStyle(
+                    pattern.style,
+                    metadata.bufferOffset,
+                    metadata.bufferOffset + line.len - 1,
+                );
+            } else {
+                for (0..c.len()) |n| {
+                    const span = c.boundsAt(n).?;
+                    std.debug.print("{s}\n", .{pattern.regex.string});
+                    std.debug.print("start of match = {d}\n", .{metadata.bufferOffset + span.lower});
+                    std.debug.print("end of match = {d}\n", .{metadata.bufferOffset + span.upper});
+                    try color_data.output.updateStyle(
+                        pattern.style,
+                        metadata.bufferOffset + span.lower,
+                        metadata.bufferOffset + span.upper,
+                    );
+                }
+            }
+        }
+    }
+}
+
+pub fn clearStyle(self: *Output) void {
+    self.style_list.clearAndFree();
+    self.style_map.clearAndFree();
+}
+
+pub fn updateStyle(self: *Output, style: vaxis.Style, begin_offset: usize, end_offset: usize) !void {
+    const style_index = blk: {
+        for (self.style_list.items, 0..) |s, i| {
+            if (std.meta.eql(s, style)) {
+                break :blk i;
+            }
+        }
+        try self.style_list.append(style);
+        break :blk self.style_list.items.len - 1;
+    };
+    for (begin_offset..end_offset + 1) |i| {
+        try self.style_map.put(i, style_index);
+    }
+}
+
+pub fn subscribeHandlersToCmd(self: *Output, cmd: *Cmd) !void {
+    std.debug.assert(self.cmd_ref == null);
+
+    self.cmd_ref = cmd;
+
+    // Add fold handler
+    const fold_handler: Handler = .{
+        .event_str = FoldHandlerData.event_str,
+        .handle = FoldHandlerData.handle,
+        .listener = self,
+    };
+    const fold_id = try self.cmd_ref.?.addHandler(fold_handler);
+    try self.handlers_ids.append(fold_id);
+
+    // Add unfold handler
+    const unfold_handler: Handler = .{
+        .event_str = UnfoldHandlerData.event_str,
+        .handle = UnfoldHandlerData.handle,
+        .listener = self,
+    };
+    const unfold_id = try self.cmd_ref.?.addHandler(unfold_handler);
+    try self.handlers_ids.append(unfold_id);
+
+    // Add color handler
+    const color_handler: Handler = .{
+        .event_str = ColorHandlerData.event_str,
+        .handle = ColorHandlerData.handle,
+        .listener = self,
+    };
+    const color_id = try self.cmd_ref.?.addHandler(color_handler);
+    try self.handlers_ids.append(color_id);
+
+    // Add uncolor handler
+    const uncolor_handler: Handler = .{
+        .event_str = UncolorHandlerData.event_str,
+        .handle = UncolorHandlerData.handle,
+        .listener = self,
+    };
+    const uncolor_id = try self.cmd_ref.?.addHandler(uncolor_handler);
+    try self.handlers_ids.append(uncolor_id);
+}
+
+pub fn unsubscribeHandlersFromCmd(self: *Output) void {
+    std.debug.assert(self.cmd_ref != null);
+
+    for (self.handlers_ids.items) |id| {
+        self.cmd_ref.?.removeHandler(id);
+    }
+
+    self.cmd_ref = null;
+}
+
+fn copyBuffer(self: *const Output, alloc: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+    return self.nonowned_process_buffer.copyFilteredBuffer(alloc);
+}
+
+fn copyUnfiltedBuffer(self: *const Output, alloc: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+    // TODO
+    self.nonowned_process_buffer.copy(alloc);
+}
+
+test "folding text" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var process_buffer = try ProcessBuffer.init(alloc);
+    var output = Output.init(alloc, process_buffer);
+    defer process_buffer.deinit();
+    defer output.deinit();
+
+    try process_buffer.append(
+        \\line 1: apples
+        \\line 2: carrots
+        \\line 3: carrots
+        \\line 4: apples
+        \\line 5: carrots
+        \\line 6: apples
+        \\line 7: carrots
+    );
+
+    const fold_args = "apples";
+    try Output.handleFoldCmd(fold_args, &output);
+    const buffer = try output.copyBuffer(alloc);
+    defer alloc.free(buffer);
+
+    try testing.expectEqualStrings(
+        \\line 1: apples
+        \\line 4: apples
+        \\line 6: apples
+    , buffer);
+}
+
+// TODO test the color arg parsing
+// TODO test using the pipeline with color reviewers
+// TODO test coloring in multistyletext...
+//   there seems to be an off by 1 due to newlines
+
+test "coloring text" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var process_buffer = try ProcessBuffer.init(alloc);
+    var output = Output.init(alloc, process_buffer);
+    defer process_buffer.deinit();
+    defer output.deinit();
+
+    try process_buffer.append(
+        \\line 1: apples
+        \\line 2: carrots
+        \\line 3: carrots
+        \\line 4: apples
+        \\line 5: carrots
+        \\line 6: apples
+        \\line 7: carrots
+    );
+    const apple_len: comptime_int = "apples".len;
+    const apple_line_len: comptime_int = "line 1: apples\n".len;
+    const carrots_line_len: comptime_int = "line 1: carrots\n".len;
+    const prefix_len: comptime_int = "line 1: ".len;
+
+    const color_args = "apples red";
+    try Output.handleColorCmd(color_args, &output);
+    const buffer = try output.copyBuffer(alloc);
+    defer alloc.free(buffer);
+
+    var expected_list = Output.StyleList.init(alloc);
+    defer expected_list.deinit();
+    try expected_list.append(vaxis.Style{ .fg = .{ .rgb = .{ 255, 0, 0 } } });
+
+    var expected_map = Output.StyleMap.init(alloc);
+    defer expected_map.deinit();
+
+    for (prefix_len..prefix_len + apple_len) |i| {
+        try expected_map.put(i, 0);
+    }
+
+    const starting_ofs = apple_line_len + carrots_line_len * 2 + prefix_len; // add 3 bytes for newlines
+    for (starting_ofs..starting_ofs + apple_len) |i| {
+        try expected_map.put(i, 0);
+    }
+
+    const starting_ofs2 = apple_line_len * 2 + carrots_line_len * 3 + prefix_len; // add 5 bytes for newlines
+    for (starting_ofs2..starting_ofs2 + apple_len) |i| {
+        try expected_map.put(i, 0);
+    }
+
+    errdefer {
+        std.debug.print("expected...\n", .{});
+        var expected_it = expected_map.iterator();
+        while (expected_it.next()) |entry| {
+            std.debug.print("map key: {d} value: {d}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+        }
+        std.debug.print("actual...\n", .{});
+        var actual_it = output.style_map.iterator();
+        while (actual_it.next()) |entry| {
+            std.debug.print("map key: {d} value: {d}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
         }
     }
 
-    pub fn draw(self: *Output, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-        const max_size = ctx.max.size();
+    try testing.expectEqualDeep(expected_list, output.style_list);
 
-        self.temp = .{
-            .text = try self.text.copyText(ctx.arena),
-        };
-
-        //self.border = .{ .child = self.scroll_bars.widget() };
-        const border_child: vxfw.SubSurface = .{
-            .origin = .{ .row = 0, .col = 0 },
-            .surface = try self.border.draw(ctx),
-        };
-
-        const title: vxfw.Text = .{ .text = self.process_name };
-        const title_child: vxfw.SubSurface = .{
-            .z_index = 1,
-            .origin = .{ .row = 0, .col = 2 },
-            .surface = try title.draw(ctx),
-        };
-
-        const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
-        children[0] = border_child;
-        children[1] = title_child;
-
-        return .{
-            .size = max_size,
-            .widget = self.widget(),
-            .buffer = &.{},
-            .children = children,
-        };
+    try testing.expectEqual(expected_map.count(), output.style_map.count());
+    var it = expected_map.iterator();
+    while (it.next()) |entry| {
+        const actual_value = output.style_map.get(entry.key_ptr.*) orelse return error.MissingKey;
+        try testing.expectEqual(entry.value_ptr.*, actual_value);
     }
-};
-
-test "Add a buffer to an Output" {
-    // const alloc = std.testing.allocator;
-    // const output_widget: Output = .{};
-    // defer output_widget.deinit();
-
-    // const gd = grapheme.GraphemeData.init(alloc);
-    // defer gd.deinit();
-    // const unicode = Unicode.init(alloc);
-    // defer unicode.deinit();
-
-    // output_widget.buffer.append(alloc, .{
-    //     .bytes = "123456",
-    //     .gd = &gd,
-    //     .unicode = &unicode,
-    // });
 }
