@@ -12,7 +12,9 @@ pub const ProcessBuffer = struct {
     alloc: std.mem.Allocator,
     m: std.Thread.Mutex,
     buffer: std.ArrayList(u8),
+    buffer_newlines: std.ArrayList(usize),
     filtered_buffer: std.ArrayList(u8),
+    filtered_newlines: std.ArrayList(usize),
     lastNewLine: usize = 0,
     pipeline: Pipeline,
 
@@ -22,7 +24,9 @@ pub const ProcessBuffer = struct {
             .alloc = alloc,
             .m = std.Thread.Mutex{},
             .buffer = std.ArrayList(u8).init(alloc),
+            .buffer_newlines = std.ArrayList(usize).init(alloc),
             .filtered_buffer = std.ArrayList(u8).init(alloc),
+            .filtered_newlines = std.ArrayList(usize).init(alloc),
             .pipeline = try Pipeline.init(alloc),
         };
         return self;
@@ -30,7 +34,9 @@ pub const ProcessBuffer = struct {
 
     pub fn deinit(self: *ProcessBuffer) void {
         self.buffer.deinit();
+        self.buffer_newlines.deinit();
         self.filtered_buffer.deinit();
+        self.filtered_newlines.deinit();
         self.pipeline.deinit();
         self.alloc.destroy(self);
     }
@@ -39,8 +45,21 @@ pub const ProcessBuffer = struct {
         self.m.lock();
         defer self.m.unlock();
 
+        try update_newline_indexs(&self.buffer_newlines, buf, self.buffer.items.len);
         try self.buffer.appendSlice(buf);
         try self.processPipeline();
+    }
+
+    fn update_newline_indexs(
+        newline_cache: *std.ArrayList(usize),
+        buf: []const u8,
+        offset: usize,
+    ) std.mem.Allocator.Error!void {
+        for (buf, 0..) |c, i| {
+            if (c == '\n') {
+                try newline_cache.append(i + offset);
+            }
+        }
     }
 
     pub fn processPipeline(self: *ProcessBuffer) !void {
@@ -59,6 +78,11 @@ pub const ProcessBuffer = struct {
                     );
                     defer self.alloc.free(filtered_lines);
                     self.lastNewLine = i + 1;
+                    try update_newline_indexs(
+                        &self.filtered_newlines,
+                        filtered_lines,
+                        self.filtered_buffer.items.len,
+                    );
                     try self.filtered_buffer.appendSlice(filtered_lines);
                 }
             },
@@ -74,6 +98,11 @@ pub const ProcessBuffer = struct {
                     );
                     defer self.alloc.free(filtered_lines);
                     self.lastNewLine = i + 1;
+                    try self.update_newline_indexs(
+                        self.filtered_newlines,
+                        filtered_lines,
+                        self.filtered_buffer.items.len,
+                    );
                     try self.filtered_buffer.appendSlice(filtered_lines);
                 }
             },
@@ -81,7 +110,11 @@ pub const ProcessBuffer = struct {
     }
 
     pub fn reprocessPipeline(self: *ProcessBuffer) !void {
-        self.filtered_buffer.clearAndFree();
+        self.m.lock();
+        defer self.m.unlock();
+
+        self.filtered_newlines.clearRetainingCapacity();
+        self.filtered_buffer.clearRetainingCapacity();
         self.lastNewLine = 0;
         try self.processPipeline();
     }

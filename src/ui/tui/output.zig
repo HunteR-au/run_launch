@@ -231,28 +231,76 @@ const ArgStateMachine = enum {
 fn createStyleFromArg(arg: []const u8) ?ColorPattern {
     // fg:color:bg:color:line
 
-    var state = ArgStateMachine.Empty;
+    //var state = ArgStateMachine.Empty;
     var parsedBg = false;
     var parsedFg = false;
     var color_line = false;
     var isFirstSegment = true;
     var it = std.mem.tokenizeScalar(u8, arg, ':');
     var result_style: ?vaxis.Style = null;
-    while (it.next()) |segment| {
-        switch (state) {
-            .Fg => {
-                const style = parseColor(segment, .Fg) catch {
+    state: switch (ArgStateMachine.Empty) {
+        .Fg => {
+            const segment = it.next();
+            if (segment == null) // invalid arg
+                return null;
+
+            const style = parseColor(segment.?, .Fg) catch { // invalid arg
+                return null;
+            };
+            if (result_style) |*s| {
+                s.fg = style.fg;
+            } else {
+                result_style = style;
+            }
+            continue :state .Empty;
+        },
+        .Bg => {
+            const segment = it.next();
+            if (segment == null) // invalid arg
+                return null;
+
+            const style = parseColor(segment.?, .Bg) catch { // invalid args
+                return null;
+            };
+            if (result_style) |*s| {
+                s.bg = style.bg;
+            } else {
+                result_style = style;
+            }
+            continue :state .Empty;
+        },
+        .Empty => {
+            const is_current_seg_first = isFirstSegment;
+            if (!isFirstSegment) isFirstSegment = false;
+            const segment = it.next();
+            if (segment == null) // no more arguments
+                break :state;
+
+            if (std.mem.eql(u8, segment.?, "fg")) {
+                if (parsedFg) {
+                    // invalid arg, can't have fg twice
                     return null;
-                };
-                if (result_style) |*s| {
-                    s.fg = style.fg;
                 } else {
-                    result_style = style;
+                    parsedFg = true;
+                    continue :state .Fg;
                 }
-                state = .Empty;
-            },
-            .Bg => {
-                const style = parseColor(segment, .Bg) catch {
+                continue :state .Empty;
+            } else if (std.mem.eql(u8, segment.?, "bg")) {
+                if (parsedBg) {
+                    // invalid arg, can't have fg twice
+                    return null;
+                } else {
+                    parsedBg = true;
+                    continue :state .Bg;
+                }
+            } else if (std.mem.eql(u8, segment.?, "line") and !is_current_seg_first) {
+                // we need to parse this to make sure it is a valid
+                std.debug.print("print full line\n", .{});
+                color_line = true;
+                continue :state .Empty;
+            } else if (is_current_seg_first) {
+                // if it is the first segment we accept a color and assume fg
+                const style = parseColor(segment.?, .Fg) catch { // invalid args
                     return null;
                 };
                 if (result_style) |*s| {
@@ -260,50 +308,10 @@ fn createStyleFromArg(arg: []const u8) ?ColorPattern {
                 } else {
                     result_style = style;
                 }
-                state = .Empty;
-            },
-            .Empty => {
-                if (std.mem.eql(u8, segment, "fg")) {
-                    if (parsedFg) {
-                        // invalid arg, can't have fg twice
-                        return null;
-                    } else {
-                        parsedFg = true;
-                        state = .Fg;
-                    }
-                    continue;
-                } else if (std.mem.eql(u8, segment, "bg")) {
-                    if (parsedBg) {
-                        // invalid arg, can't have fg twice
-                        return null;
-                    } else {
-                        parsedBg = true;
-                        state = .Bg;
-                    }
-                    continue;
-                } else if (std.mem.eql(u8, segment, "line") and !isFirstSegment) {
-                    // we need to parse this to make sure it is a valid
-                    std.debug.print("print full line\n", .{});
-                    color_line = true;
-                    state = .Empty;
-                    continue;
-                } else if (isFirstSegment) {
-                    // if it is the first segment we accept a color and assume fg
-                    const style = parseColor(segment, .Fg) catch {
-                        return null;
-                    };
-                    if (result_style) |*s| {
-                        s.bg = style.bg;
-                    } else {
-                        result_style = style;
-                    }
-                    state = .Empty;
-                }
-            },
-        }
-        isFirstSegment = false;
+                continue :state .Empty;
+            }
+        },
     }
-
     if (result_style) |res| {
         return ColorPattern{ .regex = undefined, .full_line = color_line, .style = res };
     } else return null;

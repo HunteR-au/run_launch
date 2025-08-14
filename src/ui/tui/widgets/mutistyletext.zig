@@ -36,17 +36,19 @@ pub fn StyleCache(comptime StyleMap: type, comptime StyleList: type) type {
     return struct {
         map: *StyleMap,
         list: *StyleList,
+        offset: usize,
 
-        pub fn init(map: *StyleMap, list: *StyleList) StyleCache(StyleMap, StyleList) {
+        pub fn init(map: *StyleMap, list: *StyleList, ofs: usize) StyleCache(StyleMap, StyleList) {
             return .{
                 .map = map,
                 .list = list,
+                .offset = ofs,
             };
         }
 
         pub fn getStyle(self: *const @This(), byte_index: usize) ?vaxis.Style {
             const style: ?vaxis.Style = blk: {
-                if (self.map.get(byte_index)) |style_index| {
+                if (self.map.get(byte_index + self.offset)) |style_index| {
                     break :blk self.list.items[style_index];
                 }
                 break :blk null;
