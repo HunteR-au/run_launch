@@ -109,10 +109,7 @@ pub const ProcessBuffer = struct {
         }
     }
 
-    pub fn reprocessPipeline(self: *ProcessBuffer) !void {
-        self.m.lock();
-        defer self.m.unlock();
-
+    fn reprocessPipeline(self: *ProcessBuffer) !void {
         self.filtered_newlines.clearRetainingCapacity();
         self.filtered_buffer.clearRetainingCapacity();
         self.lastNewLine = 0;
@@ -232,6 +229,11 @@ pub const ProcessBuffer = struct {
         defer self.m.unlock();
 
         if (offset + len > self.filtered_buffer.items.len) {
+            std.debug.print("buffer length: {d}, offset: {d}, to_idx: {d}\n", .{
+                self.buffer.items.len,
+                offset,
+                len,
+            });
             return Error.InvalidArguments;
         }
         return try alloc.dupe(u8, self.filtered_buffer.items[offset .. offset + len]);
@@ -250,5 +252,21 @@ pub const ProcessBuffer = struct {
             return Error.InvalidArguments;
         }
         return try alloc.dupe(u8, self.buffer.items[offset .. offset + len]);
+    }
+
+    pub fn getFilteredBufferLength(
+        self: *ProcessBuffer,
+    ) usize {
+        self.m.lock();
+        defer self.m.unlock();
+        return self.filtered_buffer.items.len;
+    }
+
+    pub fn getNumFilteredNewlines(
+        self: *ProcessBuffer,
+    ) usize {
+        self.m.lock();
+        defer self.m.unlock();
+        return self.filtered_newlines.items.len;
     }
 };
