@@ -20,8 +20,8 @@ jobs:
       - name: Install minisign
         shell: bash
         run: |
-          wget https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip
-          unzip minisign-0.12-win64.zip -d ${HOME}/minisign
+          curl -L -o minisign.zip https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip
+          tar -xf minisign.zip -C ${HOME}
           echo "${HOME}/minisign" >> $GITHUB_PATH
 
       - name: Build Windows binary
