@@ -17,12 +17,12 @@ jobs:
         with:
           version: 0.14.1
 
-      - name: Install minisign
-        shell: bash
+      - name: Download minisign
+        shell: pwsh
         run: |
-          curl -L -o minisign.zip https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip
-          tar -xf minisign.zip -C ${HOME}
-          echo "${HOME}/minisign" >> $GITHUB_PATH
+          Invoke-WebRequest -Uri "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip" -OutFile "minisign.zip"
+          Expand-Archive -Path "minisign.zip" -DestinationPath "$env:USERPROFILE\minisign"
+          echo "$env:USERPROFILE\minisign" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
 
       - name: Build Windows binary
         run: zig build -Doptimize=ReleaseFast
@@ -30,14 +30,13 @@ jobs:
       - name: Package Windows binary
         run: |
           mkdir zig-out\dist\windows
-          copy zig-out\bin\*.exe zig-out\dist\windows\
-          tar -czf zig-out\your_binary_windows.tar.gz -C zig-out\dist\windows .
+          copy zig-out\bin\run_launch.exe zig-out\dist\windows\
 
       - name: Sign Windows tarball
         shell: bash
         run: |
           echo "${MINISIGN_SECRET_KEY}" > minisign.key
-          ./minisign/minisign.exe -S -s minisign.key -m zig-out/your_binary_windows.tar.gz
+          ./minisign/minisign.exe -S -s minisign.key -m zig-out\dist\windows\run_launch.exe
           rm -f minisign.key
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
@@ -47,8 +46,8 @@ jobs:
         with:
           name: windows-artifacts
           path: |
-            zig-out/your_binary_windows.tar.gz
-            zig-out/your_binary_windows.tar.gz.minisig
+            zig-out\dist\windows\run_launch.exe
+            zig-out\dist\windows\run_launch.exe.minisign
 
   ubuntu-release:
     runs-on: ubuntu-latest
@@ -72,8 +71,9 @@ jobs:
       - name: Build and sign Linux tarball
         run: |
           echo "${MINISIGN_SECRET_KEY}" > minisign.key
-          zig build -Doptimize=ReleaseFast -Dtarball --summary all
-          find zig-out -name '*.tar.gz' -exec minisign -S -s minisign.key -m {} \;
+          zig build -Doptimize=ReleaseFast
+          cp zig-out/bin/run_launch zig-out/dist/ubuntu/
+          find zig-out/dist -name 'run_launch' -exec minisign -S -s minisign.key -m {} \;
           rm -f minisign.key
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
@@ -95,12 +95,12 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: windows-artifacts
-          path: zig-out/
+          path: zig-out\dist\windows\
 
       - uses: actions/download-artifact@v4
         with:
           name: linux-artifacts
-          path: zig-out/
+          path: zig-out\dist\ubuntu\
 
       - name: Publish release
         uses: ncipollo/release-action@v1
@@ -108,5 +108,7 @@ jobs:
           tag: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           artifacts: |
-            zig-out/**/*.tar.gz
-            zig-out/**/*.tar.gz.minisig
+            zig-out\dist\ubuntu\run_launch
+            zig-out\dist\ubuntu\run_launch.minisign
+            zig-out\dist\windows\run_launch.exe
+            zig-out\dist\windows\run_launch.exe.minisign
