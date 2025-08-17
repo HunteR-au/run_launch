@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.14.1
+
+      - name: Install minisign
+        shell: bash
+        run: |
+          wget https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip
+          unzip minisign-0.12-win64.zip -d ${HOME}/minisign
+          echo "${HOME}/minisign" >> $GITHUB_PATH
+
+      - name: Build Windows binary
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Package Windows binary
+        run: |
+          mkdir zig-out\dist\windows
+          copy zig-out\bin\*.exe zig-out\dist\windows\
+          tar -czf zig-out\your_binary_windows.tar.gz -C zig-out\dist\windows .
+
+      - name: Sign Windows tarball
+        shell: bash
+        run: |
+          echo "${MINISIGN_SECRET_KEY}" > minisign.key
+          ./minisign/minisign.exe -S -s minisign.key -m zig-out/your_binary_windows.tar.gz
+          rm -f minisign.key
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: |
+            zig-out/your_binary_windows.tar.gz
+            zig-out/your_binary_windows.tar.gz.minisig
+
+  ubuntu-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.14.1
+
+      - name: Install minisign
+        run: |
+          wget https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          tar -xf minisign-0.12-linux.tar.gz --directory ${HOME}
+          echo "${HOME}/minisign-linux/x86_64/" >> $GITHUB_PATH
+
+      - name: Build and sign Linux tarball
+        run: |
+          echo "${MINISIGN_SECRET_KEY}" > minisign.key
+          zig build -Doptimize=ReleaseFast -Dtarball --summary all
+          find zig-out -name '*.tar.gz' -exec minisign -S -s minisign.key -m {} \;
+          rm -f minisign.key
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-artifacts
+          path: |
+            zig-out/**/*.tar.gz
+            zig-out/**/*.tar.gz.minisig
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [windows-release, ubuntu-release]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-artifacts
+          path: zig-out/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-artifacts
+          path: zig-out/
+
+      - name: Publish release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          artifacts: |
+            zig-out/**/*.tar.gz
+            zig-out/**/*.tar.gz.minisig
