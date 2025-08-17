@@ -36,10 +36,11 @@ jobs:
         shell: bash
         run: |
           echo "${MINISIGN_SECRET_KEY}" > minisign.key
-          ./minisign/minisign.exe -S -s minisign.key -m zig-out\dist\windows\run_launch.exe
+          "$USERPROFILE/minisign/minisign.exe" -S -s minisign.key -m "zig-out/dist/windows/run_launch.exe"
           rm -f minisign.key
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
