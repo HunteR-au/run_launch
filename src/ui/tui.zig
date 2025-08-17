@@ -3,7 +3,6 @@ const builtin = @import("builtin");
 pub const vaxis = @import("vaxis");
 pub const uiconfig = @import("uiconfig");
 pub const view = @import("tui/view.zig");
-pub const mutiStyleText = @import("tui/multistyletext.zig");
 pub const cmdwidget = @import("tui/cmdwidget.zig");
 
 pub const OutputView = view.OutputView;
@@ -531,11 +530,17 @@ pub fn pushLogging(alloc: std.mem.Allocator, processname: []const u8, buffer: []
 }
 
 // TODOs
-// TODO add the uiconfig to the tui:module and enable output to interact with it
 // TODO make sure output commands only take effect on selected output
 // TODO Windows powershell has rendering errors...
 // TODO color title for selected outputview
 // TODO make tabs
+
+// Command features
+// pattern replace
+// text search
+
+// keyboard functions
+// jump next/prev search
 
 // TODO find_replace str cmd
 // TODO goto top/bottom of buffer

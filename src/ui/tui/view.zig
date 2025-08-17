@@ -1,6 +1,5 @@
 const std = @import("std");
 pub const vaxis = @import("vaxis");
-//pub const mutiStyleText = @import("tui/multistyletext.zig");
 pub const output_view_mod = @import("outputview.zig");
 
 pub const vxfw = vaxis.vxfw;
