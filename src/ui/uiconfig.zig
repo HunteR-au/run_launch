@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const ColorRule = struct {
+pub const ColorRule = struct {
     pattern: ?[]u8 = null,
     foreground_color: ?[]u8 = null,
     background_color: ?[]u8 = null,
@@ -52,7 +52,7 @@ const ColorRule = struct {
     }
 };
 
-const ProcessConfig = struct {
+pub const ProcessConfig = struct {
     processName: []u8,
     colorRules: []ColorRule,
 
@@ -109,7 +109,7 @@ const ProcessConfig = struct {
     }
 };
 
-const UiConfig = struct {
+pub const UiConfig = struct {
     _alloc: std.mem.Allocator,
     globalConfig: ?ProcessConfig = null,
     otherProcesses: std.ArrayList(ProcessConfig),

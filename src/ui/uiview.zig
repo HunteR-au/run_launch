@@ -1,7 +1,7 @@
 const std = @import("std");
 const webui = @import("webui");
 const embedFiles = @import("../embededFiles.zig");
-const uiconfig = @import("uiconfig.zig");
+const uiconfig = @import("uiconfig");
 
 var windowInst: ?webui = null;
 

@@ -12,10 +12,10 @@ const ScrollView = vxfw.ScrollView;
 const graphemedata = vaxis.Graphemes;
 const Unicode = vaxis.Unicode;
 //const MultiStyleText = @import("multistyletext.zig").MultiStyleText;
+
+pub const UiConfig = @import("uiconfig").UiConfig;
 pub const Output = @import("output.zig");
-
 pub const ProcessBuffer = @import("pipeline/processbuffer.zig").ProcessBuffer;
-
 const MultiStyleText = @import("widgets/mutistyletext.zig").MultiStyleText(
     Output.StyleMap,
     Output.StyleList,
@@ -102,6 +102,12 @@ pub const OutputWidget = struct {
         //self.alloc.destroy(self.text);
         self.output.deinit();
         self.alloc.destroy(self);
+    }
+
+    // We pass the uiconfig through the widget to output so the ui gets a chance
+    // to do any setup
+    pub fn setupViaUiconfig(self: *OutputWidget, config: *UiConfig) !void {
+        try self.output.setupViaUiconfig(config, self.process_name);
     }
 
     fn getScrollItems(ptr: *const anyopaque, idx: usize, _: usize) ?vxfw.Widget {
@@ -258,15 +264,6 @@ pub const OutputWidget = struct {
             self.border.style = vaxis.Style{ .fg = .{ .rgb = .{ 255, 255, 255 } } };
         }
 
-        // To not have to draw all text
-        // 1) - set windowing size (double height of output's height)
-        // 2) - get previous scrollview.total_height (which is lines of text)
-        // 3) ----- if lines is > windowing size
-        // 4) ---------- capture events to control windowing (windowing must track offset for style_map)
-        // 5) ---------- if window is at bottom, keep it there
-        // 6) ----- if lines reduces to > windowing size
-        // 7) ---------- don't window the text
-
         self.calculate_sticky_scroll();
 
         const border_child: vxfw.SubSurface = .{
@@ -294,36 +291,6 @@ pub const OutputWidget = struct {
     }
 };
 
-// NOTE:
-// window should contain a referece to either processBuffer or output
-// -- have to concern about sub-processes adding to parent_buffer
-// -- don't have to worry about UI thread (ie the loop)
-// -- -- which is where events are processed
-// -- probably want a function to copy all requred data structs
-// -- probably want a function to check process buffer len, num lines, if last line is empty
-
-// algo : update_window
-// -- get flitered buffer len and number of lines
-// -- update pending lines move +/-
-// -- if num lines has increased
-// -- -- check if on bottom and sticky
-// -- -- -- if so, stay on bottom line
-// -- -- -- else, keep on current top_line
-// -- if num lines has decreased
-// -- -- check if window size ranges beyond bottom line
-// -- -- -- calculate top_line to put on bottom of buffer
-
-// algo : getSlice(self)
-// -- get top_line
-// -- get last_line
-// -- -- using processBuffer get top_line first char index
-// -- -- using processBuffer get last_line first char index
-// -- -- if last_line_is_empty and window.last_line == buffer.last_line
-// -- -- -- set end_idx to last_newline
-// -- -- else if window.last_line != buffer.last_line
-// -- -- -- set end_idx to the index of the next newline char
-// -- -- else
-// -- -- -- set end_idx buffer.len
 const Window = struct {
     top_line: usize = 0,
     num_lines: usize,
@@ -489,123 +456,6 @@ const Window = struct {
             .copyRange(alloc, ofs, self.windowByteLen());
     }
 };
-
-// TODO: take the parent buffer out of the window!
-// TODO: make the newlines just a reference
-//const Window = struct {
-//    starting_line: usize = 0, // in lines
-//    lines: usize, // in lines
-//    parent: []u8,
-//    parent_len: usize,
-//    is_last_char_newline: bool,
-//    //TODO: just reference filtered_buffer
-//    newlines: std.ArrayList(usize),
-//    is_sticky_end: bool = true,
-//
-//    pub fn startingByteOffset(self: *Window) usize {
-//        if (self.starting_line == 0) return 0;
-//        const idx = self.starting_line - 1;
-//        std.debug.assert(idx < self.newlines.items.len);
-//        return self.newlines.items[idx] + 1;
-//    }
-//
-//    pub fn endByteOffset(self: *Window) usize {
-//        const last_line = self.bottomLine();
-//        if (last_line >= self.newlines.items.len) {
-//            // the parent has less lines than its window size
-//            return self.parent.len;
-//        } else {
-//            return self.newlines.items[last_line] + 1;
-//        }
-//    }
-//
-//    fn _totalLines(parent: []u8, newlines: *const std.ArrayList(usize)) usize {
-//        if (parent.len == 0) return 0;
-//        // check if lastchar is newline
-//        if (parent[parent.len - 1] == '\n') {
-//            return newlines.items.len;
-//        } else {
-//            return newlines.items.len + 1;
-//        }
-//    }
-//
-//    pub fn totalLines(self: *Window) usize {
-//        return _totalLines(self.parent_len, &self.newlines);
-//    }
-//
-//    inline fn bottomLine(self: *Window) usize {
-//        return self.starting_line + self.lines;
-//    }
-//
-//    pub fn linesDown(self: *Window, n: u8) bool {
-//        const total_lines = self.totalLines();
-//        const bottom_line = self.bottomLine();
-//        if (total_lines < self.lines) return false;
-//        if (total_lines <= bottom_line) return false;
-//        if (total_lines <= bottom_line + n) {
-//            self.starting_line = total_lines - self.lines;
-//        } else {
-//            self.starting_line += n;
-//        }
-//        return true;
-//    }
-//
-//    pub fn linesUp(self: *Window, n: u8) bool {
-//        const total_lines = self.totalLines();
-//        if (total_lines < self.lines) return false;
-//        if (self.starting_line == 0) return false;
-//        self.starting_line -|= n;
-//        return true;
-//    }
-//
-//    pub fn updateParent(self: *Window, new_parent: []u8, new_newlines: std.ArrayList(usize)) void {
-//        const new_total_lines = _totalLines(new_parent, &new_newlines);
-//        if (new_total_lines < self.lines) {
-//            self.starting_line = 0;
-//            self.parent_len = new_parent.len;
-//            self.newlines = new_newlines;
-//        }
-//
-//        const total_lines = self.totalLines();
-//        if (self.is_sticky_end) {
-//            // check if the window is currently at the bottom
-//            var is_bottom = false;
-//            if (total_lines <= self.bottomLine()) {
-//                is_bottom = true;
-//            }
-//
-//            if (is_bottom) {
-//                // keep window on the bottom
-//                self.parent_len = new_parent.len;
-//                self.newlines = new_newlines;
-//                self.starting_line = total_lines -| self.lines;
-//            } else {
-//                // increased parent length - keep offset the same
-//                // decreased parent length - keep offset the same unless it hits the bottom
-//
-//                // check if window will collide with the bottom
-//                if (new_total_lines < self.starting_line + self.lines) {
-//                    self.parent_len = new_parent.len;
-//                    self.newlines = new_newlines;
-//                    self.starting_line = new_total_lines -| self.lines;
-//                } else {
-//                    self.parent_len = new_parent.len;
-//                    self.newlines = new_newlines;
-//                }
-//            }
-//        }
-//    }
-//
-//    pub fn getSlice(self: *Window, parent: []u8) []u8 {
-//        if (parent.len == 0) return "";
-//        const offset = self.startingByteOffset();
-//        const offset_end = offset + self.endByteOffset();
-//        // TODO: hitting this assert
-//        std.debug.print("getSlice(): {d},{d}\n", .{ offset_end, parent.len });
-//        std.debug.assert(offset_end <= parent.len);
-//        return parent[offset..offset_end];
-//    }
-//};
 
 test "Add a buffer to an OutputWidget" {
     // const alloc = std.testing.allocator;

@@ -6,6 +6,10 @@ const cmd_mod = @import("cmd.zig");
 
 // ui data structures
 const vaxis = @import("vaxis");
+const uiconfig_mod = @import("uiconfig");
+pub const UiConfig = uiconfig_mod.UiConfig;
+pub const ProcessConfig = uiconfig_mod.ProcessConfig;
+pub const ColorRule = uiconfig_mod.ColorRule;
 pub const StyleMap = std.HashMap(usize, usize, std.hash_map.AutoContext(usize), std.hash_map.default_max_load_percentage);
 pub const StyleList = std.ArrayList(vaxis.Style);
 
@@ -317,6 +321,81 @@ fn createStyleFromArg(arg: []const u8) ?ColorPattern {
     } else return null;
 }
 
+pub fn setupViaUiconfig(
+    self: *Output,
+    config: *UiConfig,
+    ui_name: []const u8,
+) std.mem.Allocator.Error!void {
+    const alloc = self.arena.allocator();
+    var scratch_arena = std.heap.ArenaAllocator.init(alloc);
+    defer scratch_arena.deinit();
+    const salloc = scratch_arena.allocator();
+    const self_config = config.get(ui_name);
+    const global_config = config.globalConfig;
+
+    var num_color_rules: usize = 0;
+    if (global_config) |c| num_color_rules += c.colorRules.len;
+    if (self_config) |c| num_color_rules += c.colorRules.len;
+
+    if (num_color_rules == 0) return;
+
+    // combine all ProcessConfigs
+    var applied_color_rules = try std.ArrayList(*ColorRule).initCapacity(salloc, num_color_rules);
+    if (global_config) |c| {
+        for (c.colorRules) |*c_rule| {
+            try applied_color_rules.append(c_rule);
+        }
+    }
+    if (self_config) |c| {
+        for (c.colorRules) |*c_rule| {
+            try applied_color_rules.append(c_rule);
+        }
+    }
+
+    // parse all color rules
+    var patterns = std.ArrayList(ColorPattern).init(alloc);
+    for (applied_color_rules.items) |c_rule| {
+        if (c_rule.background_color == null and c_rule.foreground_color == null) continue;
+        if (c_rule.pattern == null) continue;
+
+        const re = Regex.compile(alloc, c_rule.pattern.?) catch {
+            continue;
+        };
+
+        // create style argument
+        var style_args = std.ArrayList([]u8).init(salloc);
+        if (c_rule.background_color) |bg_str| {
+            try style_args.append(try salloc.dupe(u8, "bg"));
+            try style_args.append(try salloc.dupe(u8, bg_str));
+        }
+        if (c_rule.foreground_color) |fg_str| {
+            try style_args.append(try salloc.dupe(u8, "fg"));
+            try style_args.append(try salloc.dupe(u8, fg_str));
+        }
+        if (!c_rule.just_pattern) {
+            try style_args.append(try salloc.dupe(u8, "line"));
+        }
+        const style_arg = try std.mem.join(salloc, ":", style_args.items);
+
+        var color_pattern = createStyleFromArg(style_arg);
+        if (color_pattern == null) continue;
+
+        color_pattern.?.regex = re;
+        try patterns.append(color_pattern.?);
+    }
+
+    const reviewer_data = try alloc.create(ColorReviewerData);
+    reviewer_data.* = .{
+        .output = self,
+        .style_patterns = try patterns.toOwnedSlice(),
+    };
+
+    // Create and add the reviewer to the process buffer
+    const reviewer = try Reviewer.init(self.arena.allocator(), reviewer_data, color);
+    try self.reviewer_ids.append(reviewer.id);
+    try self.nonowned_process_buffer.addReviewer(reviewer);
+}
+
 fn handleColorCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @alignCast(@ptrCast(listener));
     const alloc = self.arena.allocator();
@@ -399,6 +478,7 @@ pub fn clearStyle(self: *Output) void {
     self.style_map.clearAndFree();
 }
 
+/// Update the style structures in the output style_map and style_list
 pub fn updateStyle(self: *Output, style: vaxis.Style, begin_offset: usize, end_offset: usize) !void {
     const style_index = blk: {
         for (self.style_list.items, 0..) |s, i| {

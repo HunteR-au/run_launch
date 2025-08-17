@@ -62,6 +62,7 @@ pub fn build(b: *std.Build) !void {
 
     // Modules
     const utils = b.createModule(.{ .root_source_file = b.path("src/utils.zig") });
+    const uiconfig = b.createModule(.{ .root_source_file = b.path("src/ui/uiconfig.zig") });
     const tui = b.createModule(.{
         .root_source_file = b.path("src/ui/tui.zig"),
     });
@@ -73,6 +74,7 @@ pub fn build(b: *std.Build) !void {
     // Setup tui
     tui.addImport("vaxis", vaxis);
     tui.addImport("utils", utils);
+    tui.addImport("uiconfig", uiconfig);
     tui.addImport("regex", regex);
 
     // Setup the EXE
@@ -97,6 +99,7 @@ pub fn build(b: *std.Build) !void {
 
     // Add EXE modules
     exe_mod.addImport("utils", utils);
+    exe_mod.addImport("uiconfig", uiconfig);
     exe_mod.addImport("clap", clap);
     exe_mod.addImport("webui", webui);
     exe_mod.addImport("tui", tui);
@@ -147,6 +150,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     output_unit_tests.root_module.addImport("utils", utils);
+    output_unit_tests.root_module.addImport("uiconfig", uiconfig);
     output_unit_tests.root_module.addImport("vaxis", vaxis);
     output_unit_tests.root_module.addImport("tui", tui);
     output_unit_tests.root_module.addImport("regex", regex);
@@ -167,6 +171,7 @@ pub fn build(b: *std.Build) !void {
     });
     exe_unit_tests.root_module.addImport("tui", tui);
     exe_unit_tests.root_module.addImport("utils", utils);
+    exe_unit_tests.root_module.addImport("uiconfig", uiconfig);
     exe_unit_tests.root_module.addImport("vaxis", vaxis);
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);

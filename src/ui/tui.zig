@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 pub const vaxis = @import("vaxis");
+pub const uiconfig = @import("uiconfig");
 pub const view = @import("tui/view.zig");
 pub const mutiStyleText = @import("tui/multistyletext.zig");
 pub const cmdwidget = @import("tui/cmdwidget.zig");
@@ -127,6 +128,7 @@ const ModelState = enum { main, cmdview, jsonview };
 
 const Model = struct {
     modelview: *view.View,
+    uiconfig: ?*uiconfig.UiConfig = null,
     output_view: *OutputView,
     process_buffers: std.StringHashMap(*ProcessBuffer),
     arena: std.heap.ArenaAllocator,
@@ -376,6 +378,10 @@ var keep_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var thread: ?std.Thread = null;
 var app: vxfw.App = undefined;
 fn run_tui(alloc: std.mem.Allocator) !void {
+    // parse the ui config
+    var config = try uiconfig.parseConfigs(alloc);
+    defer config.deinit();
+
     app = try vxfw.App.init(alloc);
     defer app.deinit();
 
@@ -401,6 +407,7 @@ fn run_tui(alloc: std.mem.Allocator) !void {
     model = try alloc.create(Model);
     model.* = .{
         .output_view = output_view,
+        .uiconfig = &config,
         .modelview = model_view,
         .process_buffers = std.StringHashMap(*ProcessBuffer).init(alloc),
         .cmd_view = try cmdwidget.CmdWidget.init(alloc, unicode),
@@ -482,12 +489,22 @@ pub fn createProcessView(alloc: std.mem.Allocator, processname: []const u8) std.
             }
         }
 
-        const p_output = try OutputWidget.init(alloc, processname, buf, unicode);
+        const p_output = try OutputWidget.init(
+            alloc,
+            processname,
+            buf,
+            unicode,
+        );
         errdefer p_output.deinit();
+
+        if (model.uiconfig) |config| {
+            try p_output.setupViaUiconfig(config);
+        }
 
         // Add a reference to the cmd
         try p_output.output.subscribeHandlersToCmd(&model.cmd_view.cmd);
         try model.modelview.outputviews.items[0].add_output(p_output);
+
         app.vx.setMouseMode(app.tty.anyWriter(), true) catch {};
     }
 }
@@ -514,7 +531,7 @@ pub fn pushLogging(alloc: std.mem.Allocator, processname: []const u8, buffer: []
 }
 
 // TODOs
-// TODO fix...can't draw the whole buffer when it is big (we need to only render a partial view)
+// TODO add the uiconfig to the tui:module and enable output to interact with it
 // TODO make sure output commands only take effect on selected output
 // TODO Windows powershell has rendering errors...
 // TODO color title for selected outputview
