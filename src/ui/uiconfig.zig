@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const utils = @import("utils");
 
 pub const ColorRule = struct {
     pattern: ?[]u8 = null,
@@ -199,20 +200,34 @@ pub fn parseConfigs(
     var uiconfig = UiConfig.init(alloc);
     const max_bytes = 1024 * 1024;
 
-    const userConfigPath = switch (builtin.target.os.tag) {
-        .windows => "\\%userprofile%\\.debugUi.json",
-        else => "~\\.debugUi.json",
-    };
-
-    const userConfig: ?std.fs.File = blk2: {
-        const file = std.fs.openFileAbsolute(
-            userConfigPath,
-            .{ .mode = .read_only },
-        ) catch |err| switch (err) {
-            std.fs.File.OpenError.FileNotFound => break :blk2 null,
-            else => return err,
-        };
-        break :blk2 file;
+    const userConfig: ?std.fs.File = blk2: switch (builtin.target.os.tag) {
+        .windows => {
+            const file = std.fs.openFileAbsolute(
+                "\\%userprofile%\\.debugUi.json",
+                .{ .mode = .read_only },
+            ) catch {
+                break :blk2 null;
+            };
+            break :blk2 file;
+        },
+        else => {
+            // attempt to open file ~/.debugUi.json
+            const home_path = utils.get_home_path(alloc);
+            defer {
+                if (home_path) |p| alloc.free(p);
+            }
+            if (home_path) |prefix| {
+                const path = try std.fmt.allocPrint(alloc, "{s}/.debugUi.json", .{prefix});
+                defer alloc.free(path);
+                const file = std.fs.openFileAbsolute(
+                    path,
+                    .{ .mode = .read_only },
+                ) catch {
+                    break :blk2 null;
+                };
+                break :blk2 file;
+            } else break :blk2 null;
+        },
     };
 
     if (userConfig) |file| {
@@ -235,9 +250,8 @@ pub fn parseConfigs(
             alloc,
             ".debugUi.json",
             max_bytes,
-        ) catch |err| switch (err) {
-            std.fs.File.OpenError.FileNotFound => break :blk1 null,
-            else => return err,
+        ) catch {
+            break :blk1 null;
         };
         break :blk1 bytes;
     };
