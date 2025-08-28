@@ -45,17 +45,17 @@ pub fn transform(self: *Filter, buffer: []const u8) ![]const u8 {
         .windows => {
             const sep = "\n";
             var it = std.mem.tokenizeSequence(u8, buffer, sep);
-            std.debug.print("filter:transform()\n", .{});
+            //std.debug.print("filter:transform()\n", .{});
             while (it.next()) |line| {
-                std.debug.print("processing line: {s}\n", .{line});
-                std.debug.print("\n", .{});
+                //std.debug.print("processing line: {s}\n", .{line});
+                //std.debug.print("\n", .{});
                 switch (try self.transformLine(self, self.data, line)) {
                     .line => |new_buf| {
-                        std.debug.print("for line: {s}\ntransforming to: {s}\n", .{ line, new_buf });
+                        //std.debug.print("for line: {s}\ntransforming to: {s}\n", .{ line, new_buf });
                         try lines.append(new_buf);
                     },
                     .empty => {
-                        std.debug.print("filter:empty...\n", .{});
+                        //std.debug.print("filter:empty...\n", .{});
                     },
                 }
             }

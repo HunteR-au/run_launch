@@ -66,7 +66,7 @@ pub const CmdWidget = struct {
             .key_press => |key| {
                 if (key.matches(vaxis.Key.enter, .{})) {
                     try self.runCmd();
-                    try self.textBox.handleEvent(ctx, event);
+                    //try self.textBox.handleEvent(ctx, event);
                     return ctx.consumeAndRedraw();
                 } else if (key.matches(vaxis.Key.up, .{})) {
                     const history_idx: usize = if (self.last_history_idx) |h| h +| 1 else 0;

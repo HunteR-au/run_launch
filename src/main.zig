@@ -2,8 +2,8 @@ const std = @import("std");
 const clap = @import("clap");
 
 const utils = @import("utils");
-const Launch = @import("launch.zig");
-const Task = @import("task.zig");
+const Launch = @import("config/launch.zig");
+const Task = @import("config/task.zig");
 const uiview = @import("ui/uiview.zig");
 const tui = @import("tui");
 const runner = @import("runner/runner.zig");
@@ -50,12 +50,6 @@ pub fn main() !void {
         return RunLaunchErrors.BadPositionals;
     }
 
-    if (res.args.@"web-ui" != 0) {
-        try uiview.setupWebUI(allocator);
-    } else {
-        try tui.start_tui(allocator);
-    }
-
     var tasks: ?Task.TaskJson = null;
     defer {
         if (tasks) |t| {
@@ -74,9 +68,15 @@ pub fn main() !void {
     const launchdata = try Launch.parse_json(allocator, launchPath);
     defer launchdata.deinit(allocator);
 
-    //try writer.print("first positional arg: {s}\n", .{res.positionals[0].?});
-    //try writer.print("version: {s}\n", .{launchdata.version});
-    //try writer.print("first config name: {?s}\n", .{launchdata.configurations[0].name});
+    if (res.args.@"web-ui" != 0) {
+        try uiview.setupWebUI(allocator);
+    } else {
+        try tui.start_tui(allocator);
+    }
+
+    try writer.print("first positional arg: {s}\n", .{res.positionals[0].?});
+    try writer.print("version: {s}\n", .{launchdata.version});
+    try writer.print("first config name: {?s}\n", .{launchdata.configurations[0].name});
 
     //_ = taskNameToRun;
     if (res.args.@"web-ui" != 0) {
@@ -118,6 +118,12 @@ pub fn main() !void {
 
 // this would convert to python -m debugpy --listen 5678 ./myscript.py
 
+// further ideas for driving the program beyond launch.json
+// - a custom yml format which I can add what I want
+//      - etw events, other IPC??
+// - the ability to launch more programs after starting
+// -
+
 // TODO: python - force no debug (ie no debugpy in process execute)
 // TODO: python - deal with connect fields
 // TODO: Add env dot file arg!!!!!!! (envFile) (DONE)
@@ -126,8 +132,6 @@ pub fn main() !void {
 // TODO: tasks - problemMatcher - pretty complex data and logic...
 // TODO: make the main thread tear down if webui clicks exit
 //
-// TODO: create code to parse and run envFile (DONE)
-// TODO: add labels to configuration logic (DONE)
 // TODO: try webview-zig
 // TODO: for tui mode try - libvaxis
 

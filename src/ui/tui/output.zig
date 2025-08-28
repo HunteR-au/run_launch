@@ -137,9 +137,9 @@ fn fold(_: *const Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.
     const fold_data: *FoldFilterData = @ptrCast(@alignCast(data));
 
     for (fold_data.regexs) |*re| {
-        std.debug.print("Output:fold() comparing \"{s}\"\n", .{line});
+        //std.debug.print("Output:fold() comparing \"{s}\"\n", .{line});
         if (try re.partialMatch(line) == true) {
-            std.debug.print("Output:fold -> regex found a match on line {s}\n", .{line});
+            //std.debug.print("Output:fold -> regex found a match on line {s}\n", .{line});
 
             // found match
             return Filter.TransformResult{ .line = line };
@@ -299,7 +299,7 @@ fn createStyleFromArg(arg: []const u8) ?ColorPattern {
                 }
             } else if (std.mem.eql(u8, segment.?, "line") and !is_current_seg_first) {
                 // we need to parse this to make sure it is a valid
-                std.debug.print("print full line\n", .{});
+                //std.debug.print("print full line\n", .{});
                 color_line = true;
                 continue :state .Empty;
             } else if (is_current_seg_first) {
@@ -448,9 +448,9 @@ fn color(_: *const Reviewer, data: *anyopaque, metadata: Pipeline.MetaData, line
     for (color_data.style_patterns) |*pattern| {
         if (try pattern.regex.captures(line)) |c| {
             if (pattern.full_line) {
-                std.debug.print("match full line {s}\n", .{pattern.regex.string});
-                std.debug.print("start of match = {d}\n", .{metadata.bufferOffset});
-                std.debug.print("end of match = {d}\n", .{metadata.bufferOffset + line.len - 1});
+                //std.debug.print("match full line {s}\n", .{pattern.regex.string});
+                //std.debug.print("start of match = {d}\n", .{metadata.bufferOffset});
+                //std.debug.print("end of match = {d}\n", .{metadata.bufferOffset + line.len - 1});
                 try color_data.output.updateStyle(
                     pattern.style,
                     metadata.bufferOffset,
@@ -459,9 +459,9 @@ fn color(_: *const Reviewer, data: *anyopaque, metadata: Pipeline.MetaData, line
             } else {
                 for (0..c.len()) |n| {
                     const span = c.boundsAt(n).?;
-                    std.debug.print("{s}\n", .{pattern.regex.string});
-                    std.debug.print("start of match = {d}\n", .{metadata.bufferOffset + span.lower});
-                    std.debug.print("end of match = {d}\n", .{metadata.bufferOffset + span.upper});
+                    //std.debug.print("{s}\n", .{pattern.regex.string});
+                    //std.debug.print("start of match = {d}\n", .{metadata.bufferOffset + span.lower});
+                    //std.debug.print("end of match = {d}\n", .{metadata.bufferOffset + span.upper});
                     try color_data.output.updateStyle(
                         pattern.style,
                         metadata.bufferOffset + span.lower,
@@ -489,7 +489,7 @@ pub fn updateStyle(self: *Output, style: vaxis.Style, begin_offset: usize, end_o
         try self.style_list.append(style);
         break :blk self.style_list.items.len - 1;
     };
-    for (begin_offset..end_offset + 1) |i| {
+    for (begin_offset..end_offset) |i| {
         try self.style_map.put(i, style_index);
     }
 }

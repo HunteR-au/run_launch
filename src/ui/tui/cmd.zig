@@ -77,12 +77,12 @@ pub const Cmd = struct {
     }
 
     pub fn getHistory(self: *Cmd, idx: usize) ?[]const u8 {
-        std.debug.print("history idx = {d}\n", .{idx});
+        //std.debug.print("history idx = {d}\n", .{idx});
         if (idx >= self.history.items.len) {
             return null;
         }
         const reverse_idx = self.history.items.len - 1 -| idx;
-        std.debug.print("history idx = {d}\n", .{reverse_idx});
+        //std.debug.print("history idx = {d}\n", .{reverse_idx});
         return self.history.items[reverse_idx];
     }
 

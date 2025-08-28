@@ -1,7 +1,7 @@
 const std = @import("std");
 const utils = @import("utils");
-const Launch = @import("../launch.zig");
-const Task = @import("../task.zig");
+const Launch = @import("../config/launch.zig");
+const Task = @import("../config/task.zig");
 const debugpy = @import("pydebug.zig");
 const native = @import("native.zig");
 

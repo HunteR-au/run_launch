@@ -1,7 +1,7 @@
 const std = @import("std");
 const utils = @import("utils");
 const runner = @import("runner.zig");
-const launch = @import("../launch.zig");
+const launch = @import("../config/launch.zig");
 const builtin = @import("builtin");
 
 const python_default_path = switch (builtin.target.os.tag) {

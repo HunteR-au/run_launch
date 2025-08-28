@@ -226,6 +226,12 @@ pub fn cloneHashMap(
     return target;
 }
 
+pub fn get_home_path(alloc: std.mem.Allocator) ?[]const u8 {
+    return std.process.getEnvVarOwned(alloc, "HOME") catch {
+        return null;
+    };
+}
+
 const testing = std.testing;
 test "parseArgsLineWithQuoteGroups: with quotes" {
     const alloc = testing.allocator_instance.allocator();

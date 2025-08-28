@@ -1,5 +1,6 @@
 const std = @import("std");
 const utils = @import("utils");
+const expand = @import("expand.zig");
 
 pub const TaskPresentation = struct {
     reveal: ?[]const u8,
@@ -39,21 +40,6 @@ pub const Task = struct {
             //std.debug.print("Spawning module {any} failed.\n", .{e});
             return e;
         };
-
-        //switch (term) {
-        //    .Exited => |v| {
-        //        //std.debug.print("Task exited with code {d}\n", .{v});
-        //    },
-        //    .Signal => |v| {
-        //        //std.debug.print("Task signaled with code {d}\n", .{v});
-        //    },
-        //    .Stopped => |v| {
-        //        //std.debug.print("Task stopped with code: {d}\n", .{v});
-        //    },
-        //    .Unknown => |v| {
-        //        //std.debug.print("Task returned unknown process error: {d}\n", .{v});
-        //    },
-        //}
     }
 };
 
@@ -91,7 +77,7 @@ pub const TaskJson = struct {
         const max_bytes = 1024 * 1024;
         const data = try std.fs.cwd().readFileAlloc(self.arena.child_allocator, filepath, max_bytes);
         defer self.arena.child_allocator.free(data);
-        //std.debug.print("\n{s}\n", .{data});
+        std.debug.print("\n{s}\n", .{data});
 
         var parsed = try std.json.parseFromSlice(std.json.Value, self.arena.child_allocator, data, .{});
         defer parsed.deinit();
@@ -99,7 +85,7 @@ pub const TaskJson = struct {
         var root = parsed.value;
 
         const version_str = root.object.get("version").?.string;
-        const versioncopy = try alloc.dupe(u8, version_str);
+        const versioncopy = try copyAndAttemptExand(alloc, version_str);
         errdefer alloc.free(versioncopy);
 
         self.version = versioncopy;
@@ -118,7 +104,7 @@ pub const TaskJson = struct {
                 task_node.object.get("command").?.string,
             };
             inline for (fields, 0..) |fieldname, j| {
-                @field(tasks[i], fieldname) = try alloc.dupe(u8, strings[j]);
+                @field(tasks[i], fieldname) = try copyAndAttemptExand(alloc, strings[j]);
                 errdefer if (@field(tasks[i], fieldname)) |x| alloc.free(x);
             }
 
@@ -127,12 +113,12 @@ pub const TaskJson = struct {
             const problemMatcher_str = task_node.object.get("problemMatcher");
 
             if (group_str) |s| {
-                tasks[i].group = try alloc.dupe(u8, s.string);
+                tasks[i].group = try copyAndAttemptExand(alloc, s.string);
                 errdefer alloc.free(tasks[i].group.?);
             } else tasks[i].group = null;
 
             if (problemMatcher_str) |s| {
-                tasks[i].problemMatcher = try alloc.dupe(u8, s.string);
+                tasks[i].problemMatcher = try copyAndAttemptExand(alloc, s.string);
                 errdefer alloc.free(tasks[i].problemMatcher.?);
             } else tasks[i].problemMatcher = null;
 
@@ -147,3 +133,12 @@ pub const TaskJson = struct {
         }
     }
 };
+
+fn copyAndAttemptExand(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+    return expand.expand_string(alloc, input) catch |err| switch (err) {
+        expand.ExpandErrors.NoExpansionFound => {
+            return try alloc.dupe(u8, input);
+        },
+        else => return err,
+    };
+}

@@ -55,7 +55,7 @@ pub const View = struct {
 
     pub fn focus_outputview_by_idx(self: *View, pos: usize) !void {
         if (pos >= self.outputviews.items.len) {
-            std.debug.print("view.move_output: from_pos {d}\n", .{pos});
+            //std.debug.print("view.move_output: from_pos {d}\n", .{pos});
             return ViewErrors.InvalidArg;
         }
 
@@ -141,7 +141,7 @@ pub const View = struct {
         try self.outputviews.insert(pos, outputview);
         try self.flexitems.insert(pos, .{ .widget = outputview.widget() });
 
-        std.debug.print("view: add_outputview -> {d}\n", .{self.outputviews.items.len});
+        //std.debug.print("view: add_outputview -> {d}\n", .{self.outputviews.items.len});
         if (self.outputviews.items.len == 1) {
             try self.focus_outputview_by_idx(0);
         }
@@ -160,7 +160,7 @@ pub const View = struct {
 
     pub fn split_output(self: *View, output: *OutputWidget, from_pos: usize, dir: Direction) !void {
         if (from_pos >= self.outputviews.items.len) {
-            std.debug.print("view.split_output: from_pos {d} items.len {d}\n", .{ from_pos, self.outputviews.items.len });
+            //std.debug.print("view.split_output: from_pos {d} items.len {d}\n", .{ from_pos, self.outputviews.items.len });
             return ViewErrors.InvalidArg;
         }
 
@@ -212,7 +212,7 @@ pub const View = struct {
 
     pub fn move_output(self: *View, output: *OutputWidget, from_pos: usize, to_pos: usize) !void {
         if (from_pos >= self.outputviews.items.len or to_pos >= self.outputviews.items.len) {
-            std.debug.print("view.move_output: from_pos {d} to_pos {d} items.len {d}\n", .{ from_pos, to_pos, self.outputviews.items.len });
+            //std.debug.print("view.move_output: from_pos {d} to_pos {d} items.len {d}\n", .{ from_pos, to_pos, self.outputviews.items.len });
             return ViewErrors.InvalidArg;
         }
 

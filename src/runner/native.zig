@@ -1,7 +1,7 @@
 const std = @import("std");
 const utils = @import("utils");
 const runner = @import("runner.zig");
-const launch = @import("../launch.zig");
+const launch = @import("../config/launch.zig");
 
 pub fn run(
     alloc: std.mem.Allocator,

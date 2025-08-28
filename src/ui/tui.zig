@@ -123,13 +123,18 @@ pub const ProcessBuffer = view.output_view_mod.ProcessBuffer;
 //     }
 // };
 
+const ProcessBuffersMap = struct {
+    m: std.Thread.Mutex,
+    map: std.StringHashMapUnmanaged(*ProcessBuffer),
+};
+
 const ModelState = enum { main, cmdview, jsonview };
 
 const Model = struct {
     modelview: *view.View,
     uiconfig: ?*uiconfig.UiConfig = null,
     output_view: *OutputView,
-    process_buffers: std.StringHashMap(*ProcessBuffer),
+    process_buffers: ProcessBuffersMap,
     arena: std.heap.ArenaAllocator,
     cmd_view: cmdwidget.CmdWidget,
     mode: ModelState = .main,
@@ -162,7 +167,7 @@ const Model = struct {
                     }
                 } else if (key.matches(vaxis.Key.escape, .{})) {
                     if (self.mode == .cmdview) {
-                        std.debug.print("setting mode back to main\n", .{});
+                        //std.debug.print("setting mode back to main\n", .{});
                         self.mode = .main;
                         try ctx.requestFocus(self.widget());
                         return ctx.consumeEvent();
@@ -308,9 +313,10 @@ const Model = struct {
                 }
             },
             .mouse => |mouse| {
-                std.debug.print("model: mouse type {?}\n", .{mouse.type});
-                std.debug.print("mouse x {?}\n", .{mouse.col});
-                std.debug.print("mouse y {?}\n", .{mouse.row});
+                _ = mouse;
+                //std.debug.print("model: mouse type {?}\n", .{mouse.type});
+                //std.debug.print("mouse x {?}\n", .{mouse.col});
+                //std.debug.print("mouse y {?}\n", .{mouse.row});
             },
             .focus_in => {
                 return ctx.requestFocus(self.widget());
@@ -408,29 +414,34 @@ fn run_tui(alloc: std.mem.Allocator) !void {
         .output_view = output_view,
         .uiconfig = &config,
         .modelview = model_view,
-        .process_buffers = std.StringHashMap(*ProcessBuffer).init(alloc),
+        .process_buffers = .{
+            .m = .{},
+            .map = .empty,
+        },
         .cmd_view = try cmdwidget.CmdWidget.init(alloc, unicode),
         .arena = std.heap.ArenaAllocator.init(alloc),
     };
     defer alloc.destroy(model);
     keep_running.store(true, .seq_cst);
 
-    try model.process_buffers.put("default_output", buf);
-    try model.process_buffers.put("default_output2", buf);
-    defer model.process_buffers.deinit();
+    model.process_buffers.m.lock();
+    try model.process_buffers.map.put(alloc, "default_output", buf);
+    try model.process_buffers.map.put(alloc, "default_output2", buf);
+    model.process_buffers.m.unlock();
+    defer model.process_buffers.map.deinit(alloc);
     defer model.arena.deinit();
 
     //vxfw.DrawContext.init(unicode, .unicode);
-    std.debug.print("color_scheme_updates : {?}\n", .{app.vx.caps.color_scheme_updates});
-    std.debug.print("explicit_width : {?}\n", .{app.vx.caps.explicit_width});
-    std.debug.print("kitty_graphics : {?}\n", .{app.vx.caps.kitty_graphics});
-    std.debug.print("kitty_keyboard : {?}\n", .{app.vx.caps.kitty_keyboard});
-    std.debug.print("rgb : {?}\n", .{app.vx.caps.rgb});
-    std.debug.print("scaled_text : {?}\n", .{app.vx.caps.scaled_text});
-    std.debug.print("sgr_pixels : {?}\n", .{app.vx.caps.sgr_pixels});
+    //std.debug.print("color_scheme_updates : {?}\n", .{app.vx.caps.color_scheme_updates});
+    //std.debug.print("explicit_width : {?}\n", .{app.vx.caps.explicit_width});
+    //std.debug.print("kitty_graphics : {?}\n", .{app.vx.caps.kitty_graphics});
+    //std.debug.print("kitty_keyboard : {?}\n", .{app.vx.caps.kitty_keyboard});
+    //std.debug.print("rgb : {?}\n", .{app.vx.caps.rgb});
+    //std.debug.print("scaled_text : {?}\n", .{app.vx.caps.scaled_text});
+    //std.debug.print("sgr_pixels : {?}\n", .{app.vx.caps.sgr_pixels});
 
-    std.debug.print("width: {d}\n", .{app.vx.screen.width});
-    std.debug.print("height: {d}\n", .{app.vx.screen.height});
+    //std.debug.print("width: {d}\n", .{app.vx.screen.width});
+    //std.debug.print("height: {d}\n", .{app.vx.screen.height});
 
     //switch (builtin.target.os.tag) {
     //    .windows => {},
@@ -449,7 +460,7 @@ fn run_tui(alloc: std.mem.Allocator) !void {
     try app.vx.setMouseMode(app.tty.anyWriter(), true);
     try app.run(model.widget(), .{});
     keep_running.store(false, .seq_cst);
-    std.debug.print("APP FINISHED!\n", .{});
+    //std.debug.print("APP FINISHED!\n", .{});
 }
 
 pub fn start_tui(alloc: std.mem.Allocator) !void {
@@ -474,15 +485,19 @@ pub fn stop_tui() void {
 pub fn createProcessView(alloc: std.mem.Allocator, processname: []const u8) std.mem.Allocator.Error!void {
     // FIX: terrible hack to avoid a race condition which actually hits on nix
     //std.time.sleep(10_000_000_000);
-    std.debug.print("creating output: {s}\n", .{processname});
+    //std.debug.print("creating output: {s}\n", .{processname});
     if (keep_running.load(.seq_cst)) {
         const aa = model.arena.allocator();
 
         // check that a process with the same name doesn't exist
         const buf = try ProcessBuffer.init(alloc);
-        try model.process_buffers.put(try aa.dupe(u8, processname), buf);
+        // TODO: this line is failing inside with a lock(). Probably need to put a
+        // mutex around it
+        model.process_buffers.m.lock();
+        try model.process_buffers.map.put(alloc, try aa.dupe(u8, processname), buf);
+        defer model.process_buffers.m.unlock();
         errdefer {
-            const keyvalue = model.process_buffers.fetchRemove(processname);
+            const keyvalue = model.process_buffers.map.fetchRemove(processname);
             if (keyvalue) |kv| {
                 kv.value.deinit();
             }
@@ -521,7 +536,7 @@ pub fn pushLogging(alloc: std.mem.Allocator, processname: []const u8, buffer: []
     _ = alloc;
 
     if (keep_running.load(.seq_cst)) {
-        const target_buffer = model.process_buffers.get(processname);
+        const target_buffer = model.process_buffers.map.get(processname);
 
         if (target_buffer) |output| {
             try output.append(buffer);
@@ -530,6 +545,7 @@ pub fn pushLogging(alloc: std.mem.Allocator, processname: []const u8, buffer: []
 }
 
 // TODOs
+// TODO use environment variables to text replace ${} in the launch.json and task.json
 // TODO make sure output commands only take effect on selected output
 // TODO Windows powershell has rendering errors...
 // TODO color title for selected outputview

@@ -71,6 +71,9 @@ pub fn build(b: *std.Build) !void {
     const clap = clap_dep.module("clap");
     const webui = zig_webui_dep.module("webui");
 
+    // Setup uiconfig
+    uiconfig.addImport("utils", utils);
+
     // Setup tui
     tui.addImport("vaxis", vaxis);
     tui.addImport("utils", utils);

@@ -134,7 +134,7 @@ pub const OutputWidget = struct {
     pub fn captureHandler(self: *OutputWidget, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         switch (event) {
             .mouse => |mouse| {
-                std.debug.print("output: mouse type {?}\n", .{mouse.type});
+                //std.debug.print("output: mouse type {?}\n", .{mouse.type});
 
                 if (mouse.button == .wheel_up) {
                     // turn of sticky scrolling on mouse wheel up
@@ -189,17 +189,18 @@ pub const OutputWidget = struct {
                 ctx.redraw = true;
             },
             .mouse_enter => {
-                std.debug.print("mouse enter output\n", .{});
+                //std.debug.print("mouse enter output\n", .{});
                 try self.scroll_bars.handleEvent(ctx, event);
                 try self.scroll_bars.scroll_view.handleEvent(ctx, event);
             },
             .mouse_leave => {
-                std.debug.print("mouse leave output\n", .{});
+                //std.debug.print("mouse leave output\n", .{});
                 try self.scroll_bars.handleEvent(ctx, event);
                 try self.scroll_bars.scroll_view.handleEvent(ctx, event);
             },
             .mouse => |mouse| {
-                std.debug.print("output: mouse type {?}\n", .{mouse.type});
+                _ = mouse;
+                //std.debug.print("output: mouse type {?}\n", .{mouse.type});
                 try self.scroll_bars.handleEvent(ctx, event);
                 try self.scroll_bars.scroll_view.handleEvent(ctx, event);
             },

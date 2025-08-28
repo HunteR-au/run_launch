@@ -216,9 +216,9 @@ pub const MultiStyleText = struct {
         // in the call to Surface.init below
         // NOTE: failed on height 97, width 1258
         const container_size = self.findContainerSize(ctx);
-        std.debug.print("findContainerSize:\n", .{});
-        std.debug.print("--> width {d}\n", .{container_size.width});
-        std.debug.print("--> height {d}\n", .{container_size.height});
+        //std.debug.print("findContainerSize:\n", .{});
+        //std.debug.print("--> width {d}\n", .{container_size.width});
+        //std.debug.print("--> height {d}\n", .{container_size.height});
 
         // Create a surface of target width and max height. We'll trim the result after drawing
         const surface = try vxfw.Surface.init(

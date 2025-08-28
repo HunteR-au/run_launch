@@ -57,7 +57,7 @@ pub const OutputView = struct {
         // TODO: remove the tab for the corresponding output
         for (self.outputs.items, 0..) |o, i| {
             if (o == output) {
-                std.debug.print("ping1 - len {d}\n", .{self.outputs.items.len});
+                //std.debug.print("ping1 - len {d}\n", .{self.outputs.items.len});
                 output.is_focused = false;
                 _ = self.outputs.swapRemove(i);
 
@@ -206,16 +206,17 @@ pub const OutputView = struct {
             },
             .key_press => {},
             .focus_in => {
-                std.debug.print("FOCUS?????outputview\n", .{});
+                //std.debug.print("FOCUS?????outputview\n", .{});
             },
             .mouse_enter => {
-                std.debug.print("mouse enter outputview\n", .{});
+                //std.debug.print("mouse enter outputview\n", .{});
             },
             .mouse_leave => {
-                std.debug.print("mouse leave outputview\n", .{});
+                //std.debug.print("mouse leave outputview\n", .{});
             },
             .mouse => |mouse| {
-                std.debug.print("outputview: mouse type {?}\n", .{mouse.type});
+                _ = mouse;
+                //std.debug.print("outputview: mouse type {?}\n", .{mouse.type});
             },
             else => {},
         }

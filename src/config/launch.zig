@@ -1,5 +1,6 @@
 const std = @import("std");
 const utils = @import("utils");
+const expand = @import("expand.zig");
 
 const EnvTuple = utils.EnvTuple;
 
@@ -23,6 +24,15 @@ pub const Configuration = struct {
     } = .{},
 };
 
+fn copyAndAttemptExand(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+    return expand.expand_string(alloc, input) catch |err| switch (err) {
+        expand.ExpandErrors.NoExpansionFound => {
+            return try alloc.dupe(u8, input);
+        },
+        else => return err,
+    };
+}
+
 pub const Compound = struct {
     name: ?[]const u8 = null,
     configurations: ?[][]const u8 = null,
@@ -37,12 +47,12 @@ pub const Compound = struct {
         const nameobj = compoundNode.object.get("name") orelse {
             return CompoundParsingErrors.NoNameField;
         };
-        self.name = try allocator.dupe(u8, nameobj.string);
+        self.name = try copyAndAttemptExand(allocator, nameobj.string);
         errdefer allocator.free(self.name.?);
 
         const prelaunchtaskObj = compoundNode.object.get("preLaunchTask");
         if (prelaunchtaskObj) |obj| {
-            self.preLaunchTask = try allocator.dupe(u8, obj.string);
+            self.preLaunchTask = try copyAndAttemptExand(allocator, obj.string);
             errdefer allocator.free(self.preLaunchTask.?);
         } else self.preLaunchTask = null;
 
@@ -57,7 +67,7 @@ pub const Compound = struct {
         self.configurations = try allocator.alloc([]const u8, configurationsObj.array.items.len);
         errdefer allocator.free(self.configurations.?);
         for (configurationsObj.array.items, 0..) |obj, i| {
-            self.configurations.?[i] = try allocator.dupe(u8, obj.string);
+            self.configurations.?[i] = try copyAndAttemptExand(allocator, obj.string);
             errdefer allocator.free(self.configurations.?[i]);
         }
         return self;
@@ -182,7 +192,7 @@ pub fn parse_json(allocator: std.mem.Allocator, filepath: []const u8) !Launch {
     // Load the JSON data
     const max_bytes = 1024 * 1024;
     const data = try std.fs.cwd().readFileAlloc(allocator, filepath, max_bytes);
-    //std.debug.print("\n{s}\n", .{data});
+    std.debug.print("\n{s}\n", .{data});
     defer allocator.free(data);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
@@ -197,7 +207,6 @@ pub fn parse_json(allocator: std.mem.Allocator, filepath: []const u8) !Launch {
     const config = root.object.get("configurations").?;
     if (config.array.items.len > 0) {
         var allocated_configs: []Configuration = try allocator.alloc(Configuration, config.array.items.len);
-        //defer allocator.free(allocated_configs);
 
         for (config.array.items, 0..) |item, i| {
             // Need to initialize the fields
@@ -211,33 +220,19 @@ pub fn parse_json(allocator: std.mem.Allocator, filepath: []const u8) !Launch {
                 item.object.get("request").?.string,
             };
             inline for (fields, 0..) |fieldname, j| {
-                @field(allocated_configs[i], fieldname) = try allocator.dupe(u8, strings[j]);
+                @field(allocated_configs[i], fieldname) = try copyAndAttemptExand(allocator, strings[j]);
                 errdefer if (@field(allocated_configs[i], fieldname)) |x| allocator.free(x);
             }
 
             const optionalfields = comptime .{ "program", "module", "preLaunchTask", "postDebugTask", "consoleTitle", "console", "envFile" };
             inline for (optionalfields) |fieldname| {
                 if (item.object.get(fieldname)) |value| {
-                    @field(allocated_configs[i], fieldname) = try allocator.dupe(u8, value.string);
+                    @field(allocated_configs[i], fieldname) = try copyAndAttemptExand(allocator, value.string);
                 }
                 errdefer {
                     if (@field(allocated_configs[i], fieldname)) |p| allocator.free(p);
                 }
             }
-
-            // Parse the config arguments if they are present
-            // if (item.object.get("program")) |p| {
-            //     allocated_configs[i].program = try allocator.dupe(u8, p.string);
-            // }
-            // errdefer {
-            //     if (allocated_configs[i].program) |p| allocator.free(p);
-            // }
-            // if (item.object.get("module")) |m| {
-            //     allocated_configs[i].module = try allocator.dupe(u8, m.string);
-            // }
-            // errdefer {
-            //     if (allocated_configs[i].module) |p| allocator.free(p);
-            // }
 
             if (item.object.get("args")) |a| {
                 allocated_configs[i].args = try utils.parse_config_args(allocator, a.array);
@@ -252,24 +247,10 @@ pub fn parse_json(allocator: std.mem.Allocator, filepath: []const u8) !Launch {
 
             if (item.object.get("connect")) |connect| {
                 const host_str = connect.object.get("host").?.string;
-                allocated_configs[i].connect.host = try allocator.dupe(u8, host_str);
+                allocated_configs[i].connect.host = try copyAndAttemptExand(allocator, host_str);
                 errdefer if (allocated_configs[i].connect.host) |t| allocator.free(t);
                 allocated_configs[i].connect.port = @intCast(connect.object.get("port").?.integer);
             }
-
-            // if (item.object.get("preLaunchTask")) |taskname| {
-            //     allocated_configs[i].preLaunchTask = try allocator.dupe(u8, taskname.string);
-            // }
-            // errdefer {
-            //     if (allocated_configs[i].preLaunchTask) |p| allocator.free(p);
-            // }
-
-            // if (item.object.get("postDebugTask")) |taskname| {
-            //     allocated_configs[i].postDebugTask = try allocator.dupe(u8, taskname.string);
-            // }
-            // errdefer {
-            //     if (allocated_configs[i].postDebugTask) |p| allocator.free(p);
-            // }
         }
         results.configurations = allocated_configs;
     }

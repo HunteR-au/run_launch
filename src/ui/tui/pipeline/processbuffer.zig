@@ -98,8 +98,8 @@ pub const ProcessBuffer = struct {
                     );
                     defer self.alloc.free(filtered_lines);
                     self.lastNewLine = i + 1;
-                    try self.update_newline_indexs(
-                        self.filtered_newlines,
+                    try update_newline_indexs(
+                        &self.filtered_newlines,
                         filtered_lines,
                         self.filtered_buffer.items.len,
                     );
@@ -120,7 +120,7 @@ pub const ProcessBuffer = struct {
         self.m.lock();
         defer self.m.unlock();
 
-        std.debug.print("ProcessBuffer:addFilter()\n", .{});
+        //std.debug.print("ProcessBuffer:addFilter()\n", .{});
 
         try self.pipeline.appendFilter(filter);
         try self.reprocessPipeline();
@@ -229,11 +229,11 @@ pub const ProcessBuffer = struct {
         defer self.m.unlock();
 
         if (offset + len > self.filtered_buffer.items.len) {
-            std.debug.print("buffer length: {d}, offset: {d}, to_idx: {d}\n", .{
-                self.buffer.items.len,
-                offset,
-                len,
-            });
+            //std.debug.print("buffer length: {d}, offset: {d}, to_idx: {d}\n", .{
+            //    self.buffer.items.len,
+            //    offset,
+            //    len,
+            //});
             return Error.InvalidArguments;
         }
         return try alloc.dupe(u8, self.filtered_buffer.items[offset .. offset + len]);
