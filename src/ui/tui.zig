@@ -215,7 +215,7 @@ const Model = struct {
                 }
 
                 try self.output_view.eventHandler(ctx, event);
-                try self.output_view.focused_output.?.handleEvent(ctx, event);
+                try self.output_view.focused_ow.?.handleEvent(ctx, event);
             },
             .key_press => |key| {
                 if (key.matches('c', .{ .ctrl = false })) {
@@ -251,7 +251,7 @@ const Model = struct {
                 } else if (key.matches('s', .{})) {
                     const output_view = self.modelview.get_focused();
                     if (output_view) |ov| {
-                        const output = ov.focused_output;
+                        const output = ov.focused_ow;
                         if (output) |o| {
                             const from = try self.modelview.get_position(ov);
                             self.modelview.move_output(o, from, from -| 1) catch |err|
@@ -270,7 +270,7 @@ const Model = struct {
                 } else if (key.matches('s', .{ .shift = true })) {
                     const output_view = self.modelview.get_focused();
                     if (output_view) |ov| {
-                        const output = ov.focused_output;
+                        const output = ov.focused_ow;
                         if (output) |o| {
                             const from = try self.modelview.get_position(ov);
                             try self.modelview.split_output(o, from, view.Direction.left);
@@ -281,7 +281,7 @@ const Model = struct {
                 } else if (key.matches('d', .{})) {
                     const output_view = self.modelview.get_focused();
                     if (output_view) |ov| {
-                        const output = ov.focused_output;
+                        const output = ov.focused_ow;
                         if (output) |o| {
                             const from = try self.modelview.get_position(ov);
                             self.modelview.move_output(o, from, from +| 1) catch |err|
@@ -300,7 +300,7 @@ const Model = struct {
                 } else if (key.matches('d', .{ .shift = true })) {
                     const output_view = self.modelview.get_focused();
                     if (output_view) |ov| {
-                        const output = ov.focused_output;
+                        const output = ov.focused_ow;
                         if (output) |o| {
                             const from = try self.modelview.get_position(ov);
                             try self.modelview.split_output(o, from, view.Direction.right);
@@ -545,18 +545,60 @@ pub fn pushLogging(alloc: std.mem.Allocator, processname: []const u8, buffer: []
 }
 
 // TODOs
-// TODO use environment variables to text replace ${} in the launch.json and task.json
 // TODO make sure output commands only take effect on selected output
 // TODO Windows powershell has rendering errors...
 // TODO color title for selected outputview
 // TODO make tabs
 
+// TODO: report errors when processes die
+// TODO: dump buffers to disk
+// TODO: create a command to run another process
+
+// TODO: new config that uses yaml
+
 // Command features
-// pattern replace
 // text search
+// fast move down/up
 
 // keyboard functions
 // jump next/prev search
+//  - move to line x
+//  - get_top_rendered_line (done)
+////    - in ScrollView
+//          - accumulated_height is skipped lines in mutistyletext
+//          - it isn't exposed, by we can use self.scroll.vertical_offset
+//          - need to map vertical_offset to rendered line
+//          - self.last_height + self.vertical_offset
+//          - to get state of rendered text
+//              need to track the buffer offset of first char in each row
+//              - where to get allocator
+//  - get_bottom_rendered_line (done)
+//  - was line rendered last frame
+// -----
+// issues - I'm matching bound with inital offset of match
+//              I actually should move view bound with match bound
+
+// when doing find
+// - create iterator (done line iterator, now need regex iterator)
+// - do first forward search
+// - save iterator,
+
+// create processbuffer line iterator on filtered buffer
+// --- features ---
+// - iterate updating buffer
+// - invalidate iterator if filtered buffer reupdates
+// - next, peek
+// - reverse iterator
+// - atomic locking with refreshing
+// QUESTION: do I want to search filtered_buffer or last_rendered_buffer
+// pro: last_rendered_buffer: user are actually querying what they see
+// pro: querying filtered_buffer means less buffers...
+//      I think I need the rendered_buffer anyway as it must stay for two frames
+//      and the filtered_buffer could be deleted at any time
+// CON: rendered buffer DOESN'T contain all text!!!!!!!!
+
+// TODO: next/prev commands
+// TODO: store/update find cache
 
 // TODO find_replace str cmd
 // TODO goto top/bottom of buffer
@@ -566,4 +608,6 @@ pub fn pushLogging(alloc: std.mem.Allocator, processname: []const u8, buffer: []
 // ------> when process starts, run color commands
 // ------> when matching output starts, run setup function
 
-// TODO BUG - bg colors match space before word
+// TODO: text is being sent to the wrong buffer????
+
+// The sticky scroll isn't working for esc

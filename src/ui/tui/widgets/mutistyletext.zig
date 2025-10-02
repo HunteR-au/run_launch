@@ -64,9 +64,8 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
     return struct {
         text: []const u8,
         style_cache: Cache,
-        // TODO: change these to references
-        //style_map: StyleMap = StyleMap.empty,
-        //style_list: StyleList = StyleList.empty,
+        cb_ptr: ?*anyopaque = null,
+        cb_buffer_offset_at_row: ?*const fn (ptr: *anyopaque, row: usize, buffer_ofs: usize) std.mem.Allocator.Error!void = null,
         style: vaxis.Style = .{},
         text_align: enum { left, center, right } = .left,
         softwrap: bool = true,
@@ -133,8 +132,12 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
 
                         if (std.mem.eql(u8, grapheme, "\t")) {
                             for (0..8) |i| {
-                                //byte_index = text_offset + char.offset;
                                 const style = self.style_cache.getStyle(iter_offset + char_iter_offset);
+                                if (col == 0 and self.cb_ptr != null) {
+                                    if (self.cb_buffer_offset_at_row) |cb| {
+                                        try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
+                                    }
+                                }
 
                                 surface.writeCell(@intCast(col + i), row, .{
                                     .char = .{ .grapheme = " ", .width = 1 },
@@ -147,6 +150,12 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                         const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
                         //byte_index = text_offset + char.offset;
                         const style = self.style_cache.getStyle(iter_offset + char_iter_offset);
+
+                        if (col == 0 and self.cb_ptr != null) {
+                            if (self.cb_buffer_offset_at_row) |cb| {
+                                try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
+                            }
+                        }
 
                         //if (style) |_| {
                         //    std.debug.print("char {s} found style at: {d} + {d} = {d}\n", .{ grapheme, iter_offset, char_iter_offset, iter_offset + char_iter_offset });
@@ -185,19 +194,28 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                             line_width > container_size.width and
                             self.overflow == .ellipsis)
                         {
-                            // TODO - line_iter.index is incorrect
-                            // as that points to the index at the end of the line
-                            // (we want the start..)
-                            //byte_index = text_offset + char.offset;
                             const style = self.style_cache.getStyle(iter_offset + char_iter_offset);
+
+                            if (col == 0 and self.cb_ptr != null) {
+                                if (self.cb_buffer_offset_at_row) |cb| {
+                                    try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
+                                }
+                            }
+
                             surface.writeCell(col, row, .{
                                 .char = .{ .grapheme = "…", .width = 1 },
                                 .style = if (style) |s| s else self.style,
                             });
                             col = container_size.width;
                         } else {
-                            //byte_index = line_iter.index + char.offset;
                             const style = self.style_cache.getStyle(iter_offset + char_iter_offset);
+
+                            if (col == 0 and self.cb_ptr != null) {
+                                if (self.cb_buffer_offset_at_row) |cb| {
+                                    try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
+                                }
+                            }
+
                             surface.writeCell(col, row, .{
                                 .char = .{ .grapheme = grapheme, .width = grapheme_width },
                                 .style = if (style) |s| s else self.style,

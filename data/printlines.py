@@ -7,9 +7,6 @@ words = ["apple", "banana", "cherry", "date", "elderberry"]
 # Initialize counter
 counter = 1
 
-for _ in range(0,10):
-    print(f"test")
-
 while True:
     # Choose a random word from the list
     word = random.choice(words)
@@ -25,4 +22,4 @@ while True:
     #        pass
 
     # Wait for 10 seconds
-    time.sleep(0.1)
+    time.sleep(1)

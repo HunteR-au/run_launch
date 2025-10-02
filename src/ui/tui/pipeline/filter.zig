@@ -8,7 +8,7 @@ pub const TransformResult = union(enum) {
     line: []const u8,
     empty: void,
 };
-pub const TransformLineFn = *const fn (self: *const Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.Error!TransformResult;
+pub const TransformLineFn = *const fn (self: *Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.Error!TransformResult;
 
 pub const HandleId = usize;
 var lastId: HandleId = 0;

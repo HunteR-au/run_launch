@@ -1,0 +1,22 @@
+{
+  "rules": [
+    {
+      "pattern": "OutputView",
+      "just_pattern": true,
+      "foreground_color": "220,6,6",
+      "background_color": "200,184,208"
+    },
+    {
+      "pattern": "model",
+      "background_color": "255,30,30"
+    },
+    {
+      "pattern": "\\[Info\\]",
+      "foreground_color": "39,174,96"
+    },
+    {
+      "pattern": "2025",
+      "foreground_color": "39,174,96"
+    }
+  ]
+}

@@ -1,11 +1,13 @@
 const std = @import("std");
 const utils = @import("utils");
+const helpers = @import("helpers.zig");
 
 const process_buffer_mod = @import("pipeline/processbuffer.zig");
 const cmd_mod = @import("cmd.zig");
 
 // ui data structures
 const vaxis = @import("vaxis");
+const OutputWidget = @import("outputwidget.zig").OutputWidget;
 const uiconfig_mod = @import("uiconfig");
 pub const UiConfig = uiconfig_mod.UiConfig;
 pub const ProcessConfig = uiconfig_mod.ProcessConfig;
@@ -28,9 +30,11 @@ const Handler = cmd_mod.Handler;
 arena: std.heap.ArenaAllocator,
 nonowned_process_buffer: *ProcessBuffer,
 cmd_ref: ?*Cmd = null,
+widget_ref: ?*OutputWidget = null,
 handlers_ids: std.ArrayList(cmd_mod.HandleId),
 filter_ids: std.ArrayList(Filter.HandleId),
 reviewer_ids: std.ArrayList(Reviewer.HandleId),
+is_focused: bool = false,
 
 style_list: StyleList,
 style_map: StyleMap,
@@ -38,6 +42,13 @@ style_map: StyleMap,
 const UnfoldHandlerData = .{ .event_str = "unfold", .handle = handleUnfoldCmd };
 const FoldHandlerData = .{ .event_str = "fold", .handle = handleFoldCmd };
 const FoldFilterData = struct { regexs: []Regex };
+
+const UnreplaceHandlerData = .{ .event_str = "unreplace", .handle = handleUnreplaceCmd };
+const ReplaceHandlerData = .{ .event_str = "replace", .handle = handleReplaceCmd };
+const ReplacePattern = struct { regex: Regex, replace_str: []u8 };
+const ReplaceFilterData = struct { replace_patterns: []ReplacePattern };
+
+const FindHandlerData = .{ .event_str = "find", .handle = handleFindCmd };
 
 const UncolorHandlerData = .{ .event_str = "uncolor", .handle = handleUncolorCmd };
 const ColorHandlerData = .{ .event_str = "color", .handle = handleColorCmd };
@@ -83,7 +94,7 @@ pub fn deinit(self: *Output) void {
 fn handleFoldCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @alignCast(@ptrCast(listener));
 
-    //TODO: check if active first
+    if (!self.is_focused) return;
 
     const alloc = self.arena.allocator();
 
@@ -115,13 +126,146 @@ fn handleFoldCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error
     try self.nonowned_process_buffer.addFilter(filter);
 }
 
+fn handleReplaceCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @alignCast(@ptrCast(listener));
+    const alloc = self.arena.allocator();
+
+    if (!self.is_focused) return;
+
+    // parse the arguments for the color command
+    const arg_array = try utils.parseArgsLineWithQuoteGroups(alloc, args);
+    defer {
+        for (arg_array) |s| alloc.free(s);
+        alloc.free(arg_array);
+    }
+
+    if (arg_array.len % 2 != 0) {
+        // don't parse any arguments if the full line is invalid
+        return;
+    }
+
+    // each pair comes in the form of `search_str` `replace_str`
+    var replace_patterns = std.ArrayList(ReplacePattern).init(alloc);
+    for (0..arg_array.len / 2) |i| {
+        const search_arg = arg_array[i * 2];
+        const replace_arg = arg_array[i * 2 + 1];
+
+        const re = Regex.compile(alloc, search_arg) catch {
+            continue;
+        };
+        try replace_patterns.append(
+            .{ .regex = re, .replace_str = try alloc.dupe(u8, replace_arg) },
+        );
+    }
+
+    // Create the data object for the replaceReviewer
+    const reviewer_data = try alloc.create(ReplaceFilterData);
+    reviewer_data.* = .{
+        .replace_patterns = try replace_patterns.toOwnedSlice(),
+    };
+
+    const filter = try Filter.init(self.arena.allocator(), reviewer_data, replace);
+    try self.filter_ids.append(filter.id);
+    try self.nonowned_process_buffer.addFilter(filter);
+}
+
 fn handleUnfoldCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @alignCast(@ptrCast(listener));
     // we need to recalculate the color styles
     self.clearStyle();
 
+    // TODO: only remove fold commands
     try self.nonowned_process_buffer.removeAllFilters();
     self.filter_ids.clearAndFree();
+}
+
+fn handleUnreplaceCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @alignCast(@ptrCast(listener));
+    // we need to recalculate the color styles
+    self.clearStyle();
+
+    // TODO: only remove replace commands
+    try self.nonowned_process_buffer.removeAllFilters();
+    self.filter_ids.clearAndFree();
+}
+
+//fn handlePrevCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {}
+//fn handleNextCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+//    // Check if search iterator exists
+//    // call next and get offset
+//    // move window
+//}
+
+fn handleFindCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @alignCast(@ptrCast(listener));
+    const alloc = self.arena.allocator();
+
+    if (!self.is_focused) return;
+
+    std.debug.print("lets find something...\n", .{});
+
+    // parse the arguments
+    const arguments = try utils.parseArgsLineWithQuoteGroups(alloc, args);
+    defer {
+        for (arguments) |s| alloc.free(s);
+        alloc.free(arguments);
+    }
+
+    if (arguments.len < 1) return;
+
+    std.debug.print("we are finding...{s}\n", .{arguments[0]});
+
+    // create regex from first argument
+    var re = Regex.compile(alloc, arguments[0]) catch return;
+    defer re.deinit();
+
+    // 1) find top line in-view
+    // 2) start searching from top line to bottom
+    // 3) if not, wrap around and search from the top to top_rendered_line
+
+    // 4) if found - move view to the line
+
+    // TODO: store all find matches
+    std.debug.print("hello\n", .{});
+
+    const top_rendered_line_buffer_offset = self.widget_ref.?.get_rendered_line_buffer_offset(.first) catch |e| switch (e) {
+        error.NoLinesRendered => return,
+    };
+    const buffer = self.widget_ref.?.text.text;
+
+    std.debug.print("top_rendered_line is {d}\n", .{top_rendered_line_buffer_offset});
+    std.debug.print("buffer len is {d}\n", .{buffer.len});
+    std.debug.print("did we get here?\n", .{});
+
+    var iter = helpers.regexMutilineMatchAll(&re, buffer[top_rendered_line_buffer_offset..buffer.len]);
+
+    // find the first match
+    const match = try iter.next();
+    std.debug.print("the buffer we are looking at:\n{s}", .{buffer[top_rendered_line_buffer_offset..buffer.len]});
+    std.debug.print("captures...{any}\n", .{match});
+
+    if (match) |m| {
+        std.debug.print("Match found at {d} for {s}", .{ m.lowerBound, m.str });
+
+        // jump to the line containing the start of the match
+        self.widget_ref.?.jump_output_to_line(
+            self.widget_ref.?.window.getLineFromOffset(m.lowerBound + top_rendered_line_buffer_offset),
+        ) catch return;
+
+        // TODO: do some highlighting on match
+    } else if (top_rendered_line_buffer_offset != 0) {
+        var iter2 = helpers.regexMatchAll(&re, buffer[0..top_rendered_line_buffer_offset]);
+        const match2 = try iter2.next();
+
+        if (match2) |m| {
+            std.debug.print("Match found (on our second attempt) at {d} for {s}\n", .{ m.lowerBound, m.str });
+            // jump to the line containing the start of the match
+            self.widget_ref.?.jump_output_to_line(
+                self.widget_ref.?.window.getLineFromOffset(m.lowerBound),
+            ) catch return;
+            // TODO: do some highlighting on match
+        }
+    }
 }
 
 fn handleUncolorCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
@@ -131,7 +275,7 @@ fn handleUncolorCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error
     self.reviewer_ids.clearAndFree();
 }
 
-fn fold(_: *const Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.Error!Filter.TransformResult {
+fn fold(_: *Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.Error!Filter.TransformResult {
     if (line.len == 0) return Filter.TransformResult{ .empty = {} };
 
     const fold_data: *FoldFilterData = @ptrCast(@alignCast(data));
@@ -146,6 +290,45 @@ fn fold(_: *const Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.
         }
     }
     return Filter.TransformResult{ .empty = {} };
+}
+
+fn replace(filter: *Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.Error!Filter.TransformResult {
+    if (line.len == 0) return Filter.TransformResult{ .empty = {} };
+
+    const alloc = filter.arena.allocator();
+    const replace_data: *ReplaceFilterData = @ptrCast(@alignCast(data));
+
+    // we need to keep the altered line for the next pattern
+    var final_result = try std.ArrayListUnmanaged(u8).initCapacity(alloc, line.len);
+    try final_result.appendSlice(alloc, line);
+    for (replace_data.replace_patterns) |*patterns| {
+        var result = try std.ArrayListUnmanaged(u8).initCapacity(alloc, final_result.items.len);
+        var start: usize = 0;
+        defer start = 0;
+
+        var iter = helpers.regexMatchAll(&patterns.regex, final_result.items);
+        while (try iter.next()) |match| {
+            try result.appendSlice(alloc, line[start..match.lowerBound]);
+            try result.appendSlice(alloc, patterns.replace_str);
+            start = match.upperBound;
+        }
+
+        // append the end of the line
+        try result.appendSlice(alloc, line[start..line.len]);
+
+        // move over the altered line into the outer array for the
+        // next pattern or to be returned
+        final_result.deinit(alloc);
+        const slice = try result.toOwnedSlice(alloc);
+        final_result = std.ArrayListUnmanaged(u8){
+            .items = slice,
+            .capacity = slice.len,
+        };
+    }
+
+    return Filter.TransformResult{
+        .line = try final_result.toOwnedSlice(alloc),
+    };
 }
 
 // a rule
@@ -275,7 +458,7 @@ fn createStyleFromArg(arg: []const u8) ?ColorPattern {
         },
         .Empty => {
             const is_current_seg_first = isFirstSegment;
-            if (!isFirstSegment) isFirstSegment = false;
+            if (isFirstSegment) isFirstSegment = false;
             const segment = it.next();
             if (segment == null) // no more arguments
                 break :state;
@@ -299,7 +482,7 @@ fn createStyleFromArg(arg: []const u8) ?ColorPattern {
                 }
             } else if (std.mem.eql(u8, segment.?, "line") and !is_current_seg_first) {
                 // we need to parse this to make sure it is a valid
-                //std.debug.print("print full line\n", .{});
+                std.debug.print("print full line\n", .{});
                 color_line = true;
                 continue :state .Empty;
             } else if (is_current_seg_first) {
@@ -400,6 +583,8 @@ fn handleColorCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Erro
     const self: *Output = @alignCast(@ptrCast(listener));
     const alloc = self.arena.allocator();
 
+    if (!self.is_focused) return;
+
     // parse the arguments for the color command
     const arg_array = try utils.parseArgsLineWithQuoteGroups(alloc, args);
     defer {
@@ -445,30 +630,32 @@ fn handleColorCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Erro
 fn color(_: *const Reviewer, data: *anyopaque, metadata: Pipeline.MetaData, line: []const u8) std.mem.Allocator.Error!void {
     const color_data: *ColorReviewerData = @ptrCast(@alignCast(data));
 
+    // first - check for first full_line pattern and apply
     for (color_data.style_patterns) |*pattern| {
-        if (try pattern.regex.captures(line)) |c| {
-            if (pattern.full_line) {
-                //std.debug.print("match full line {s}\n", .{pattern.regex.string});
-                //std.debug.print("start of match = {d}\n", .{metadata.bufferOffset});
-                //std.debug.print("end of match = {d}\n", .{metadata.bufferOffset + line.len - 1});
+        if (pattern.full_line) {
+            // check if there is a regex match in the line
+            if (try pattern.regex.partialMatch(line)) {
                 try color_data.output.updateStyle(
                     pattern.style,
                     metadata.bufferOffset,
-                    metadata.bufferOffset + line.len - 1,
+                    metadata.bufferOffset + line.len,
                 );
-            } else {
-                for (0..c.len()) |n| {
-                    const span = c.boundsAt(n).?;
-                    //std.debug.print("{s}\n", .{pattern.regex.string});
-                    //std.debug.print("start of match = {d}\n", .{metadata.bufferOffset + span.lower});
-                    //std.debug.print("end of match = {d}\n", .{metadata.bufferOffset + span.upper});
-                    try color_data.output.updateStyle(
-                        pattern.style,
-                        metadata.bufferOffset + span.lower,
-                        metadata.bufferOffset + span.upper,
-                    );
-                }
+
+                // now that we have applied a full line pattern, exit
+                return;
             }
+        }
+    }
+
+    // second - if no full_line patterns, apply all other patterns
+    for (color_data.style_patterns) |*pattern| {
+        var iter = helpers.regexMatchAll(&pattern.regex, line);
+        while (try iter.next()) |match| {
+            try color_data.output.updateStyle(
+                pattern.style,
+                metadata.bufferOffset + match.lowerBound,
+                metadata.bufferOffset + match.upperBound,
+            );
         }
     }
 }
@@ -499,41 +686,25 @@ pub fn subscribeHandlersToCmd(self: *Output, cmd: *Cmd) !void {
 
     self.cmd_ref = cmd;
 
-    // Add fold handler
-    const fold_handler: Handler = .{
-        .event_str = FoldHandlerData.event_str,
-        .handle = FoldHandlerData.handle,
-        .listener = self,
+    const handler_data = comptime .{
+        &FoldHandlerData,
+        &UnfoldHandlerData,
+        &ReplaceHandlerData,
+        &UnreplaceHandlerData,
+        &ColorHandlerData,
+        &UncolorHandlerData,
+        &FindHandlerData,
     };
-    const fold_id = try self.cmd_ref.?.addHandler(fold_handler);
-    try self.handlers_ids.append(fold_id);
 
-    // Add unfold handler
-    const unfold_handler: Handler = .{
-        .event_str = UnfoldHandlerData.event_str,
-        .handle = UnfoldHandlerData.handle,
-        .listener = self,
-    };
-    const unfold_id = try self.cmd_ref.?.addHandler(unfold_handler);
-    try self.handlers_ids.append(unfold_id);
-
-    // Add color handler
-    const color_handler: Handler = .{
-        .event_str = ColorHandlerData.event_str,
-        .handle = ColorHandlerData.handle,
-        .listener = self,
-    };
-    const color_id = try self.cmd_ref.?.addHandler(color_handler);
-    try self.handlers_ids.append(color_id);
-
-    // Add uncolor handler
-    const uncolor_handler: Handler = .{
-        .event_str = UncolorHandlerData.event_str,
-        .handle = UncolorHandlerData.handle,
-        .listener = self,
-    };
-    const uncolor_id = try self.cmd_ref.?.addHandler(uncolor_handler);
-    try self.handlers_ids.append(uncolor_id);
+    inline for (handler_data) |data| {
+        const handler: Handler = .{
+            .event_str = data.event_str,
+            .handle = data.handle,
+            .listener = self,
+        };
+        const id = try self.cmd_ref.?.addHandler(handler);
+        try self.handlers_ids.append(id);
+    }
 }
 
 pub fn unsubscribeHandlersFromCmd(self: *Output) void {

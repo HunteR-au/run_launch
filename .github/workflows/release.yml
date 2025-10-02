@@ -32,15 +32,16 @@ jobs:
           mkdir zig-out\dist\windows
           copy zig-out\bin\run_launch.exe zig-out\dist\windows\
 
-      - name: Sign Windows tarball
+      - name: Sign Windows EXE
         shell: bash
         run: |
+          ls "$USERPROFILE/minisign"
+          ls "zig-out/dist/windows"
           echo "${MINISIGN_SECRET_KEY}" > minisign.key
           "$USERPROFILE/minisign/minisign.exe" -S -s minisign.key -m "zig-out/dist/windows/run_launch.exe"
           rm -f minisign.key
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4

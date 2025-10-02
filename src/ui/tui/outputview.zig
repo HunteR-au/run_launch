@@ -11,7 +11,7 @@ pub const OutputList = std.ArrayList(*OutputWidget);
 pub const OutputView = struct {
     alloc: std.mem.Allocator,
     outputs: OutputList,
-    focused_output: ?*OutputWidget = null,
+    focused_ow: ?*OutputWidget = null,
     is_focused: bool = false,
 
     // TODO: create a tab group
@@ -48,8 +48,8 @@ pub const OutputView = struct {
         try self.outputs.append(output);
 
         if (self.outputs.items.len == 1) {
-            self.focused_output = output;
-            self.focused_output.?.is_focused = self.is_focused;
+            self.focused_ow = output;
+            self.focused_ow.?.output.is_focused = self.is_focused;
         }
     }
 
@@ -58,14 +58,14 @@ pub const OutputView = struct {
         for (self.outputs.items, 0..) |o, i| {
             if (o == output) {
                 //std.debug.print("ping1 - len {d}\n", .{self.outputs.items.len});
-                output.is_focused = false;
+                output.output.is_focused = false;
                 _ = self.outputs.swapRemove(i);
 
-                if (o == self.focused_output and self.outputs.items.len > 0) {
-                    self.focused_output = self.outputs.items[0];
-                    self.focused_output.?.is_focused = self.is_focused;
+                if (o == self.focused_ow and self.outputs.items.len > 0) {
+                    self.focused_ow = self.outputs.items[0];
+                    self.focused_ow.?.output.is_focused = self.is_focused;
                 } else if (self.outputs.items.len == 0) {
-                    self.focused_output = null;
+                    self.focused_ow = null;
                 }
                 break;
             }
@@ -85,15 +85,15 @@ pub const OutputView = struct {
         for (self.outputs.items) |o| {
             if (o == output) {
                 // unfocus the previous output
-                if (self.focused_output) |fo| {
-                    fo.is_focused = false;
+                if (self.focused_ow) |fo| {
+                    fo.output.is_focused = false;
                 }
 
-                self.focused_output = o;
+                self.focused_ow = o;
 
                 // if the current outputview is focused we want to render
                 // the output as focused
-                self.focused_output.?.is_focused = self.is_focused;
+                self.focused_ow.?.output.is_focused = self.is_focused;
             }
         }
     }
@@ -105,15 +105,15 @@ pub const OutputView = struct {
 
     pub fn focus_self(self: *OutputView) void {
         self.is_focused = true;
-        if (self.focused_output) |o| {
-            o.is_focused = true;
+        if (self.focused_ow) |o| {
+            o.output.is_focused = true;
         }
     }
 
     pub fn unfocus_self(self: *OutputView) void {
         self.is_focused = false;
-        if (self.focused_output) |o| {
-            o.is_focused = false;
+        if (self.focused_ow) |o| {
+            o.output.is_focused = false;
         }
     }
 
@@ -123,23 +123,23 @@ pub const OutputView = struct {
     ) ?*OutputWidget {
         if (self.outputs.items.len == 0) {
             return null;
-        } else if (self.focused_output == null) {
-            self.focused_output = self.outputs.items[0];
-            self.focused_output.?.is_focused = self.is_focused;
-            return self.focused_output;
+        } else if (self.focused_ow == null) {
+            self.focused_ow = self.outputs.items[0];
+            self.focused_ow.?.output.is_focused = self.is_focused;
+            return self.focused_ow;
         }
 
         // find the current idx
         var idx = blk: {
             for (self.outputs.items, 0..) |o, i| {
-                if (o == self.focused_output.?) {
+                if (o == self.focused_ow.?) {
                     break :blk i;
                 }
             }
             unreachable;
         };
 
-        self.focused_output.?.is_focused = false;
+        self.focused_ow.?.output.is_focused = false;
 
         switch (dir) {
             .forward => {
@@ -158,9 +158,9 @@ pub const OutputView = struct {
             },
         }
 
-        self.focused_output = self.outputs.items[idx];
-        self.focused_output.?.is_focused = self.is_focused;
-        return self.focused_output;
+        self.focused_ow = self.outputs.items[idx];
+        self.focused_ow.?.output.is_focused = self.is_focused;
+        return self.focused_ow;
     }
 
     pub fn focus_prev(self: *OutputView) ?*OutputWidget {
@@ -234,7 +234,8 @@ pub const OutputView = struct {
             height = 50;
         }
         if (max_size.width) |w| {
-            width = if (w < 100) w else 100;
+            //width = if (w < 100) w else 100;
+            width = w;
         } else {
             width = 100;
         }
@@ -248,7 +249,7 @@ pub const OutputView = struct {
 
         var output_child: vxfw.SubSurface = undefined;
         var children: []vxfw.SubSurface = undefined;
-        if (self.focused_output) |focused| {
+        if (self.focused_ow) |focused| {
             output_child = .{
                 .origin = .{ .row = 0, .col = 0 },
                 .surface = try focused.draw(self_ctx),

@@ -36,16 +36,26 @@ const MultiStyleText = @import("widgets/mutistyletext.zig").MultiStyleText(
 //          - that the output should track (ie timestamps)
 
 pub const OutputWidget = struct {
+    const RowInfo = struct { row: usize, offset: usize };
+
     alloc: std.mem.Allocator,
     text: MultiStyleText = undefined,
     scroll_bars: ScrollBar,
     scroll_sticky_mode: bool = false,
+    force_sticky_off: bool = false,
     border: Border,
     process_name: []const u8,
-    is_focused: bool = false,
     temp: vxfw.Text = undefined,
     output: Output,
     window: Window,
+
+    rendered_text_offset_at_row_start: std.HashMapUnmanaged(
+        usize,
+        usize,
+        std.hash_map.AutoContext(usize),
+        std.hash_map.default_max_load_percentage,
+    ) = .empty,
+    rendered_text_offset_highest_key: ?usize = null,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -65,6 +75,7 @@ pub const OutputWidget = struct {
             .output = Output.init(alloc, buffer),
             .window = .{ .num_lines = 200, .output = undefined },
         };
+        output_widget.output.widget_ref = output_widget;
         output_widget.window.output = &output_widget.output;
         output_widget.scroll_bars = .{
             .scroll_view = .{
@@ -141,32 +152,74 @@ pub const OutputWidget = struct {
                     self.scroll_sticky_mode = false;
                     self.window.is_sticky = false;
                     self.scroll_bars.scroll_view.scroll.pending_lines = 0;
+                    self.window.pending_lines = 0;
 
-                    if (self.window.linesUp(1)) ctx.consumeAndRedraw();
+                    //if (self.window.linesUp(1)) ctx.consumeAndRedraw();
+                    self.moveOutputUpLines(1);
+                    ctx.consumeAndRedraw();
                 }
                 if (mouse.button == .wheel_down) {
-                    if (self.window.linesDown(1)) ctx.consumeAndRedraw();
+                    //if (self.window.linesDown(1)) ctx.consumeAndRedraw();
+                    self.moveOutputDownLines(1);
+                    ctx.consumeAndRedraw();
                 }
             },
             .key_press => |key| {
                 // turn off sticky scrolling on up actions
                 if (key.matches('u', .{ .ctrl = true }) or
                     key.matches(vaxis.Key.up, .{}) or
-                    key.matches('k', .{}) or
+                    key.matches('k', .{ .ctrl = false }) or
                     key.matches('p', .{ .ctrl = true }))
                 {
                     self.scroll_sticky_mode = false;
                     self.window.is_sticky = false;
                     self.scroll_bars.scroll_view.scroll.pending_lines = 0;
+                    self.window.pending_lines = 0;
 
-                    if (self.window.linesUp(1)) ctx.consumeAndRedraw();
+                    //if (self.window.linesUp(1)) ctx.consumeAndRedraw();
+                    self.moveOutputUpLines(1);
+                    ctx.consumeAndRedraw();
+                }
+                if (key.matches('k', .{ .ctrl = true })) {
+                    self.scroll_sticky_mode = false;
+                    self.window.is_sticky = false;
+                    self.scroll_bars.scroll_view.scroll.pending_lines = 0;
+                    self.window.pending_lines = 0;
+
+                    self.moveOutputUpLines(5);
+                    ctx.consumeAndRedraw();
+                    //if (self.window.linesUp(5)) {
+                    //    ctx.consumeAndRedraw();
+                    //    return;
+                    //}
+                    //_ = self.scroll_bars.scroll_view.scroll.linesUp(5);
+                }
+                if (key.matches(vaxis.Key.escape, .{})) {
+                    // TODO: this is busted, probably the check for if_sticky
+                    self.scroll_sticky_mode = false;
+                    self.window.is_sticky = false;
+                    self.scroll_bars.scroll_view.scroll.pending_lines = 0;
+                    self.window.pending_lines = 0;
+
+                    if (self.window.linesUp(std.math.maxInt(u8))) ctx.consumeAndRedraw();
                 }
                 if (key.matches(vaxis.Key.down, .{}) or
-                    key.matches('j', .{}) or
+                    key.matches('j', .{ .ctrl = false }) or
                     key.matches('n', .{ .ctrl = true }) or
                     key.matches('d', .{ .ctrl = true }))
                 {
-                    if (self.window.linesDown(1)) ctx.consumeAndRedraw();
+                    self.moveOutputDownLines(1);
+                    ctx.consumeAndRedraw();
+                    //if (self.window.linesDown(1)) ctx.consumeAndRedraw();
+                }
+                if (key.matches('j', .{ .ctrl = true })) {
+                    self.moveOutputDownLines(5);
+                    ctx.consumeAndRedraw();
+                    //if (self.window.linesDown(5)) {
+                    //    ctx.consumeAndRedraw();
+                    //    return;
+                    //}
+                    //_ = self.scroll_bars.scroll_view.scroll.linesDown(5);
                 }
             },
             else => {},
@@ -217,20 +270,118 @@ pub const OutputWidget = struct {
             self.scroll_bars.scroll_view.scroll.has_more_vertical == false and // is previously scrolled to bottom
             self.scroll_bars.scroll_view.scroll.pending_lines >= 0) // and no pending lines to scroll up
         {
+            if (self.force_sticky_off) {
+                return;
+            }
             self.scroll_sticky_mode = true;
             self.window.is_sticky = true;
-            if (!self.window.linesDown(1)) {
-                _ = self.scroll_bars.scroll_view.scroll.linesDown(1);
-            }
+            self.moveOutputUpLines(1);
         } else if (self.scroll_sticky_mode == true) {
-            if (!self.window.linesDown(1)) {
-                _ = self.scroll_bars.scroll_view.scroll.linesDown(1);
+            self.moveOutputDownLines(1);
+        } else {
+            if (self.force_sticky_off) {
+                self.force_sticky_off = false;
             }
+        }
+    }
+
+    pub fn jump_output_to_line(self: *OutputWidget, line_num: usize) !void {
+        // get the first rendered line
+        const first_rendered_line_offset = try self.get_rendered_line_buffer_offset(.first);
+        const first_rendered_line = self.window.getLineFromOffset(first_rendered_line_offset);
+
+        // Problem: what about a line that wraps, and therefore the match is not rendered!!!!
+        // Fix: maybe I need to track the last byte that was rendered
+
+        // get last line rendered
+        const last_rendered_line_offset = try self.get_rendered_line_buffer_offset(.last);
+        const last_rendered_line = self.window.getLineFromOffset(last_rendered_line_offset);
+
+        // check if line is already within rendered bounds
+        if (first_rendered_line <= line_num and line_num <= last_rendered_line) {
+            return;
+        }
+
+        // line is below
+        if (line_num > last_rendered_line) {
+            self.removePendingLines();
+            self.setStickyScroll(false);
+            self.moveOutputDownLines(line_num - last_rendered_line);
+            return;
+        }
+
+        // line is above
+        if (line_num < first_rendered_line) {
+            self.removePendingLines();
+            self.setStickyScroll(false);
+            self.moveOutputUpLines(first_rendered_line - line_num);
+            return;
+        }
+    }
+
+    pub fn moveOutputUpLines(self: *OutputWidget, n: usize) void {
+        // TODO: allow a larger number than u8
+        if (self.window.linesUp(@intCast(n))) return else _ = self.scroll_bars.scroll_view.scroll.linesUp(@intCast(n));
+    }
+
+    pub fn moveOutputDownLines(self: *OutputWidget, n: usize) void {
+        // TODO: allow a larger number than u8
+        if (self.window.linesDown(@intCast(n))) return else _ = self.scroll_bars.scroll_view.scroll.linesDown(@intCast(n));
+    }
+
+    pub fn setStickyScroll(self: *OutputWidget, is_sticky: bool) void {
+        if (is_sticky) {
+            self.scroll_sticky_mode = false;
+            self.window.is_sticky = false;
+            self.force_sticky_off = true;
+            //self.scroll_bars.scroll_view.scroll.pending_lines = 0;
+            //self.window.pending_lines = 0;
+        } else {
+            self.scroll_sticky_mode = true;
+            self.window.is_sticky = true;
+        }
+    }
+
+    fn removePendingLines(self: *OutputWidget) void {
+        self.scroll_bars.scroll_view.scroll.pending_lines = 0;
+        self.window.pending_lines = 0;
+    }
+
+    // We want to save buffer offsets for the start of every row for each call
+    // so we can make queries of what position the buffer is on screen
+    fn save_rendered_buffer_offset(ptr: *anyopaque, row: usize, offset: usize) std.mem.Allocator.Error!void {
+        const self: *OutputWidget = @ptrCast(@alignCast(ptr));
+
+        if (self.rendered_text_offset_highest_key == null) {
+            self.rendered_text_offset_highest_key = row;
+        } else if (self.rendered_text_offset_highest_key.? < row) {
+            self.rendered_text_offset_highest_key.? = row;
+        }
+        try self.rendered_text_offset_at_row_start.put(self.alloc, row, offset + self.window.startingOffset());
+    }
+
+    const LineType = enum { first, last };
+    pub fn get_rendered_line_buffer_offset(self: *OutputWidget, line: LineType) !usize {
+        if (self.rendered_text_offset_at_row_start.size == 0) {
+            return error.NoLinesRendered;
+        }
+
+        switch (line) {
+            .first => {
+                return self.rendered_text_offset_at_row_start.get(0).?;
+            },
+            .last => {
+                return self.rendered_text_offset_at_row_start.get(self.rendered_text_offset_highest_key.?).?;
+            },
         }
     }
 
     pub fn draw(self: *OutputWidget, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const max_size = ctx.max.size();
+
+        // clear the rendered buffer offsets at starting row positions
+        self.rendered_text_offset_at_row_start.clearAndFree(self.alloc);
+        self.rendered_text_offset_highest_key = null;
 
         self.window.updateWindow();
 
@@ -256,9 +407,11 @@ pub const OutputWidget = struct {
                 &list_cpy,
                 self.window.startingOffset(),
             ),
+            .cb_ptr = self,
+            .cb_buffer_offset_at_row = save_rendered_buffer_offset,
         };
 
-        if (self.is_focused) {
+        if (self.output.is_focused) {
             // color border yellow
             self.border.style = vaxis.Style{ .fg = .{ .rgb = .{ 255, 255, 0 } } };
         } else {
@@ -320,6 +473,39 @@ const Window = struct {
         return .{ .idx = line_num - 1 };
     }
 
+    // newlines count as part of the preceding line
+    pub fn getLineFromOffset(self: *Window, offset: usize) usize {
+        // TODO: this needs an atomic access to filtered_newlines
+        const filtered_newlines_slice = self.output.nonowned_process_buffer.filtered_newlines.items;
+
+        const last_rendered_line = std.sort.lowerBound(
+            usize,
+            filtered_newlines_slice,
+            offset,
+            struct {
+                pub fn compare(lhs: usize, rhs: usize) std.math.Order {
+                    return std.math.order(lhs, rhs);
+                }
+            }.compare,
+        );
+        return last_rendered_line;
+    }
+
+    // set the offset of the first character
+    pub fn getOffsetFromLine(self: *Window, line_num: usize) !usize {
+        const idx = self.calNewlineIndex(line_num);
+        switch (idx) {
+            .idx => |i| {
+                const offset = self.output.nonowned_process_buffer
+                    .filtered_newlines.items[i] + 1;
+                std.debug.assert(offset < self.last_update_parent_len);
+                return offset;
+            },
+            .first => return 0,
+            .outOfBounds => error.OutOfBounds,
+        }
+    }
+
     pub fn startingOffset(self: *Window) usize {
         const idx = self.calNewlineIndex(self.top_line);
         switch (idx) {
@@ -368,7 +554,7 @@ const Window = struct {
 
     pub fn linesUp(self: *Window, n: u8) bool {
         if (self.top_line == 0) return false;
-        self.pending_lines -= @intCast(n);
+        self.pending_lines -|= @intCast(n);
         return true;
     }
 
@@ -415,6 +601,14 @@ const Window = struct {
         //std.debug.print("parent_lines {d}\n", .{self.last_update_parent_num_lines});
         //std.debug.print("top {d}\n", .{self.top_line});
         //std.debug.print("end {d}\n", .{self.lastLine()});
+    }
+
+    pub fn setFocus(self: *OutputWidget, is_focus: bool) void {
+        self.output.is_focused = is_focus;
+    }
+
+    pub fn getFocus(self: *OutputWidget) void {
+        return self.output.is_focused;
     }
 
     pub fn resolvePendingLines(self: *Window) void {
