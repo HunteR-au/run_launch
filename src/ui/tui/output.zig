@@ -3,6 +3,7 @@ const utils = @import("utils");
 const helpers = @import("helpers.zig");
 
 const process_buffer_mod = @import("pipeline/processbuffer.zig");
+const search = @import("pipeline/search.zig");
 const cmd_mod = @import("cmd.zig");
 
 // ui data structures
@@ -24,13 +25,20 @@ pub const Reviewer = process_buffer_mod.Reviewer;
 pub const Cmd = cmd_mod.Cmd;
 const Handler = cmd_mod.Handler;
 
-// output contain the process buffer
-// output will manage handlers
+const SearchInfo = struct {
+    iterator: *search.ProcessBufferSearchIterator,
+    regex: *Regex,
+    last_result: ?search.ProcessBufferSearchIterator.Result = null,
+    cached_style: ?[]vaxis.Style,
+};
 
 arena: std.heap.ArenaAllocator,
 nonowned_process_buffer: *ProcessBuffer,
 cmd_ref: ?*Cmd = null,
 widget_ref: ?*OutputWidget = null,
+search_iterator: ?*search.ProcessBufferSearchIterator = null,
+search_regex: ?*Regex,
+search_highlight_handle: ?Reviewer.HandleId = null,
 handlers_ids: std.ArrayList(cmd_mod.HandleId),
 filter_ids: std.ArrayList(Filter.HandleId),
 reviewer_ids: std.ArrayList(Reviewer.HandleId),
@@ -84,6 +92,9 @@ pub fn deinit(self: *Output) void {
         if (reviewer) |*r| {
             r.deinit();
         }
+    }
+    if (self.search_iterator) |iter| {
+        iter.deinit();
     }
     self.reviewer_ids.deinit();
     self.style_map.deinit();
@@ -231,42 +242,93 @@ fn handleFindCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error
     const top_rendered_line_buffer_offset = self.widget_ref.?.get_rendered_line_buffer_offset(.first) catch |e| switch (e) {
         error.NoLinesRendered => return,
     };
-    const buffer = self.widget_ref.?.text.text;
+    //const buffer = self.widget_ref.?.text.text;
 
-    std.debug.print("top_rendered_line is {d}\n", .{top_rendered_line_buffer_offset});
-    std.debug.print("buffer len is {d}\n", .{buffer.len});
-    std.debug.print("did we get here?\n", .{});
+    var secondAttempt = false;
+    while (true) : (secondAttempt = true) {
+        var start_searching_line: usize = 0;
+        if (secondAttempt == false) {
+            start_searching_line = self.nonowned_process_buffer.getLineFromOffset(top_rendered_line_buffer_offset);
+        }
 
-    var iter = helpers.regexMutilineMatchAll(&re, buffer[top_rendered_line_buffer_offset..buffer.len]);
+        var search_iter = search.startSearchFrom(
+            self.widget_ref.?.alloc,
+            self.nonowned_process_buffer,
+            re,
+            start_searching_line,
+        );
 
-    // find the first match
-    const match = try iter.next();
-    std.debug.print("the buffer we are looking at:\n{s}", .{buffer[top_rendered_line_buffer_offset..buffer.len]});
-    std.debug.print("captures...{any}\n", .{match});
+        const match = try search_iter.next();
 
-    if (match) |m| {
-        std.debug.print("Match found at {d} for {s}", .{ m.lowerBound, m.str });
+        if (match) |m| {
+            std.debug.print("Match found at {d} for {s}\n", .{ m.lowerBound, m.str });
 
-        // jump to the line containing the start of the match
-        self.widget_ref.?.jump_output_to_line(
-            self.widget_ref.?.window.getLineFromOffset(m.lowerBound + top_rendered_line_buffer_offset),
-        ) catch return;
-
-        // TODO: do some highlighting on match
-    } else if (top_rendered_line_buffer_offset != 0) {
-        var iter2 = helpers.regexMatchAll(&re, buffer[0..top_rendered_line_buffer_offset]);
-        const match2 = try iter2.next();
-
-        if (match2) |m| {
-            std.debug.print("Match found (on our second attempt) at {d} for {s}\n", .{ m.lowerBound, m.str });
             // jump to the line containing the start of the match
             self.widget_ref.?.jump_output_to_line(
                 self.widget_ref.?.window.getLineFromOffset(m.lowerBound),
             ) catch return;
-            // TODO: do some highlighting on match
+
+            if (self.search_highlight_handle) |hndl| {
+                self.nonowned_process_buffer.removeReviewer(hndl);
+                self.search_highlight_handle = null;
+            }
+
+            self.updateStyle(
+                .{ .bg = .{ .rgb = .{ 255, 255, 255 } } },
+                m.lowerBound,
+                m.upperBound,
+            );
+
+            var color_patterns = std.ArrayList(ColorPattern).init(alloc);
+            color_patterns.addOne(.{ .regex = re, .full_line = false, .style = .{ .bg = .{ .rgb = .{ 255, 255, 255 } } } });
+            const reviewer_data = try alloc.create(ColorReviewerData);
+            reviewer_data.* = .{
+                .output = self,
+                .style_patterns = try color_patterns.toOwnedSlice(),
+            };
+
+            const reviewer = try Reviewer.init(self.arena.allocator(), reviewer_data, color);
+            self.search_highlight_handle = reviewer.id;
+            try self.nonowned_process_buffer.addReviewer(reviewer);
+
+            // save search iterator
+            if (self.search_iterator) |iter| iter.deinit();
+            self.search_iterator = search_iter;
+            break;
+        }
+
+        if (secondAttempt) break;
+    }
+}
+
+fn handleFindNextCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @alignCast(@ptrCast(listener));
+    if (self.search_iterator) |iter| {
+        const match = try iter.next();
+        if (match) |m| {
+            // jump to the line containing the start of the match
+            self.widget_ref.?.jump_output_to_line(
+                self.widget_ref.?.window.getLineFromOffset(m.lowerBound),
+            ) catch return;
+
+            // highlight new match
+            //TODO:
         }
     }
 }
+
+//fn handleFindPrevCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+//    const self: *Output = @alignCast(@ptrCast(listener));
+//    if (self.search_iterator) |iter| {
+//        const match = try iter.prev();
+//        if (match) |m| {
+//            // jump to the line containing the start of the match
+//            self.widget_ref.?.jump_output_to_line(
+//                self.widget_ref.?.window.getLineFromOffset(m.lowerBound),
+//            ) catch return;
+//        }
+//    }
+//}
 
 fn handleUncolorCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @alignCast(@ptrCast(listener));

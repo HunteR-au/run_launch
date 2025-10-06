@@ -38,6 +38,7 @@ pub const ProcessBuffer = struct {
             .buffer_newlines = std.ArrayList(usize).init(alloc),
             .filtered_buffer = std.ArrayList(u8).init(alloc),
             .filtered_newlines = std.ArrayList(usize).init(alloc),
+            .nonowned_iterators = std.ArrayList(*IteratorPtr).init(alloc),
             .pipeline = try Pipeline.init(alloc),
         };
         return self;
@@ -289,6 +290,53 @@ pub const ProcessBuffer = struct {
         return self.filtered_newlines.items.len;
     }
 
+    // newlines count as part of the preceding line
+    pub fn getLineFromOffset(self: *ProcessBuffer, offset: usize) usize {
+        self.m.lock();
+        defer self.m.unlock();
+        const filtered_newlines_slice = self.filtered_newlines.items;
+
+        const last_rendered_line = std.sort.lowerBound(
+            usize,
+            filtered_newlines_slice,
+            offset,
+            struct {
+                pub fn compare(lhs: usize, rhs: usize) std.math.Order {
+                    return std.math.order(lhs, rhs);
+                }
+            }.compare,
+        );
+        return last_rendered_line;
+    }
+
+    const Index = union(enum) {
+        idx: usize,
+        first: void,
+        outOfBounds: void,
+    };
+
+    fn calNewlineIndex(self: *ProcessBuffer, line_num: usize) Index {
+        if (line_num == 0) return .first;
+        if (line_num >= self.last_update_parent_num_lines) return .outOfBounds;
+        return .{ .idx = line_num - 1 };
+    }
+
+    // set the offset of the first character of the line
+    // TODO: This needs a review
+    pub fn getOffsetFromLine(self: *ProcessBuffer, line_num: usize) !usize {
+        self.m.lock();
+        defer self.m.unlock();
+        const idx = self.calNewlineIndex(line_num);
+        switch (idx) {
+            .idx => |i| {
+                const offset = self.filtered_newlines.items[i] + 1;
+                return offset;
+            },
+            .first => return 0,
+            .outOfBounds => error.OutOfBounds,
+        }
+    }
+
     pub fn createLineIterator(
         self: *ProcessBuffer,
         alloc: std.mem.Allocator,
@@ -389,7 +437,22 @@ pub const ProcessBuffer = struct {
             if (T == LineIterator) {
                 self.newlines_index +|= 1;
             } else if (T == ReverseLineIterator) {
-                self.newlines_index -|= 1;
+                self.newlines_index = @subWithOverflow(self.newlines_index, 1)[0];
+            }
+        }
+        return try alloc.dupe(u8, result);
+    }
+
+    fn commonPrev(comptime T: type, self: anytype, alloc: std.mem.Allocator) !?[]const u8 {
+        if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
+        self.process_buffer.m.lock();
+        defer self.process_buffer.m.unlock();
+        const result = self._peek() orelse return null;
+        comptime {
+            if (T == LineIterator) {
+                self.newlines_index = @subWithOverflow(self.newlines_index, 1)[0];
+            } else if (T == ReverseLineIterator) {
+                self.newlines_index +|= 1;
             }
         }
         return try alloc.dupe(u8, result);
@@ -416,6 +479,10 @@ pub const ProcessBuffer = struct {
 
         pub fn next(self: *LineIterator, alloc: std.mem.Allocator) !IteratorResult {
             return commonNext(LineIterator, self, alloc);
+        }
+
+        pub fn prev(self: *LineIterator, alloc: std.mem.Allocator) !?IteratorResult {
+            return try commonPrev(LineIterator, self, alloc);
         }
 
         pub fn peek(self: *LineIterator, alloc: std.mem.Allocator) ?IteratorResult {
@@ -480,7 +547,11 @@ pub const ProcessBuffer = struct {
         }
 
         pub fn next(self: *ReverseLineIterator, alloc: std.mem.Allocator) !?IteratorResult {
-            return commonNext(ReverseLineIterator, self, alloc);
+            return try commonNext(ReverseLineIterator, self, alloc);
+        }
+
+        pub fn prev(self: *ReverseLineIterator, alloc: std.mem.Allocator) !?IteratorResult {
+            return try commonPrev(ReverseLineIterator, self, alloc);
         }
 
         pub fn peek(self: *ReverseLineIterator, alloc: std.mem.Allocator) ?IteratorResult {
@@ -489,25 +560,22 @@ pub const ProcessBuffer = struct {
 
         fn _peek(self: *ReverseLineIterator) ?IteratorResult {
             if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
-            if (self.newlines_index == 0) return null;
-
-            // We need to shift the index down by 1 to make sure 0 is beyond the start of the buffer
-            // TODO: maybe just let the usize underflow???
-            const index = self.newlines_index - 1;
+            //if (self.newlines_index == 0) return null;
+            if (self.newlines_index > self.process_buffer.filtered_newlines.items.len) return null;
 
             var line_start: usize = undefined;
             var line_end: usize = undefined;
 
-            if (index == self.process_buffer.filtered_newlines.items.len) {
+            if (self.newlines_index == self.process_buffer.filtered_newlines.items.len) {
                 line_end = self.process_buffer.filtered_buffer.items.len;
             } else {
-                line_end = self.process_buffer.filtered_newlines.items[index];
+                line_end = self.process_buffer.filtered_newlines.items[self.newlines_index];
             }
 
-            if (index == 1) {
+            if (self.newlines_index == 1) {
                 line_start = 0;
             } else {
-                line_start = self.process_buffer.filtered_newlines.items[index - 1] + 1;
+                line_start = self.process_buffer.filtered_newlines.items[self.newlines_index - 1] + 1;
             }
 
             return .{

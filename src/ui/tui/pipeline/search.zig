@@ -128,4 +128,8 @@ pub const ProcessBufferSearchIterator = struct {
             }
         }
     }
+
+    //pub fn prev(self: *ProcessBufferSearchIterator) !?Result {
+    //    // TODO!
+    //}
 };

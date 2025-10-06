@@ -491,7 +491,7 @@ const Window = struct {
         return last_rendered_line;
     }
 
-    // set the offset of the first character
+    // set the offset of the first character of the line
     pub fn getOffsetFromLine(self: *Window, line_num: usize) !usize {
         const idx = self.calNewlineIndex(line_num);
         switch (idx) {
