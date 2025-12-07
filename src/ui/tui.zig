@@ -167,11 +167,27 @@ const Model = struct {
                     }
                 } else if (key.matches(vaxis.Key.escape, .{})) {
                     if (self.mode == .cmdview) {
-                        //std.debug.print("setting mode back to main\n", .{});
                         self.mode = .main;
-                        try ctx.requestFocus(self.widget());
+                        if (self.modelview.get_focused_output_widget()) |ow| {
+                            try ctx.requestFocus(ow.widget());
+                        } else {
+                            try ctx.requestFocus(self.widget());
+                        }
                         return ctx.consumeEvent();
                     }
+                }
+            },
+            .focus_in => {
+                if (self.mode == .cmdview) {
+                    try ctx.requestFocus(self.cmd_view.widget());
+                    return ctx.consumeEvent();
+                } else if (self.mode == .main) {
+                    if (self.modelview.get_focused_output_widget()) |ow| {
+                        try ctx.requestFocus(ow.widget());
+                    } else {
+                        try ctx.requestFocus(self.widget());
+                    }
+                    return ctx.consumeEvent();
                 }
             },
             else => {},
@@ -233,10 +249,14 @@ const Model = struct {
                     }
                     return;
                 } else if (key.matches('w', .{ .shift = true })) {
-                    _ = self.modelview.focus_prev();
+                    if (self.modelview.focus_prev()) |ov| {
+                        if (ov.focused_ow) |o| try ctx.requestFocus(o.widget());
+                    }
                     return ctx.consumeAndRedraw();
                 } else if (key.matches('e', .{ .shift = true })) {
-                    _ = self.modelview.focus_next();
+                    if (self.modelview.focus_next()) |ov| {
+                        if (ov.focused_ow) |o| try ctx.requestFocus(o.widget());
+                    }
                     return ctx.consumeAndRedraw();
                 } else if (key.matches('e', .{})) {
                     const output_view = self.modelview.get_focused();
@@ -495,12 +515,14 @@ pub fn createProcessView(alloc: std.mem.Allocator, processname: []const u8) std.
         // mutex around it
         model.process_buffers.m.lock();
         try model.process_buffers.map.put(alloc, try aa.dupe(u8, processname), buf);
-        defer model.process_buffers.m.unlock();
+        model.process_buffers.m.unlock();
         errdefer {
+            model.process_buffers.m.lock();
             const keyvalue = model.process_buffers.map.fetchRemove(processname);
             if (keyvalue) |kv| {
                 kv.value.deinit();
             }
+            model.process_buffers.m.unlock();
         }
 
         const p_output = try OutputWidget.init(
@@ -536,11 +558,13 @@ pub fn pushLogging(alloc: std.mem.Allocator, processname: []const u8, buffer: []
     _ = alloc;
 
     if (keep_running.load(.seq_cst)) {
+        model.process_buffers.m.lock();
         const target_buffer = model.process_buffers.map.get(processname);
 
         if (target_buffer) |output| {
             try output.append(buffer);
         }
+        model.process_buffers.m.unlock();
     }
 }
 
@@ -556,53 +580,23 @@ pub fn pushLogging(alloc: std.mem.Allocator, processname: []const u8, buffer: []
 
 // TODO: new config that uses yaml
 
-// Command features
-// text search
-// fast move down/up
+// BUGS:
+// TODO: need to remove highlight when doing find again OR cancelling find
+// if too many pending lines it will overflow
+// when window is full, stickly is stuck on
 
-// keyboard functions
-// jump next/prev search
-//  - move to line x
-//  - get_top_rendered_line (done)
-////    - in ScrollView
-//          - accumulated_height is skipped lines in mutistyletext
-//          - it isn't exposed, by we can use self.scroll.vertical_offset
-//          - need to map vertical_offset to rendered line
-//          - self.last_height + self.vertical_offset
-//          - to get state of rendered text
-//              need to track the buffer offset of first char in each row
-//              - where to get allocator
-//  - get_bottom_rendered_line (done)
-//  - was line rendered last frame
-// -----
-// issues - I'm matching bound with inital offset of match
-//              I actually should move view bound with match bound
+// tasks child.wait() closes pipes
+// need to refactor the wait to not close pipes until process closed and piped emptied
 
-// when doing find
-// - create iterator (done line iterator, now need regex iterator)
-// - do first forward search
-// - save iterator,
+// jump is busted when the window fills
+// find is busted when the window fills
+// switching focus can get bugged and stay on one output
 
-// create processbuffer line iterator on filtered buffer
-// --- features ---
-// - iterate updating buffer
-// - invalidate iterator if filtered buffer reupdates
-// - next, peek
-// - reverse iterator
-// - atomic locking with refreshing
-// QUESTION: do I want to search filtered_buffer or last_rendered_buffer
-// pro: last_rendered_buffer: user are actually querying what they see
-// pro: querying filtered_buffer means less buffers...
-//      I think I need the rendered_buffer anyway as it must stay for two frames
-//      and the filtered_buffer could be deleted at any time
-// CON: rendered buffer DOESN'T contain all text!!!!!!!!
-
-// TODO: next/prev commands
-// TODO: store/update find cache
+// page up / page down break once window full
+// sticky breaks when window is full
+// next/prev can get stuck on .begin .end iterator values
 
 // TODO find_replace str cmd
-// TODO goto top/bottom of buffer
-// TODO fast move up/down
 // TODO parse ui config in TUI
 // ---> options
 // ------> when process starts, run color commands

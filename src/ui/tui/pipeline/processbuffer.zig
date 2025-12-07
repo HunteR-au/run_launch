@@ -15,7 +15,7 @@ pub const ProcessBuffer = struct {
     buffer_newlines: std.ArrayList(usize),
     filtered_buffer: std.ArrayList(u8),
     filtered_newlines: std.ArrayList(usize),
-    nonowned_iterators: std.ArrayList(*IteratorPtr),
+    nonowned_iterators: std.ArrayList(IteratorPtr),
     lastNewLine: usize = 0,
     pipeline: Pipeline,
 
@@ -38,7 +38,7 @@ pub const ProcessBuffer = struct {
             .buffer_newlines = std.ArrayList(usize).init(alloc),
             .filtered_buffer = std.ArrayList(u8).init(alloc),
             .filtered_newlines = std.ArrayList(usize).init(alloc),
-            .nonowned_iterators = std.ArrayList(*IteratorPtr).init(alloc),
+            .nonowned_iterators = std.ArrayList(IteratorPtr).init(alloc),
             .pipeline = try Pipeline.init(alloc),
         };
         return self;
@@ -46,6 +46,7 @@ pub const ProcessBuffer = struct {
 
     pub fn deinit(self: *ProcessBuffer) void {
         self.buffer.deinit();
+        self.nonowned_iterators.deinit();
         self.buffer_newlines.deinit();
         self.filtered_buffer.deinit();
         self.filtered_newlines.deinit();
@@ -55,7 +56,14 @@ pub const ProcessBuffer = struct {
 
     fn invalidateAllIterators(self: *ProcessBuffer) void {
         for (self.nonowned_iterators.items) |iter| {
-            iter.invalidate();
+            switch (iter) {
+                .lineIterator => |i| {
+                    i.invalidate();
+                },
+                .reverseLineIterator => |i| {
+                    i.invalidate();
+                },
+            }
         }
         self.nonowned_iterators.clearAndFree();
     }
@@ -317,7 +325,7 @@ pub const ProcessBuffer = struct {
 
     fn calNewlineIndex(self: *ProcessBuffer, line_num: usize) Index {
         if (line_num == 0) return .first;
-        if (line_num >= self.last_update_parent_num_lines) return .outOfBounds;
+        if (line_num >= self.lastNewLine) return .outOfBounds;
         return .{ .idx = line_num - 1 };
     }
 
@@ -351,7 +359,7 @@ pub const ProcessBuffer = struct {
     //////////////////////////////////
     // Generic functions for Iterators
     //////////////////////////////////
-    fn commonPeek(self: anytype, alloc: std.mem.Allocator) ?IteratorResult {
+    fn commonPeek(self: anytype, alloc: std.mem.Allocator) !?IteratorResult {
         if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
         self.process_buffer.m.lock();
         defer self.process_buffer.m.unlock();
@@ -362,7 +370,7 @@ pub const ProcessBuffer = struct {
         };
     }
 
-    fn commonReset(self: anytype, index: usize) void {
+    fn commonReset(self: anytype, index: IteratorIndex) void {
         if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
         self.process_buffer.m.lock();
         defer self.process_buffer.m.unlock();
@@ -373,18 +381,15 @@ pub const ProcessBuffer = struct {
         self._invalid.store(true, .seq_cst);
     }
 
-    fn commonInit(comptime T: type, alloc: std.mem.Allocator, pProcessBuffer: *ProcessBuffer) !T {
+    fn commonInit(comptime T: type, alloc: std.mem.Allocator, pProcessBuffer: *ProcessBuffer) !*T {
         pProcessBuffer.m.lock();
         defer pProcessBuffer.m.unlock();
 
-        var inital_index = undefined;
-        comptime {
-            if (T == ReverseLineIterator) {
-                inital_index = pProcessBuffer.filtered_newlines.len + 1;
-            } else {
-                inital_index = 0;
-            }
-        }
+        //const inital_index: IteratorIndex = if (T == ReverseLineIterator)
+        //    pProcessBuffer.filtered_newlines.len + 1
+        //else
+        //    0;
+        const inital_index: IteratorIndex = .start;
 
         const self = try alloc.create(T);
         self.* = .{
@@ -393,69 +398,116 @@ pub const ProcessBuffer = struct {
             .newlines_index = inital_index,
         };
 
-        comptime {
-            if (T == ReverseLineIterator) {
-                inital_index = pProcessBuffer.filtered_newlines.len + 1;
-                self.process_buffer.nonowned_iterators.append(.{ .reverseLineIterator = self });
-            } else if (T == LineIterator) {
-                inital_index = 0;
-                self.process_buffer.nonowned_iterators.append(.{ .lineIterator = self });
-            }
+        if (T == ReverseLineIterator) {
+            try self.process_buffer.nonowned_iterators.append(.{ .reverseLineIterator = self });
+        } else if (T == LineIterator) {
+            try self.process_buffer.nonowned_iterators.append(.{ .lineIterator = self });
         }
 
-        self.process_buffer.nonowned_iterators.append(self);
         return self;
     }
 
     fn commonDeinit(self: anytype, comptime kind: IteratorKind) void {
         if (self._invalid.load(.seq_cst)) {
             // we can't touch process_buffer if invalid
-            self.alloc.free(self);
+            self.alloc.destroy(self);
         } else {
             self.process_buffer.m.lock();
-            defer self.process_buffer.m.unlock();
+            var mutex = self.process_buffer.m;
+            defer mutex.unlock();
+
             for (self.process_buffer.nonowned_iterators.items, 0..) |iter, i| {
+                // BUG: using swapRemove may cause issues while iterating over it
                 switch (kind) {
                     .lineIterator => {
-                        if (iter.tag == IteratorKind.lineIterator and iter == self) self.process_buffer.nonowned_iterators.swapRemove(i);
+                        if (iter == .lineIterator and iter.lineIterator == self)
+                            _ = self.process_buffer.nonowned_iterators.swapRemove(i);
                     },
                     .reverseLineIterator => {
-                        if (iter.tag == IteratorKind.lineIterator and iter == self) self.process_buffer.nonowned_iterators.swapRemove(i);
+                        if (iter == .reverseLineIterator and iter.reverseLineIterator == self)
+                            _ = self.process_buffer.nonowned_iterators.swapRemove(i);
                     },
                 }
             }
-            self.alloc.free(self);
+            self.alloc.destroy(self);
         }
     }
 
-    fn commonNext(comptime T: type, self: anytype, alloc: std.mem.Allocator) !?[]const u8 {
+    fn commonNext(comptime T: type, self: anytype, alloc: std.mem.Allocator) !?IteratorResult {
         if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
         self.process_buffer.m.lock();
         defer self.process_buffer.m.unlock();
-        const result = self._peek() orelse return null;
-        comptime {
-            if (T == LineIterator) {
-                self.newlines_index +|= 1;
-            } else if (T == ReverseLineIterator) {
-                self.newlines_index = @subWithOverflow(self.newlines_index, 1)[0];
+
+        if (T == LineIterator) {
+            const next_index: IteratorIndex = switch (self.newlines_index) {
+                .start => .{ .index = 0 },
+                .index => |i| .{ .index = i +| 1 },
+                .end => unreachable,
+            };
+            if (!self._checkBounds(next_index.index)) return null;
+            self.newlines_index = next_index;
+        } else if (T == ReverseLineIterator) {
+            const next_index: IteratorIndex = switch (self.newlines_index) {
+                .start => .{ .index = self.process_buffer.filtered_newlines.items.len },
+                .index => |i| if (i == 0) .end else .{ .index = i -| 1 },
+                .end => return null,
+            };
+
+            if (next_index == .end) {
+                self.newlines_index = next_index;
+                return null;
+            } else if (self._checkBounds(next_index.index)) {
+                return null;
+            } else {
+                self.newlines_index = next_index;
             }
         }
-        return try alloc.dupe(u8, result);
+
+        const result = try self._peek() orelse return null;
+
+        return .{
+            .line = try alloc.dupe(u8, result.line),
+            .buffer_offset = result.buffer_offset,
+        };
     }
 
-    fn commonPrev(comptime T: type, self: anytype, alloc: std.mem.Allocator) !?[]const u8 {
+    fn commonPrev(comptime T: type, self: anytype, alloc: std.mem.Allocator) !?IteratorResult {
         if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
         self.process_buffer.m.lock();
         defer self.process_buffer.m.unlock();
-        const result = self._peek() orelse return null;
-        comptime {
-            if (T == LineIterator) {
-                self.newlines_index = @subWithOverflow(self.newlines_index, 1)[0];
-            } else if (T == ReverseLineIterator) {
-                self.newlines_index +|= 1;
+
+        if (T == LineIterator) {
+            const next_index: IteratorIndex = switch (self.newlines_index) {
+                .start => return null,
+                .index => |i| if (i == 0) .start else .{ .index = i -| 1 },
+                .end => unreachable,
+            };
+
+            if (next_index == .start) {
+                self.newlines_index = next_index;
+                return null;
+            } else if (!self._checkBounds(next_index.index)) {
+                return null;
+            } else {
+                self.newlines_index = next_index;
             }
+        } else if (T == ReverseLineIterator) {
+            const next_index: IteratorIndex = switch (self.newlines_index) {
+                .start => return null,
+                .index => |i| .{ .index = i +| 1 },
+                .end => .{ .index = 0 },
+            };
+
+            if (!self._checkBounds(next_index.index)) return null;
+            self.newlines_index = next_index;
         }
-        return try alloc.dupe(u8, result);
+
+        const result = try self._peek() orelse return null;
+
+        return .{
+            .line = try alloc.dupe(u8, result.line),
+            .buffer_offset = result.buffer_offset,
+        };
     }
 
     pub const IteratorResult = struct {
@@ -463,13 +515,19 @@ pub const ProcessBuffer = struct {
         buffer_offset: usize,
     };
 
+    pub const IteratorIndex = union(enum) {
+        start: void,
+        end: void,
+        index: usize,
+    };
+
     pub const LineIterator = struct {
         alloc: std.mem.Allocator,
         process_buffer: *ProcessBuffer,
-        newlines_index: usize,
+        newlines_index: IteratorIndex,
         _invalid: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-        pub fn init(alloc: std.mem.Allocator, pProcessBuffer: *ProcessBuffer) !LineIterator {
+        pub fn init(alloc: std.mem.Allocator, pProcessBuffer: *ProcessBuffer) !*LineIterator {
             return commonInit(LineIterator, alloc, pProcessBuffer);
         }
 
@@ -477,7 +535,7 @@ pub const ProcessBuffer = struct {
             commonDeinit(self, .lineIterator);
         }
 
-        pub fn next(self: *LineIterator, alloc: std.mem.Allocator) !IteratorResult {
+        pub fn next(self: *LineIterator, alloc: std.mem.Allocator) !?IteratorResult {
             return commonNext(LineIterator, self, alloc);
         }
 
@@ -485,42 +543,48 @@ pub const ProcessBuffer = struct {
             return try commonPrev(LineIterator, self, alloc);
         }
 
-        pub fn peek(self: *LineIterator, alloc: std.mem.Allocator) ?IteratorResult {
+        pub fn peek(self: *LineIterator, alloc: std.mem.Allocator) !?IteratorResult {
             return commonPeek(self, alloc);
         }
 
-        fn _peek(self: *LineIterator) ?IteratorResult {
+        pub fn _checkBounds(self: *LineIterator, line_index: usize) bool {
+            return if (line_index > self.process_buffer.filtered_newlines.items.len) false else true;
+        }
+
+        fn _peek(self: *LineIterator) !?IteratorResult {
             if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
-            if (self.newlines_index > self.process_buffer.filtered_newlines.items.len) return null;
+            if (self.newlines_index == .start) return null;
+            if (self.newlines_index == .end) return null;
+            if (self.newlines_index.index > self.process_buffer.filtered_newlines.items.len) return null;
 
             var line_start: usize = undefined;
             var line_end: usize = undefined;
 
-            if (self.newlines_index == self.process_buffer.filtered_newlines.items.len) {
+            if (self.newlines_index.index == self.process_buffer.filtered_newlines.items.len) {
                 line_end = self.process_buffer.filtered_buffer.items.len;
             } else {
-                line_end = self.process_buffer.filtered_newlines.items[self.newlines_index];
+                line_end = self.process_buffer.filtered_newlines.items[self.newlines_index.index];
             }
 
-            if (self.newlines_index == 0) {
+            if (self.newlines_index.index == 0) {
                 line_start = 0;
             } else {
                 // TODO: check that +1 doesn't go over buffer length
-                line_start = self.process_buffer.filtered_newlines.items[self.newlines_index - 1] + 1;
+                line_start = self.process_buffer.filtered_newlines.items[self.newlines_index.index - 1] + 1;
             }
 
             return .{
                 .line = self.process_buffer.filtered_buffer.items[line_start..line_end],
-                .offset = line_start,
+                .buffer_offset = line_start,
             };
         }
 
         pub fn setLine(self: *LineIterator, line_num: usize) !void {
             self.process_buffer.m.lock();
-            defer self.process_buffer.m.lock();
+            defer self.process_buffer.m.unlock();
             // validate that the line number is within bounds
-            if (line_num > self.filtered_newlines.items.len) return error.OutOfRange;
-            self.newlines_index = line_num;
+            if (line_num > self.process_buffer.filtered_newlines.items.len) return error.OutOfRange;
+            self.newlines_index = .{ .index = line_num };
         }
 
         pub fn reset(self: *LineIterator) void {
@@ -535,14 +599,14 @@ pub const ProcessBuffer = struct {
     pub const ReverseLineIterator = struct {
         alloc: std.mem.Allocator,
         process_buffer: *ProcessBuffer,
-        newlines_index: usize,
+        newlines_index: IteratorIndex,
         _invalid: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-        pub fn init(alloc: std.mem.Allocator, pProcessBuffer: *ProcessBuffer) !ReverseLineIterator {
+        pub fn init(alloc: std.mem.Allocator, pProcessBuffer: *ProcessBuffer) !*ReverseLineIterator {
             return commonInit(ReverseLineIterator, alloc, pProcessBuffer);
         }
 
-        pub fn deinit(self: *LineIterator) void {
+        pub fn deinit(self: *ReverseLineIterator) void {
             commonDeinit(self, .reverseLineIterator);
         }
 
@@ -554,33 +618,37 @@ pub const ProcessBuffer = struct {
             return try commonPrev(ReverseLineIterator, self, alloc);
         }
 
-        pub fn peek(self: *ReverseLineIterator, alloc: std.mem.Allocator) ?IteratorResult {
+        pub fn peek(self: *ReverseLineIterator, alloc: std.mem.Allocator) !?IteratorResult {
             return commonPeek(self, alloc);
         }
 
-        fn _peek(self: *ReverseLineIterator) ?IteratorResult {
+        fn _checkBounds(self: *ReverseLineIterator, line_index: usize) bool {
+            return if (line_index > self.process_buffer.filtered_newlines.items.len) false else true;
+        }
+
+        fn _peek(self: *ReverseLineIterator) !?IteratorResult {
             if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
             //if (self.newlines_index == 0) return null;
-            if (self.newlines_index > self.process_buffer.filtered_newlines.items.len) return null;
+            if (self.newlines_index.index > self.process_buffer.filtered_newlines.items.len) return null;
 
             var line_start: usize = undefined;
             var line_end: usize = undefined;
 
-            if (self.newlines_index == self.process_buffer.filtered_newlines.items.len) {
+            if (self.newlines_index.index == self.process_buffer.filtered_newlines.items.len) {
                 line_end = self.process_buffer.filtered_buffer.items.len;
             } else {
-                line_end = self.process_buffer.filtered_newlines.items[self.newlines_index];
+                line_end = self.process_buffer.filtered_newlines.items[self.newlines_index.index];
             }
 
-            if (self.newlines_index == 1) {
+            if (self.newlines_index.index == 1) {
                 line_start = 0;
             } else {
-                line_start = self.process_buffer.filtered_newlines.items[self.newlines_index - 1] + 1;
+                line_start = self.process_buffer.filtered_newlines.items[self.newlines_index.index - 1] + 1;
             }
 
             return .{
                 .line = self.process_buffer.filtered_buffer.items[line_start..line_end],
-                .offset = line_start,
+                .buffer_offset = line_start,
             };
         }
 
@@ -588,13 +656,13 @@ pub const ProcessBuffer = struct {
             commonReset(self, 0);
         }
 
-        pub fn setLine(self: *LineIterator, line_num: usize) !void {
+        pub fn setLine(self: *ReverseLineIterator, line_num: usize) !void {
             self.process_buffer.m.lock();
-            defer self.process_buffer.m.lock();
+            defer self.process_buffer.m.unlock();
             const internal_index = line_num + 1;
             // validate that the line number is within bounds
-            if (internal_index > self.filtered_newlines.items.len + 1) return error.OutOfRange;
-            self.newlines_index = line_num;
+            if (internal_index > self.process_buffer.filtered_newlines.items.len + 1) return error.OutOfRange;
+            self.newlines_index = .{ .index = line_num };
         }
 
         pub fn invalidate(self: *ReverseLineIterator) void {
@@ -602,3 +670,43 @@ pub const ProcessBuffer = struct {
         }
     };
 };
+
+const testing = std.testing;
+test "Line iterator" {
+    const alloc = testing.allocator_instance.allocator();
+    const input =
+        \\Line 1
+        \\Line 2
+        \\Line 3
+        \\Line 4
+        \\Line 5
+        \\Line 6
+    ;
+
+    const process_buffer = try ProcessBuffer.init(alloc);
+    defer process_buffer.deinit();
+
+    try process_buffer.append(input);
+
+    var iter = try ProcessBuffer.LineIterator.init(
+        alloc,
+        process_buffer,
+    );
+    defer iter.deinit();
+
+    var m = try iter.next(alloc);
+    try testing.expectEqualStrings("Line 1", m.?.line);
+    alloc.free(m.?.line);
+
+    m = try iter.next(alloc);
+    try testing.expectEqualStrings("Line 2", m.?.line);
+    alloc.free(m.?.line);
+
+    m = try iter.next(alloc);
+    try testing.expectEqualStrings("Line 3", m.?.line);
+    alloc.free(m.?.line);
+
+    m = try iter.prev(alloc);
+    try testing.expectEqualStrings("Line 2", m.?.line);
+    alloc.free(m.?.line);
+}

@@ -208,6 +208,54 @@ pub fn pullpushLoop(
     }
 }
 
+// AI impl
+
+//pub fn pullpushLoop(
+//    alloc: std.mem.Allocator,
+//    pushfn: PushFnProto,
+//    childproc: std.process.Child,
+//    processname: []const u8,
+//) !void {
+//    const chunk_size: usize = 1024;
+//
+//    const outbuffer: []u8 = try alloc.alloc(u8, chunk_size);
+//    const errbuffer: []u8 = try alloc.alloc(u8, chunk_size);
+//    defer alloc.free(outbuffer);
+//    defer alloc.free(errbuffer);
+//
+//    const stdout_reader = childproc.stdout orelse return error.NotOpenForReading;
+//    const stderr_reader = childproc.stderr orelse return error.NotOpenForReading;
+//
+//    var poller = std.io.poll(alloc, enum { stdout, stderr }, .{
+//        .stdout = stdout_reader,
+//        .stderr = stderr_reader,
+//    });
+//    defer poller.deinit();
+//
+//    while (true) {
+//        const polled = poller.pollTimeout(100_000_000) catch |err| {
+//            switch (err) {
+//                error.NotOpenForReading => break, // pipes closed → exit loop
+//                else => return err,              // propagate other errors
+//            }
+//        };
+//
+//        if (!polled) break; // timeout → no more events
+//
+//        const stdout = poller.fifo(.stdout).readableSlice(0);
+//        if (stdout.len > 0) {
+//            try pushfn(alloc, processname, stdout);
+//            poller.fifo(.stdout).discard(stdout.len);
+//        }
+//
+//        const stderr = poller.fifo(.stderr).readableSlice(0);
+//        if (stderr.len > 0) {
+//            try pushfn(alloc, processname, stderr);
+//            poller.fifo(.stderr).discard(stderr.len);
+//        }
+//    }
+//}
+
 pub fn cloneHashMap(
     comptime K: type,
     comptime V: type,

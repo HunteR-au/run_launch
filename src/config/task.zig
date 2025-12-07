@@ -36,10 +36,18 @@ pub const Task = struct {
 
         _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, self.label.? });
 
-        _ = child.wait() catch |e| {
-            //std.debug.print("Spawning module {any} failed.\n", .{e});
-            return e;
-        };
+        // TODO: BUG BUG BUG - child.wait will clean up and remove pipes. We probably only want to remove pipes once process ends AND
+        // we have confirmed the pipe is drained
+
+        // Q: should we leave the process clean up in the pullpushloop
+        // A: probably not, less control there
+        // Q: should we check on process status in pullpushloop...
+        // A: I think it would be nice to push pipe status / something when process fails
+
+        //_ = child.wait() catch |e| {
+        //    //std.debug.print("Spawning module {any} failed.\n", .{e});
+        //    return e;
+        //};
     }
 };
 

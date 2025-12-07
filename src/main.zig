@@ -8,6 +8,8 @@ const uiview = @import("ui/uiview.zig");
 const tui = @import("tui");
 const runner = @import("runner/runner.zig");
 
+const ui_debug = @import("debug_ui");
+
 const vaxis = @import("dependencies/vaxis");
 
 const RunLaunchErrors = error{
@@ -82,12 +84,18 @@ pub fn main() !void {
     if (res.args.@"web-ui" != 0) {
         _ = try runner.run(allocator, taskNameToRun, launchdata, tasks, uiview.createProcessView, uiview.pushLogging);
     } else {
+        if (@import("builtin").mode == .Debug) {
+            try ui_debug.start_debuginfo(allocator, tui.createProcessView, tui.pushLogging);
+        }
         _ = try runner.run(allocator, taskNameToRun, launchdata, tasks, tui.createProcessView, tui.pushLogging);
     }
 
     if (res.args.@"web-ui" != 0) {
         uiview.closeWebUI();
     } else {
+        if (@import("builtin").mode == .Debug) {
+            ui_debug.stop_debuginfo();
+        }
         tui.stop_tui();
     }
 }

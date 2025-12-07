@@ -1,6 +1,7 @@
 const std = @import("std");
 const utils = @import("utils");
 const helpers = @import("helpers.zig");
+const debug_ui = @import("debug_ui");
 
 const process_buffer_mod = @import("pipeline/processbuffer.zig");
 const search = @import("pipeline/search.zig");
@@ -26,19 +27,78 @@ pub const Cmd = cmd_mod.Cmd;
 const Handler = cmd_mod.Handler;
 
 const SearchInfo = struct {
-    iterator: *search.ProcessBufferSearchIterator,
+    const ResultCache = struct {
+        result: search.ProcessBufferSearchIterator.Result,
+        cached_style: ?[]?vaxis.Style = null,
+    };
+
+    iterator: search.ProcessBufferSearchIterator,
     regex: *Regex,
-    last_result: ?search.ProcessBufferSearchIterator.Result = null,
-    cached_style: ?[]vaxis.Style,
+    result_cache: ?ResultCache = null,
+    highlight_style: vaxis.Style = .{ .bg = .{ .rgb = .{ 255, 255, 255 } } },
+
+    pub fn deinit(self: *SearchInfo, alloc: std.mem.Allocator) void {
+        if (self.result_cache) |cache| {
+            alloc.free(cache.result.str);
+            if (cache.cached_style) |style_slice| {
+                alloc.free(style_slice);
+            }
+        }
+        self.regex.deinit();
+        alloc.destroy(self.regex);
+        self.iterator.deinit();
+    }
+
+    pub fn setCache(
+        self: *SearchInfo,
+        alloc: std.mem.Allocator,
+        result: *const search.ProcessBufferSearchIterator.Result,
+    ) !void {
+        if (self.result_cache != null) clearCache(self, alloc);
+
+        self.result_cache = .{
+            .result = .{
+                .str = try alloc.dupe(u8, result.str),
+                .lowerBound = result.lowerBound,
+                .upperBound = result.upperBound,
+            },
+        };
+    }
+
+    pub fn clearCache(self: *SearchInfo, alloc: std.mem.Allocator) void {
+        if (self.result_cache == null) return;
+        alloc.free(self.result_cache.?.result.str);
+        if (self.result_cache.?.cached_style) |cached_style| {
+            alloc.free(cached_style);
+        }
+        self.result_cache = null;
+    }
+
+    pub fn cacheStyle(self: *SearchInfo, alloc: std.mem.Allocator, style_map: *const StyleMap, style_list: *const StyleList) !void {
+        if (self.result_cache == null) return;
+
+        const upperBound = self.result_cache.?.result.upperBound;
+        const lowerBound = self.result_cache.?.result.lowerBound;
+
+        // cache the existing styles into a slice using the current result
+        var array = try std.ArrayListUnmanaged(?vaxis.Style).initCapacity(alloc, upperBound - lowerBound);
+        for (lowerBound..upperBound) |i| {
+            const style_idx = style_map.get(i);
+            if (style_idx) |idx| {
+                try array.append(alloc, style_list.items[idx]);
+            } else {
+                try array.append(alloc, null);
+            }
+        }
+        self.result_cache.?.cached_style = try array.toOwnedSlice(alloc);
+    }
 };
 
 arena: std.heap.ArenaAllocator,
 nonowned_process_buffer: *ProcessBuffer,
 cmd_ref: ?*Cmd = null,
 widget_ref: ?*OutputWidget = null,
-search_iterator: ?*search.ProcessBufferSearchIterator = null,
-search_regex: ?*Regex,
-search_highlight_handle: ?Reviewer.HandleId = null,
+search_info: ?SearchInfo = null,
 handlers_ids: std.ArrayList(cmd_mod.HandleId),
 filter_ids: std.ArrayList(Filter.HandleId),
 reviewer_ids: std.ArrayList(Reviewer.HandleId),
@@ -57,6 +117,11 @@ const ReplacePattern = struct { regex: Regex, replace_str: []u8 };
 const ReplaceFilterData = struct { replace_patterns: []ReplacePattern };
 
 const FindHandlerData = .{ .event_str = "find", .handle = handleFindCmd };
+
+const NextHandlerData = .{ .event_str = "next", .handle = handleFindNextCmd };
+const PrevHandlerData = .{ .event_str = "prev", .handle = handleFindPrevCmd };
+const JumpHandlerData = .{ .event_str = "j", .handle = handleJumpCmd };
+const InfoHandlerData = .{ .event_str = "s", .handle = handleInfoCmd };
 
 const UncolorHandlerData = .{ .event_str = "uncolor", .handle = handleUncolorCmd };
 const ColorHandlerData = .{ .event_str = "color", .handle = handleColorCmd };
@@ -93,8 +158,8 @@ pub fn deinit(self: *Output) void {
             r.deinit();
         }
     }
-    if (self.search_iterator) |iter| {
-        iter.deinit();
+    if (self.search_info) |*info| {
+        info.deinit(self.widget_ref.?.alloc);
     }
     self.reviewer_ids.deinit();
     self.style_map.deinit();
@@ -182,6 +247,9 @@ fn handleReplaceCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Er
 
 fn handleUnfoldCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @alignCast(@ptrCast(listener));
+
+    if (!self.is_focused) return;
+
     // we need to recalculate the color styles
     self.clearStyle();
 
@@ -192,6 +260,9 @@ fn handleUnfoldCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!
 
 fn handleUnreplaceCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @alignCast(@ptrCast(listener));
+
+    if (!self.is_focused) return;
+
     // we need to recalculate the color styles
     self.clearStyle();
 
@@ -199,13 +270,6 @@ fn handleUnreplaceCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Err
     try self.nonowned_process_buffer.removeAllFilters();
     self.filter_ids.clearAndFree();
 }
-
-//fn handlePrevCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {}
-//fn handleNextCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-//    // Check if search iterator exists
-//    // call next and get offset
-//    // move window
-//}
 
 fn handleFindCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @alignCast(@ptrCast(listener));
@@ -224,114 +288,44 @@ fn handleFindCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error
 
     if (arguments.len < 1) return;
 
-    std.debug.print("we are finding...{s}\n", .{arguments[0]});
-
-    // create regex from first argument
-    var re = Regex.compile(alloc, arguments[0]) catch return;
-    defer re.deinit();
-
-    // 1) find top line in-view
-    // 2) start searching from top line to bottom
-    // 3) if not, wrap around and search from the top to top_rendered_line
-
-    // 4) if found - move view to the line
-
-    // TODO: store all find matches
-    std.debug.print("hello\n", .{});
-
     const top_rendered_line_buffer_offset = self.widget_ref.?.get_rendered_line_buffer_offset(.first) catch |e| switch (e) {
         error.NoLinesRendered => return,
+        error.LineNotRendered => return,
     };
-    //const buffer = self.widget_ref.?.text.text;
 
-    var secondAttempt = false;
-    while (true) : (secondAttempt = true) {
-        var start_searching_line: usize = 0;
-        if (secondAttempt == false) {
-            start_searching_line = self.nonowned_process_buffer.getLineFromOffset(top_rendered_line_buffer_offset);
-        }
-
-        var search_iter = search.startSearchFrom(
-            self.widget_ref.?.alloc,
-            self.nonowned_process_buffer,
-            re,
-            start_searching_line,
-        );
-
-        const match = try search_iter.next();
-
-        if (match) |m| {
-            std.debug.print("Match found at {d} for {s}\n", .{ m.lowerBound, m.str });
-
-            // jump to the line containing the start of the match
-            self.widget_ref.?.jump_output_to_line(
-                self.widget_ref.?.window.getLineFromOffset(m.lowerBound),
-            ) catch return;
-
-            if (self.search_highlight_handle) |hndl| {
-                self.nonowned_process_buffer.removeReviewer(hndl);
-                self.search_highlight_handle = null;
-            }
-
-            self.updateStyle(
-                .{ .bg = .{ .rgb = .{ 255, 255, 255 } } },
-                m.lowerBound,
-                m.upperBound,
-            );
-
-            var color_patterns = std.ArrayList(ColorPattern).init(alloc);
-            color_patterns.addOne(.{ .regex = re, .full_line = false, .style = .{ .bg = .{ .rgb = .{ 255, 255, 255 } } } });
-            const reviewer_data = try alloc.create(ColorReviewerData);
-            reviewer_data.* = .{
-                .output = self,
-                .style_patterns = try color_patterns.toOwnedSlice(),
-            };
-
-            const reviewer = try Reviewer.init(self.arena.allocator(), reviewer_data, color);
-            self.search_highlight_handle = reviewer.id;
-            try self.nonowned_process_buffer.addReviewer(reviewer);
-
-            // save search iterator
-            if (self.search_iterator) |iter| iter.deinit();
-            self.search_iterator = search_iter;
-            break;
-        }
-
-        if (secondAttempt) break;
-    }
+    self.searchStr(arguments[0], top_rendered_line_buffer_offset) catch return;
 }
 
 fn handleFindNextCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @alignCast(@ptrCast(listener));
-    if (self.search_iterator) |iter| {
-        const match = try iter.next();
-        if (match) |m| {
-            // jump to the line containing the start of the match
-            self.widget_ref.?.jump_output_to_line(
-                self.widget_ref.?.window.getLineFromOffset(m.lowerBound),
-            ) catch return;
-
-            // highlight new match
-            //TODO:
-        }
-    }
+    if (!self.is_focused) return;
+    self.searchNext();
 }
 
-//fn handleFindPrevCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-//    const self: *Output = @alignCast(@ptrCast(listener));
-//    if (self.search_iterator) |iter| {
-//        const match = try iter.prev();
-//        if (match) |m| {
-//            // jump to the line containing the start of the match
-//            self.widget_ref.?.jump_output_to_line(
-//                self.widget_ref.?.window.getLineFromOffset(m.lowerBound),
-//            ) catch return;
-//        }
-//    }
-//}
+fn handleFindPrevCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @alignCast(@ptrCast(listener));
+    if (!self.is_focused) return;
+    self.searchPrev();
+}
+
+fn handleJumpCmd(arg: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @alignCast(@ptrCast(listener));
+    if (!self.is_focused) return;
+
+    const line_num: usize = std.fmt.parseInt(usize, arg, 10) catch return;
+    self.jumpToLine(line_num);
+}
+
+fn handleInfoCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @alignCast(@ptrCast(listener));
+    if (!self.is_focused) return;
+
+    self.debuginfo();
+}
 
 fn handleUncolorCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @alignCast(@ptrCast(listener));
+    if (!self.is_focused) return;
     self.clearStyle();
     try self.nonowned_process_buffer.removeAllReviewers();
     self.reviewer_ids.clearAndFree();
@@ -698,7 +692,7 @@ fn color(_: *const Reviewer, data: *anyopaque, metadata: Pipeline.MetaData, line
             // check if there is a regex match in the line
             if (try pattern.regex.partialMatch(line)) {
                 try color_data.output.updateStyle(
-                    pattern.style,
+                    &pattern.style,
                     metadata.bufferOffset,
                     metadata.bufferOffset + line.len,
                 );
@@ -714,12 +708,163 @@ fn color(_: *const Reviewer, data: *anyopaque, metadata: Pipeline.MetaData, line
         var iter = helpers.regexMatchAll(&pattern.regex, line);
         while (try iter.next()) |match| {
             try color_data.output.updateStyle(
-                pattern.style,
+                &pattern.style,
                 metadata.bufferOffset + match.lowerBound,
                 metadata.bufferOffset + match.upperBound,
             );
         }
     }
+}
+
+// TODO: handle errors properly
+pub fn searchStr(self: *Output, search_str: []const u8, start_search_line: usize) !void {
+    var alloc = self.widget_ref.?.alloc;
+
+    // unhighlight previous match
+    if (self.search_info) |*sinfo| {
+        if (sinfo.result_cache) |*prev_result| {
+            if (prev_result.cached_style) |style_range| {
+                self.updateStyleWithRange(
+                    style_range,
+                    prev_result.result.lowerBound,
+                ) catch return;
+            }
+        }
+        sinfo.deinit(alloc);
+        self.search_info = null;
+    }
+
+    // create regex
+    var re = try alloc.create(Regex);
+    re.* = try Regex.compile(alloc, search_str);
+    errdefer alloc.destroy(re);
+
+    // start our two attempts at finding the match starting at the start_serach_line and looping
+    // around to the start of the buffer
+    var secondAttempt = false;
+    while (true) : (secondAttempt = true) {
+        var start_searching_line: usize = 0;
+        if (secondAttempt == false) {
+            start_searching_line = self.nonowned_process_buffer.getLineFromOffset(start_search_line);
+        }
+
+        // if start_searching_line is 0 on our first attempt, we don't search twice
+        if (start_searching_line == 0 and secondAttempt == false) secondAttempt = true;
+
+        var search_iter = search.startSearchFrom(
+            alloc,
+            self.nonowned_process_buffer,
+            re,
+            start_searching_line,
+        ) catch return;
+
+        const match = try search_iter.next();
+
+        if (match) |*m| {
+            // jump to the line containing the start of the match
+            self.widget_ref.?.jump_output_to_line(
+                self.widget_ref.?.window.getLineFromOffset(m.lowerBound),
+            ) catch return;
+
+            // free previous search_info and save new one
+            if (self.search_info) |*info| {
+                info.clearCache(alloc);
+                info.deinit(alloc);
+            }
+
+            // cache the new search info
+            self.search_info = .{ .iterator = search_iter, .regex = re };
+            self.search_info.?.setCache(alloc, m) catch return;
+            self.search_info.?.cacheStyle(
+                alloc,
+                &self.style_map,
+                &self.style_list,
+            ) catch return;
+
+            // highlight the found match
+            self.updateStyle(&self.search_info.?.highlight_style, m.lowerBound, m.upperBound) catch return;
+            break;
+        }
+
+        if (secondAttempt) {
+            // We failed to find a match
+            search_iter.deinit();
+            re.deinit();
+            alloc.destroy(re);
+            break;
+        }
+    }
+}
+
+// TODO: handle errors properly
+pub fn searchNext(self: *Output) void {
+    if (self.search_info) |*sinfo| {
+        if (sinfo.iterator.next() catch return) |*match| {
+            // jump to the line containing the start of the match
+            self.widget_ref.?.jump_output_to_line(
+                self.widget_ref.?.window.getLineFromOffset(match.lowerBound),
+            ) catch return;
+
+            // unhighlight previous match
+            if (sinfo.result_cache) |*prev_result| {
+                if (prev_result.cached_style) |style_range| {
+                    self.updateStyleWithRange(
+                        style_range,
+                        prev_result.result.lowerBound,
+                    ) catch return;
+                }
+            }
+
+            // save the search results
+            sinfo.setCache(self.widget_ref.?.alloc, match) catch return;
+            sinfo.cacheStyle(self.widget_ref.?.alloc, &self.style_map, &self.style_list) catch return;
+
+            // highlight new match
+            self.updateStyle(&self.search_info.?.highlight_style, match.lowerBound, match.upperBound) catch return;
+        }
+    }
+}
+
+// TODO: handle errors properly
+pub fn searchPrev(self: *Output) void {
+    if (self.search_info) |*sinfo| {
+        if (sinfo.iterator.prev() catch return) |*match| {
+            // jump to the line container the  start of the match
+            self.widget_ref.?.jump_output_to_line(
+                self.widget_ref.?.window.getLineFromOffset(match.lowerBound),
+            ) catch return;
+
+            // unhighlight previous match
+            if (sinfo.result_cache) |*prev_result| {
+                if (prev_result.cached_style) |style_range| {
+                    self.updateStyleWithRange(
+                        style_range,
+                        prev_result.result.lowerBound,
+                    ) catch return;
+                }
+            }
+
+            // save the search results
+            sinfo.setCache(self.widget_ref.?.alloc, match) catch return;
+            sinfo.cacheStyle(self.widget_ref.?.alloc, &self.style_map, &self.style_list) catch return;
+
+            // highlight new match
+            self.updateStyle(&self.search_info.?.highlight_style, match.lowerBound, match.upperBound) catch return;
+        }
+    }
+}
+
+pub fn debuginfo(self: *Output) void {
+    debug_ui.print("output {s}\n", .{self.widget_ref.?.process_name}) catch {};
+    debug_ui.print("top_line {d}\n", .{self.widget_ref.?.window.last_draw.top_line}) catch {};
+    debug_ui.print("is focused {any}\n", .{self.is_focused}) catch {};
+    debug_ui.print("window: ...\n", .{}) catch {};
+    debug_ui.print("window: top_line {d}\n", .{self.widget_ref.?.window.top_line}) catch {};
+    debug_ui.print("window: num_lines {d}\n", .{self.widget_ref.?.window.num_lines}) catch {};
+}
+
+pub fn jumpToLine(self: *Output, line_num: usize) void {
+    self.widget_ref.?.jump_output_to_line(line_num) catch return;
 }
 
 pub fn clearStyle(self: *Output) void {
@@ -728,18 +873,43 @@ pub fn clearStyle(self: *Output) void {
 }
 
 /// Update the style structures in the output style_map and style_list
-pub fn updateStyle(self: *Output, style: vaxis.Style, begin_offset: usize, end_offset: usize) !void {
+pub fn updateStyle(self: *Output, style: *const vaxis.Style, begin_offset: usize, end_offset: usize) !void {
     const style_index = blk: {
         for (self.style_list.items, 0..) |s, i| {
-            if (std.meta.eql(s, style)) {
+            if (std.meta.eql(s, style.*)) {
                 break :blk i;
             }
         }
-        try self.style_list.append(style);
+        try self.style_list.append(style.*);
         break :blk self.style_list.items.len - 1;
     };
     for (begin_offset..end_offset) |i| {
         try self.style_map.put(i, style_index);
+    }
+}
+
+pub fn updateStyleWithRange(self: *Output, style_range: []?vaxis.Style, begin_offset: usize) !void {
+    const end_offset: usize = begin_offset + style_range.len;
+
+    for (begin_offset..end_offset, 0..) |offset, range_idx| {
+        const current_style = style_range[range_idx];
+
+        // find style offset, create if it doesn't exist
+        if (current_style) |style| {
+            const style_index = blk: {
+                for (self.style_list.items, 0..) |s, i| {
+                    if (std.meta.eql(s, style)) {
+                        break :blk i;
+                    }
+                }
+                try self.style_list.append(style);
+                break :blk self.style_list.items.len - 1;
+            };
+            try self.style_map.put(offset, style_index);
+        } else {
+            // there previously wasn't a style for this index
+            _ = self.style_map.remove(offset);
+        }
     }
 }
 
@@ -756,6 +926,10 @@ pub fn subscribeHandlersToCmd(self: *Output, cmd: *Cmd) !void {
         &ColorHandlerData,
         &UncolorHandlerData,
         &FindHandlerData,
+        &NextHandlerData,
+        &PrevHandlerData,
+        &JumpHandlerData,
+        &InfoHandlerData,
     };
 
     inline for (handler_data) |data| {

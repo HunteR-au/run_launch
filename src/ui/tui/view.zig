@@ -107,8 +107,6 @@ pub const View = struct {
             },
         }
 
-        //self.focused_outputview = self.outputviews.items[idx];
-        //self.focused_outputview.?.focus_self();
         self.focus_outputview_by_idx(idx) catch {
             unreachable;
         };
@@ -125,6 +123,13 @@ pub const View = struct {
 
     pub fn get_focused(self: *View) ?*OutputView {
         return self.focused_outputview;
+    }
+
+    pub fn get_focused_output_widget(self: *View) ?*OutputWidget {
+        if (self.focused_outputview) |ov| {
+            if (ov.focused_ow) |o| return o else return null;
+        }
+        return null;
     }
 
     pub fn get_position(self: *View, outputview: *OutputView) !usize {

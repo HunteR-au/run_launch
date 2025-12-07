@@ -5,7 +5,7 @@ import random
 words = ["apple", "banana", "cherry", "date", "elderberry"]
 
 # Initialize counter
-counter = 1
+counter = 0
 
 while True:
     # Choose a random word from the list

@@ -15,7 +15,7 @@ pub const RegexIterator = struct {
 
     pub fn next(self: *RegexIterator) !?Result {
         const result = try self.peek() orelse return null;
-        self.offset +|= result.upperBound;
+        self.offset = result.upperBound;
         return result;
     }
 
@@ -30,8 +30,8 @@ pub const RegexIterator = struct {
         const start = captures.?.boundsAt(0).?.lower;
         return .{
             .str = captures.?.sliceAt(0).?,
-            .lowerBound = captures.?.boundsAt(0).?.lower,
-            .upperBound = start + captures.?.sliceAt(0).?.len,
+            .lowerBound = start + self.offset,
+            .upperBound = start + captures.?.sliceAt(0).?.len + self.offset,
         };
     }
 
