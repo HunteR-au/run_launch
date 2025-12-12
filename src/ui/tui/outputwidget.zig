@@ -162,7 +162,8 @@ pub const OutputWidget = struct {
                     self.scroll_bars.scroll_view.scroll.pending_lines = 0;
                     self.window.pending_lines = 0;
 
-                    if (self.window.linesUp(std.math.maxInt(u8))) ctx.consumeAndRedraw();
+                    self.window.linesUpEx(std.math.maxInt(u32));
+                    ctx.consumeAndRedraw();
                 }
                 if (key.matches(vaxis.Key.down, .{}) or
                     key.matches('j', .{ .ctrl = false }) or
@@ -183,7 +184,8 @@ pub const OutputWidget = struct {
                     ctx.consumeAndRedraw();
                 }
                 if (key.matches(vaxis.Key.page_up, .{ .ctrl = true })) {
-                    self.jump_to_start() catch {};
+                    //self.jump_to_start() catch {};
+                    try self.jump_to_start();
                     ctx.consumeAndRedraw();
                 }
                 if (key.matches(vaxis.Key.page_down, .{ .ctrl = true })) {
@@ -348,18 +350,22 @@ pub const OutputWidget = struct {
         // TODO: pending lines should just be cached in the window, and resolved later in an update call
         // we should calculate how much the window can move, move it, then add the rest to the scroll
 
+        self.window.linesUpEx(@truncate(n));
+
         // TODO: allow a larger number than u8
-        if (self.window.linesUp(@intCast(n))) return else _ = self.scroll_bars.scroll_view.scroll.linesUp(@intCast(n));
+        //if (self.window.linesUp(@intCast(n))) return else _ = self.scroll_bars.scroll_view.scroll.linesUp(@intCast(n));
     }
 
     pub fn moveOutputDownLines(self: *OutputWidget, n: usize) void {
-        // TODO: allow a larger number than u8
-        if (self.window.linesDown(@intCast(n))) {
-            //std.debug.print("window linesjDown returned\n", .{});
-        } else {
-            //std.debug.print("scroll_view linesDown returned\n", .{});
-            _ = self.scroll_bars.scroll_view.scroll.linesDown(@intCast(n));
-        }
+        self.window.linesDownEx(@truncate(n));
+
+        //// TODO: allow a larger number than u8
+        //if (self.window.linesDown(@intCast(n))) {
+        //    //std.debug.print("window linesjDown returned\n", .{});
+        //} else {
+        //    //std.debug.print("scroll_view linesDown returned\n", .{});
+        //    _ = self.scroll_bars.scroll_view.scroll.linesDown(@intCast(n));
+        //}
     }
 
     pub fn setStickyScroll(self: *OutputWidget, is_sticky: bool) void {
@@ -405,11 +411,18 @@ pub const OutputWidget = struct {
 
         switch (line) {
             .first => {
-                // BUG: can hit null
-                return self.rendered_text_offset_at_row_start.get(self.window.last_draw.top_line) orelse error.LineNotRendered;
+                return self.rendered_text_offset_at_row_start.get(0) orelse
+                    {
+                        std.debug.print("top_line: {d}\n", .{self.window.last_draw.top_line});
+                        var it = self.rendered_text_offset_at_row_start.iterator();
+                        while (it.next()) |e| {
+                            std.debug.print("{d} : {d}\n", .{ e.key_ptr.*, e.value_ptr.* });
+                        }
+                        return error.LineNotRendered;
+                    };
             },
             .last => {
-                if (self.rendered_text_offset_at_row_start.get(self.window.last_draw.bottom_line)) |l| {
+                if (self.rendered_text_offset_at_row_start.get(self.window.num_lines)) |l| {
                     return l;
                 } else {
                     // The outputwidget isn't filled to the bottom
@@ -634,6 +647,14 @@ const Window = struct {
         return true;
     }
 
+    pub fn linesUpEx(self: *Window, n: u32) void {
+        self.pending_lines -|= @intCast(n);
+    }
+
+    pub fn linesDownEx(self: *Window, n: u32) void {
+        self.pending_lines +|= n;
+    }
+
     // TODO: change this from returning if move, to returning the number moved
     pub fn linesDown(self: *Window, n: u32) bool {
         if (!self.has_more_vertical) return false;
@@ -717,31 +738,89 @@ const Window = struct {
     }
 
     pub fn resolvePendingLines(self: *Window) void {
-        // TODO: refactor effort
-        // move window first, calculate the remainder and then move scroll
-        // move should return the number moved instead of a bool
+        switch (self.pending_lines) {
+            // moving up, negative number
+            std.math.minInt(i64)...-1 => |lines_to_move| {
+                const pending_delta: i64 = @as(i64, @intCast(self.top_line)) + lines_to_move;
+                if (pending_delta < 0) {
+                    // attempted to move the window beyond the top
+                    _ = self.output
+                        .widget_ref.?
+                        .scroll_bars.scroll_view.scroll
+                        .linesUp(@truncate(@abs(pending_delta)));
 
-        if (self.pending_lines >= 0) {
-            self.top_line = self.top_line + @as(usize, @intCast(self.pending_lines));
-        } else {
-            // BUG: this is broken when window is full
-            const pending_delta: i64 = @as(i64, @intCast(self.top_line)) + self.pending_lines;
-            if (pending_delta < 0) self.top_line = 0 else self.top_line = @intCast(pending_delta);
+                    self.top_line = 0;
+                } else {
+                    self.top_line = @intCast(pending_delta);
+                }
+            },
+            // moving down, positive number
+            1...std.math.maxInt(i64) => |lines_to_move| {
+                // update the top line
+                self.top_line = self.top_line + @as(usize, @intCast(lines_to_move));
+
+                // check if top_line would set the window's range beyond the bottom of the buffer
+                const updated_last_line = self.lastLine();
+                const last_drawn_num_lines = self.last_draw.process_buffer_num_lines;
+                if (last_drawn_num_lines <= updated_last_line) {
+                    self.has_more_vertical = false;
+
+                    // check if the buffer is NOT smaller than the window
+                    if (last_drawn_num_lines > self.num_lines) {
+                        const lowest_possible_top_line = last_drawn_num_lines - self.num_lines;
+
+                        // scroll the scroll widget with the difference
+                        const diff = self.top_line - lowest_possible_top_line;
+                        _ = self.output
+                            .widget_ref.?
+                            .scroll_bars.scroll_view.scroll
+                            .linesDown(@truncate(diff));
+
+                        self.top_line = lowest_possible_top_line;
+                    } else {
+                        // buffer IS smaller than the window - top line must be zero
+
+                        // scroll the scroll widget with the difference
+                        _ = self.output
+                            .widget_ref.?
+                            .scroll_bars.scroll_view.scroll
+                            .linesDown(@truncate(self.top_line));
+
+                        // it is smaller, set to zero
+                        self.top_line = 0;
+                    }
+                }
+            },
+            else => {
+                // zero, no pending lines
+                return;
+            },
         }
+
+        // reset pending lines
         self.pending_lines = 0;
 
-        // make sure the window doesn't reach passed the bottom of the buffer
-        const last_line = self.lastLine();
-        if (self.last_draw.process_buffer_num_lines <= last_line) {
-            self.has_more_vertical = false;
+        // if (self.pending_lines >= 0) {
+        //     self.top_line = self.top_line + @as(usize, @intCast(self.pending_lines));
+        // } else {
+        //     // BUG: this is broken when window is full
+        //     const pending_delta: i64 = @as(i64, @intCast(self.top_line)) + self.pending_lines;
+        //     if (pending_delta < 0) self.top_line = 0 else self.top_line = @intCast(pending_delta);
+        // }
+        // self.pending_lines = 0;
 
-            // check if the buffer is NOT smaller than the window
-            if (self.last_draw.process_buffer_num_lines > self.num_lines) {
-                self.top_line = self.last_draw.process_buffer_num_lines - self.num_lines;
-            } else {
-                self.top_line = 0;
-            }
-        }
+        // // make sure the window doesn't reach passed the bottom of the buffer
+        // const last_line = self.lastLine();
+        // if (self.last_draw.process_buffer_num_lines <= last_line) {
+        //     self.has_more_vertical = false;
+
+        //     // check if the buffer is NOT smaller than the window
+        //     if (self.last_draw.process_buffer_num_lines > self.num_lines) {
+        //         self.top_line = self.last_draw.process_buffer_num_lines - self.num_lines;
+        //     } else {
+        //         self.top_line = 0;
+        //     }
+        // }
     }
 
     pub fn getSlice(self: *Window, alloc: std.mem.Allocator) ![]const u8 {

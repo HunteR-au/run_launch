@@ -588,13 +588,11 @@ pub fn pushLogging(alloc: std.mem.Allocator, processname: []const u8, buffer: []
 // tasks child.wait() closes pipes
 // need to refactor the wait to not close pipes until process closed and piped emptied
 
-// jump is busted when the window fills
 // find is busted when the window fills
-// switching focus can get bugged and stay on one output
 
-// page up / page down break once window full
-// sticky breaks when window is full
 // next/prev can get stuck on .begin .end iterator values
+
+// BUG: seems like after fold/replace, lines don't update :( :( :( :(
 
 // TODO find_replace str cmd
 // TODO parse ui config in TUI
@@ -603,5 +601,4 @@ pub fn pushLogging(alloc: std.mem.Allocator, processname: []const u8, buffer: []
 // ------> when matching output starts, run setup function
 
 // TODO: text is being sent to the wrong buffer????
-
-// The sticky scroll isn't working for esc
+// TODO: Upgrade to zig 0.15.1
