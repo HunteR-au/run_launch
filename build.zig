@@ -5,7 +5,7 @@ pub fn createArgsForGenEmbedFilesStruct(alloc: std.mem.Allocator) !std.ArrayList
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var argsArray = std.ArrayList([]u8).init(alloc);
+    var argsArray = try std.ArrayList([]u8).initCapacity(alloc, 10);
 
     var dir = try std.fs.cwd().openDir("src/ui", .{ .iterate = true });
     var walker = try dir.walk(arena);
@@ -19,10 +19,9 @@ pub fn createArgsForGenEmbedFilesStruct(alloc: std.mem.Allocator) !std.ArrayList
 
             _ = std.mem.replace(u8, entry.path, "\\", "/", replacedArg);
 
-            try argsArray.append(try alloc.dupe(u8, replacedArg));
+            try argsArray.append(alloc, try alloc.dupe(u8, replacedArg));
         }
     }
-
     return argsArray;
 }
 
@@ -99,7 +98,7 @@ pub fn build(b: *std.Build) !void {
     // Add files from ui folder recursively using the embededArgs
     for (embededArgs.items) |item| {
         const prefix = "src/ui/";
-        const relPath = try std.mem.concat(arena, u8, &.{ prefix, item });
+        const relPath = b.pathJoin(&.{ prefix, item });
         exe.root_module.addAnonymousImport(item, .{
             .root_source_file = b.path(relPath),
         });
@@ -154,9 +153,11 @@ pub fn build(b: *std.Build) !void {
     //lib_unit_tests.root_module.addImport("tui", tui);
     //lib_unit_tests.root_module.addImport("vaxis", vaxis);
     const output_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/unit_tests.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/unit_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     output_unit_tests.root_module.addImport("utils", utils);
     output_unit_tests.root_module.addImport("uiconfig", uiconfig);
@@ -175,9 +176,11 @@ pub fn build(b: *std.Build) !void {
     //output_unit_tests.root_module.addImport("regex", regex);
 
     const exe_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     exe_unit_tests.root_module.addImport("tui", tui);
     exe_unit_tests.root_module.addImport("utils", utils);
