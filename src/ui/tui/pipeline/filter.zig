@@ -39,7 +39,7 @@ pub fn freeMemory(self: *Filter) void {
 pub fn transform(self: *Filter, buffer: []const u8) ![]const u8 {
     const alloc = self.arena.allocator();
 
-    var lines = std.ArrayList([]const u8).init(alloc);
+    var lines = try std.ArrayList([]const u8).initCapacity(alloc, 1);
 
     switch (builtin.target.os.tag) {
         .windows => {
@@ -52,7 +52,7 @@ pub fn transform(self: *Filter, buffer: []const u8) ![]const u8 {
                 switch (try self.transformLine(self, self.data, line)) {
                     .line => |new_buf| {
                         //std.debug.print("for line: {s}\ntransforming to: {s}\n", .{ line, new_buf });
-                        try lines.append(new_buf);
+                        try lines.append(alloc, new_buf);
                     },
                     .empty => {
                         //std.debug.print("filter:empty...\n", .{});
@@ -68,7 +68,7 @@ pub fn transform(self: *Filter, buffer: []const u8) ![]const u8 {
             while (it.next()) |line| {
                 switch (try self.transformLine(self, self.data, line)) {
                     .line => |new_buf| {
-                        try lines.append(new_buf);
+                        try lines.append(alloc, new_buf);
                     },
                     .empty => {},
                 }
@@ -76,7 +76,7 @@ pub fn transform(self: *Filter, buffer: []const u8) ![]const u8 {
             if (lines.items.len == 0) {
                 return "";
             } else {
-                try lines.append("");
+                try lines.append(alloc, "");
                 const new_buffer = try std.mem.join(alloc, &[1]u8{sep}, lines.items);
                 return new_buffer;
             }

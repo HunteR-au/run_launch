@@ -123,15 +123,15 @@ pub const UiConfig = struct {
         } else null;
     }
 
-    pub fn init(alloc: std.mem.Allocator) UiConfig {
-        return UiConfig{ ._alloc = alloc, .otherProcesses = std.ArrayList(ProcessConfig).init(alloc) };
+    pub fn init(alloc: std.mem.Allocator) !UiConfig {
+        return UiConfig{ ._alloc = alloc, .otherProcesses = try std.ArrayList(ProcessConfig).initCapacity(alloc, 10) };
     }
 
-    pub fn deinit(self: UiConfig) void {
+    pub fn deinit(self: *UiConfig) void {
         for (self.otherProcesses.items) |*i| {
             i.deinit(self._alloc);
         }
-        self.otherProcesses.deinit();
+        self.otherProcesses.deinit(self._alloc);
         if (self.globalConfig) |*p| {
             p.deinit(self._alloc);
         }
@@ -161,7 +161,7 @@ pub const UiConfig = struct {
                 }
 
                 if (!bMatch) {
-                    try self.otherProcesses.append(processConfig);
+                    try self.otherProcesses.append(self._alloc, processConfig);
                 }
             }
         }
@@ -188,7 +188,8 @@ pub const UiConfig = struct {
         }
         defer allocator.free(processSlice);
 
-        const jsonstr = try std.json.stringifyAlloc(allocator, .{ .processes = processSlice }, .{});
+        //const jsonstr = try std.json.stringifyAlloc(allocator, .{ .processes = processSlice }, .{});
+        const jsonstr = try std.json.Stringify.valueAlloc(allocator, .{ .processes = processSlice }, .{});
         return jsonstr;
     }
 };
@@ -197,7 +198,7 @@ pub const UiConfig = struct {
 pub fn parseConfigs(
     alloc: std.mem.Allocator,
 ) !UiConfig {
-    var uiconfig = UiConfig.init(alloc);
+    var uiconfig = try UiConfig.init(alloc);
     const max_bytes = 1024 * 1024;
 
     const userConfig: ?std.fs.File = blk2: switch (builtin.target.os.tag) {
@@ -296,7 +297,7 @@ test "Valid input with 1 rule" {
     defer jsonValue.deinit();
 
     // check if parsing passes with a simple valid case
-    var config = UiConfig.init(alloc);
+    var config = try UiConfig.init(alloc);
     defer config.deinit();
 
     try config.parse(jsonValue.value.object);
@@ -339,7 +340,7 @@ test "Valid input with 2 rules" {
     defer jsonValue.deinit();
 
     // check if parsing passes with a simple valid case
-    var config = UiConfig.init(alloc);
+    var config = try UiConfig.init(alloc);
     defer config.deinit();
 
     try config.parse(jsonValue.value.object);
@@ -393,7 +394,7 @@ test "Valid input with 2 rules and 2 processes" {
     defer jsonValue.deinit();
 
     // check if parsing passes with a simple valid case
-    var config = UiConfig.init(alloc);
+    var config = try UiConfig.init(alloc);
     defer config.deinit();
 
     try config.parse(jsonValue.value.object);
@@ -439,7 +440,7 @@ test "Two processes with same name" {
     defer jsonValue.deinit();
 
     // check if parsing passes with a simple valid case
-    var config = UiConfig.init(alloc);
+    var config = try UiConfig.init(alloc);
     defer config.deinit();
 
     try config.parse(jsonValue.value.object);

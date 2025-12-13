@@ -67,7 +67,7 @@ pub fn parseTripleInt(input: []const u8) ![3]u32 {
 }
 
 pub fn parseArgsLineWithQuoteGroups(alloc: std.mem.Allocator, input: []const u8) ![]const []const u8 {
-    var list = std.ArrayList([]const u8).init(alloc);
+    var list = try std.ArrayList([]const u8).initCapacity(alloc, 10);
     var i: usize = 0;
 
     while (i < input.len) {
@@ -79,34 +79,34 @@ pub fn parseArgsLineWithQuoteGroups(alloc: std.mem.Allocator, input: []const u8)
         // Handle quoted string with escapes
         if (input[i] == '"') {
             i += 1;
-            var buffer = std.ArrayList(u8).init(alloc);
+            var buffer = try std.ArrayList(u8).initCapacity(alloc, 10);
 
             while (i < input.len) {
                 if (input[i] == '\\') {
                     i += 1;
                     if (i < input.len) {
-                        try buffer.append(input[i]);
+                        try buffer.append(alloc, input[i]);
                         i += 1;
                     }
                 } else if (input[i] == '"') {
                     i += 1;
                     break;
                 } else {
-                    try buffer.append(input[i]);
+                    try buffer.append(alloc, input[i]);
                     i += 1;
                 }
             }
 
-            try list.append(try buffer.toOwnedSlice());
+            try list.append(alloc, try buffer.toOwnedSlice(alloc));
         } else {
             // Handle unquoted work
             const start = i;
             while (i < input.len and !std.ascii.isWhitespace(input[i])) : (i += 1) {}
-            try list.append(try alloc.dupe(u8, input[start..i]));
+            try list.append(alloc, try alloc.dupe(u8, input[start..i]));
         }
     }
 
-    return list.toOwnedSlice();
+    return list.toOwnedSlice(alloc);
 }
 
 pub fn create_env_map(alloc: std.mem.Allocator, envtuples: []const EnvTuple) !std.process.EnvMap {
@@ -186,7 +186,10 @@ pub fn pullpushLoop(
     const stdout_reader = childproc.stdout.?;
     const stderr_reader = childproc.stderr.?;
 
-    var poller = std.io.poll(alloc, enum { stdout, stderr }, .{
+    //const Stream = enum { stdout, stderr };
+    //var poller = std.Io.Poller(Stream);
+
+    var poller = std.Io.poll(alloc, enum { stdout, stderr }, .{
         .stdout = stdout_reader,
         .stderr = stderr_reader,
     });
@@ -194,17 +197,27 @@ pub fn pullpushLoop(
 
     //std.debug.print("polling...\n", .{});
     while (try poller.pollTimeout(100_000_000)) {
-        const stdout = poller.fifo(.stdout).readableSlice(0);
-        if (stdout.len > 0) {
-            try pushfn(alloc, processname, stdout);
-            poller.fifo(.stdout).discard(stdout.len);
+        const stdout_buf = try poller.toOwnedSlice(.stdout);
+        if (stdout_buf.len > 0) {
+            try pushfn(alloc, processname, stdout_buf);
         }
 
-        const stderr = poller.fifo(.stderr).readableSlice(0);
-        if (stderr.len > 0) {
-            try pushfn(alloc, processname, stderr);
-            poller.fifo(.stderr).discard(stderr.len);
+        const stderr_buf = try poller.toOwnedSlice(.stderr);
+        if (stderr_buf.len > 0) {
+            try pushfn(alloc, processname, stderr_buf);
         }
+
+        //const stdout = poller.fifo(.stdout).readableSlice(0);
+        //if (stdout.len > 0) {
+        //    try pushfn(alloc, processname, stdout);
+        //    poller.fifo(.stdout).discard(stdout.len);
+        //}
+
+        //const stderr = poller.fifo(.stderr).readableSlice(0);
+        //if (stderr.len > 0) {
+        //    try pushfn(alloc, processname, stderr);
+        //    poller.fifo(.stderr).discard(stderr.len);
+        //}
     }
 }
 

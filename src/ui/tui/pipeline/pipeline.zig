@@ -8,6 +8,7 @@ pub const Pipeline = @This();
 pub const MetaData = Reviewer.MetaData;
 
 arena: std.heap.ArenaAllocator,
+alloc: std.mem.Allocator,
 filters: std.ArrayList(Filter),
 reviewers: std.ArrayList(Reviewer),
 m: std.Thread.Mutex,
@@ -15,8 +16,9 @@ m: std.Thread.Mutex,
 pub fn init(alloc: std.mem.Allocator) !Pipeline {
     return .{
         .arena = std.heap.ArenaAllocator.init(alloc),
-        .filters = std.ArrayList(Filter).init(alloc),
-        .reviewers = std.ArrayList(Reviewer).init(alloc),
+        .alloc = alloc,
+        .filters = try std.ArrayList(Filter).initCapacity(alloc, 1),
+        .reviewers = try std.ArrayList(Reviewer).initCapacity(alloc, 1),
         .m = std.Thread.Mutex{},
     };
 }
@@ -25,11 +27,11 @@ pub fn deinit(self: *Pipeline) void {
     for (self.filters.items) |*filter| {
         filter.deinit();
     }
-    self.filters.deinit();
+    self.filters.deinit(self.alloc);
     for (self.reviewers.items) |*reviewer| {
         reviewer.deinit();
     }
-    self.reviewers.deinit();
+    self.reviewers.deinit(self.alloc);
     self.arena.deinit();
 }
 
@@ -60,7 +62,7 @@ pub fn appendFilter(self: *Pipeline, filter: Filter) !void {
     self.m.lock();
     defer self.m.unlock();
 
-    try self.filters.append(filter);
+    try self.filters.append(self.alloc, filter);
 }
 
 pub fn removeFilter(self: *Pipeline, id: Filter.HandleId) ?Filter {
@@ -79,7 +81,7 @@ pub fn appendReviewer(self: *Pipeline, reviewer: Reviewer) !void {
     self.m.lock();
     defer self.m.unlock();
 
-    try self.reviewers.append(reviewer);
+    try self.reviewers.append(self.alloc, reviewer);
 }
 
 pub fn removeReviewer(self: *Pipeline, id: Reviewer.HandleId) ?Reviewer {

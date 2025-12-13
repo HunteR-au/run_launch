@@ -11,6 +11,7 @@ pub const RunnerConfig = union(enum) {
 };
 
 pub const Runner = struct {
+    _alloc: std.mem.Allocator,
     children: std.ArrayList(std.process.Child),
     config: Launch.Launch.ConfigOrCompound,
     // config: RunnerConfig,
@@ -38,10 +39,11 @@ pub fn run(
     };
 
     var runnerif = Runner{
-        .children = std.ArrayList(std.process.Child).init(alloc),
+        .children = try std.ArrayList(std.process.Child).initCapacity(alloc, 10),
         .config = match,
         .launch = launchconfig,
         .tasks = tasks,
+        ._alloc = alloc,
     };
 
     switch (match) {
@@ -78,7 +80,7 @@ pub fn run(
                         return error.InvalidChoice;
                     };
                     const child = try runRunnerTypeNonBlocking(alloc, runnertype, config, &runnerif, createviewprocessfn, pushfn);
-                    try runnerif.children.append(child);
+                    try runnerif.children.append(runnerif._alloc, child);
                 }
             }
 

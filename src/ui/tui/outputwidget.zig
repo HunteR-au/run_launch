@@ -44,7 +44,6 @@ pub const OutputWidget = struct {
         alloc: std.mem.Allocator,
         processname: []const u8,
         buffer: *ProcessBuffer,
-        _: *vaxis.Unicode,
     ) !*OutputWidget {
         const pname = try alloc.dupe(u8, processname);
         errdefer alloc.free(pname);
@@ -55,7 +54,7 @@ pub const OutputWidget = struct {
             .process_name = pname,
             .scroll_bars = undefined,
             .border = undefined,
-            .output = Output.init(alloc, buffer),
+            .output = try Output.init(alloc, buffer),
             .window = .{ .num_lines = 200, .output = undefined },
         };
         output_widget.output.widget_ref = output_widget;
@@ -93,7 +92,7 @@ pub const OutputWidget = struct {
     }
 
     fn getScrollItems(ptr: *const anyopaque, idx: usize, _: usize) ?vxfw.Widget {
-        const self: *OutputWidget = @constCast(@ptrCast(@alignCast(ptr)));
+        const self: *OutputWidget = @ptrCast(@alignCast(@constCast(ptr)));
         if (idx == 0) {
             return self.text.widget();
         } else return null;
@@ -444,7 +443,7 @@ pub const OutputWidget = struct {
         // copy the style list
         var list_cpy = try std.ArrayList(vaxis.Style).initCapacity(ctx.arena, self.output.style_list.items.len);
         //var list_cpy = try ctx.arena.alloc(vaxis.Style, self.output.style_list.items.len);
-        try list_cpy.appendSlice(self.output.style_list.items);
+        try list_cpy.appendSlice(ctx.arena, self.output.style_list.items);
 
         // copy the style map
         var map_cpy = try utils.cloneHashMap(

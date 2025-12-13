@@ -30,21 +30,21 @@ fn expansion_replace(alloc: std.mem.Allocator, input: []const u8, begin_idx: usi
     const token = input[begin_idx..end_idx];
     std.debug.print("Token: {s}\n", .{token});
 
-    var list = std.ArrayList(u8).init(alloc);
-    defer list.deinit();
+    var list = try std.ArrayList(u8).initCapacity(alloc, 100);
+    defer list.deinit(alloc);
 
     const env_prefix = "env:";
     if (token.len > env_prefix.len) {
         const actual_token = token[env_prefix.len..token.len];
         if (std.process.getEnvVarOwned(alloc, actual_token)) |value| {
             defer alloc.free(value);
-            try list.appendSlice(input[0 .. begin_idx - 2]);
-            try list.appendSlice(value);
-            try list.appendSlice(input[end_idx + 1 .. input.len]);
+            try list.appendSlice(alloc, input[0 .. begin_idx - 2]);
+            try list.appendSlice(alloc, value);
+            try list.appendSlice(alloc, input[end_idx + 1 .. input.len]);
             std.debug.print("result: {s}\n", .{input[0..begin_idx]});
             std.debug.print("result: {s}\n", .{value});
             std.debug.print("result: {s}\n", .{input[end_idx..input.len]});
-            return list.toOwnedSlice();
+            return list.toOwnedSlice(alloc);
         } else |_| {}
     }
 
@@ -68,21 +68,21 @@ fn expansion_replace(alloc: std.mem.Allocator, input: []const u8, begin_idx: usi
                 return ExpandErrors.TokenExpectedEnvVar;
             };
             defer alloc.free(value);
-            try list.appendSlice(input[0 .. begin_idx - 2]);
-            try list.appendSlice(value);
-            try list.appendSlice(input[end_idx + 1 .. input.len]);
-            return list.toOwnedSlice();
+            try list.appendSlice(alloc, input[0 .. begin_idx - 2]);
+            try list.appendSlice(alloc, value);
+            try list.appendSlice(alloc, input[end_idx + 1 .. input.len]);
+            return list.toOwnedSlice(alloc);
         },
         .cwd => {
             const value = try std.fs.cwd().realpathAlloc(alloc, ".");
             defer alloc.free(value);
-            try list.appendSlice(input[0 .. begin_idx - 2]);
-            try list.appendSlice(value);
-            try list.appendSlice(input[end_idx + 1 .. input.len]);
+            try list.appendSlice(alloc, input[0 .. begin_idx - 2]);
+            try list.appendSlice(alloc, value);
+            try list.appendSlice(alloc, input[end_idx + 1 .. input.len]);
             std.debug.print("result: {s}\n", .{input[0..begin_idx]});
             std.debug.print("result: {s}\n", .{value});
             std.debug.print("result: {s}\n", .{input[end_idx..input.len]});
-            return list.toOwnedSlice();
+            return list.toOwnedSlice(alloc);
         },
         else => {
             return ExpandErrors.UnsupportedExpansionToken;

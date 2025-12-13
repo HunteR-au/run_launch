@@ -7,7 +7,7 @@ pub const cmdwidget = @import("tui/cmdwidget.zig");
 
 pub const OutputView = view.OutputView;
 pub const vxfw = vaxis.vxfw;
-const Unicode = vaxis.Unicode;
+const Unicode = vaxis.unicode;
 const graphemedata = vaxis.grapheme.GraphemeData;
 pub const OutputWidget = view.OutputWidget;
 pub const ProcessBuffer = view.output_view_mod.ProcessBuffer;
@@ -397,7 +397,7 @@ const Model = struct {
 };
 
 var model: *Model = undefined;
-var unicode: *Unicode = undefined;
+//var unicode: *Unicode = undefined;
 
 var keep_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var thread: ?std.Thread = null;
@@ -411,7 +411,7 @@ fn run_tui(alloc: std.mem.Allocator) !void {
     defer app.deinit();
 
     app.vx.refresh = true;
-    unicode = &app.vx.unicode;
+    //unicode = &app.vx.unicode;
 
     const model_view = try view.View.init(alloc);
     defer model_view.deinit();
@@ -426,8 +426,8 @@ fn run_tui(alloc: std.mem.Allocator) !void {
     const buf2 = try ProcessBuffer.init(alloc);
     defer buf2.deinit();
 
-    try output_view.add_output(try OutputWidget.init(alloc, "default_output", buf, unicode));
-    try output_view2.add_output(try OutputWidget.init(alloc, "default_output2", buf2, unicode));
+    try output_view.add_output(try OutputWidget.init(alloc, "default_output", buf));
+    try output_view2.add_output(try OutputWidget.init(alloc, "default_output2", buf2));
 
     model = try alloc.create(Model);
     model.* = .{
@@ -438,7 +438,7 @@ fn run_tui(alloc: std.mem.Allocator) !void {
             .m = .{},
             .map = .empty,
         },
-        .cmd_view = try cmdwidget.CmdWidget.init(alloc, unicode),
+        .cmd_view = try cmdwidget.CmdWidget.init(alloc),
         .arena = std.heap.ArenaAllocator.init(alloc),
     };
     defer alloc.destroy(model);
@@ -477,7 +477,7 @@ fn run_tui(alloc: std.mem.Allocator) !void {
     //    },
     //}
 
-    try app.vx.setMouseMode(app.tty.anyWriter(), true);
+    try app.vx.setMouseMode(&app.tty.tty_writer.interface, true);
     try app.run(model.widget(), .{});
     keep_running.store(false, .seq_cst);
     //std.debug.print("APP FINISHED!\n", .{});
@@ -529,7 +529,6 @@ pub fn createProcessView(alloc: std.mem.Allocator, processname: []const u8) std.
             alloc,
             processname,
             buf,
-            unicode,
         );
         errdefer p_output.deinit();
 
@@ -541,7 +540,7 @@ pub fn createProcessView(alloc: std.mem.Allocator, processname: []const u8) std.
         try p_output.output.subscribeHandlersToCmd(&model.cmd_view.cmd);
         try model.modelview.outputviews.items[0].add_output(p_output);
 
-        app.vx.setMouseMode(app.tty.anyWriter(), true) catch {};
+        app.vx.setMouseMode(&app.tty.tty_writer.interface, true) catch {};
     }
 }
 

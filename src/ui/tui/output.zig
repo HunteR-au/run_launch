@@ -95,6 +95,7 @@ const SearchInfo = struct {
 };
 
 arena: std.heap.ArenaAllocator,
+_alloc: std.mem.Allocator,
 nonowned_process_buffer: *ProcessBuffer,
 cmd_ref: ?*Cmd = null,
 widget_ref: ?*OutputWidget = null,
@@ -128,14 +129,15 @@ const ColorHandlerData = .{ .event_str = "color", .handle = handleColorCmd };
 const ColorPattern = struct { regex: Regex, style: vaxis.Style, full_line: bool = false };
 const ColorReviewerData = struct { style_patterns: []ColorPattern, output: *Output };
 
-pub fn init(alloc: std.mem.Allocator, process_buf: *ProcessBuffer) Output {
+pub fn init(alloc: std.mem.Allocator, process_buf: *ProcessBuffer) !Output {
     return .{
         .arena = std.heap.ArenaAllocator.init(alloc),
-        .handlers_ids = std.ArrayList(cmd_mod.HandleId).init(alloc),
-        .filter_ids = std.ArrayList(Filter.HandleId).init(alloc),
-        .reviewer_ids = std.ArrayList(Reviewer.HandleId).init(alloc),
+        ._alloc = alloc,
+        .handlers_ids = try std.ArrayList(cmd_mod.HandleId).initCapacity(alloc, 10),
+        .filter_ids = try std.ArrayList(Filter.HandleId).initCapacity(alloc, 10),
+        .reviewer_ids = try std.ArrayList(Reviewer.HandleId).initCapacity(alloc, 10),
         .nonowned_process_buffer = process_buf,
-        .style_list = StyleList.init(alloc),
+        .style_list = try StyleList.initCapacity(alloc, 10),
         .style_map = StyleMap.init(alloc),
     };
 }
@@ -144,14 +146,14 @@ pub fn deinit(self: *Output) void {
     if (self.cmd_ref != null) {
         self.unsubscribeHandlersFromCmd();
     }
-    self.handlers_ids.deinit();
+    self.handlers_ids.deinit(self._alloc);
     for (self.filter_ids.items) |fId| {
         var filter = self.nonowned_process_buffer.pipeline.removeFilter(fId);
         if (filter) |*f| {
             f.deinit();
         }
     }
-    self.filter_ids.deinit();
+    self.filter_ids.deinit(self._alloc);
     for (self.reviewer_ids.items) |rId| {
         var reviewer = self.nonowned_process_buffer.pipeline.removeReviewer(rId);
         if (reviewer) |*r| {
@@ -161,14 +163,14 @@ pub fn deinit(self: *Output) void {
     if (self.search_info) |*info| {
         info.deinit(self.widget_ref.?.alloc);
     }
-    self.reviewer_ids.deinit();
+    self.reviewer_ids.deinit(self._alloc);
     self.style_map.deinit();
-    self.style_list.deinit();
+    self.style_list.deinit(self._alloc);
     self.arena.deinit();
 }
 
 fn handleFoldCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-    const self: *Output = @alignCast(@ptrCast(listener));
+    const self: *Output = @ptrCast(@alignCast(listener));
 
     if (!self.is_focused) return;
 
@@ -182,28 +184,28 @@ fn handleFoldCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error
     }
 
     // create a list of compiled regex objects
-    var regex_list = std.ArrayList(Regex).init(alloc);
+    var regex_list = try std.ArrayList(Regex).initCapacity(alloc, arguments.len);
     for (arguments) |arg| {
         const re = Regex.compile(alloc, arg) catch {
             continue;
         };
-        try regex_list.append(re);
+        try regex_list.append(alloc, re);
     }
 
     const filter_data = try alloc.create(FoldFilterData);
-    filter_data.* = .{ .regexs = try regex_list.toOwnedSlice() };
+    filter_data.* = .{ .regexs = try regex_list.toOwnedSlice(alloc) };
 
     // we need to recalculate the color styles
     self.clearStyle();
 
     // Create the filter and add to the pipeline
     const filter = try Filter.init(self.arena.allocator(), filter_data, fold);
-    try self.filter_ids.append(filter.id);
+    try self.filter_ids.append(self._alloc, filter.id);
     try self.nonowned_process_buffer.addFilter(filter);
 }
 
 fn handleReplaceCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-    const self: *Output = @alignCast(@ptrCast(listener));
+    const self: *Output = @ptrCast(@alignCast(listener));
     const alloc = self.arena.allocator();
 
     if (!self.is_focused) return;
@@ -221,7 +223,7 @@ fn handleReplaceCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Er
     }
 
     // each pair comes in the form of `search_str` `replace_str`
-    var replace_patterns = std.ArrayList(ReplacePattern).init(alloc);
+    var replace_patterns = try std.ArrayList(ReplacePattern).initCapacity(alloc, arg_array.len / 2);
     for (0..arg_array.len / 2) |i| {
         const search_arg = arg_array[i * 2];
         const replace_arg = arg_array[i * 2 + 1];
@@ -230,6 +232,7 @@ fn handleReplaceCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Er
             continue;
         };
         try replace_patterns.append(
+            alloc,
             .{ .regex = re, .replace_str = try alloc.dupe(u8, replace_arg) },
         );
     }
@@ -237,16 +240,16 @@ fn handleReplaceCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Er
     // Create the data object for the replaceReviewer
     const reviewer_data = try alloc.create(ReplaceFilterData);
     reviewer_data.* = .{
-        .replace_patterns = try replace_patterns.toOwnedSlice(),
+        .replace_patterns = try replace_patterns.toOwnedSlice(alloc),
     };
 
     const filter = try Filter.init(self.arena.allocator(), reviewer_data, replace);
-    try self.filter_ids.append(filter.id);
+    try self.filter_ids.append(self._alloc, filter.id);
     try self.nonowned_process_buffer.addFilter(filter);
 }
 
 fn handleUnfoldCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-    const self: *Output = @alignCast(@ptrCast(listener));
+    const self: *Output = @ptrCast(@alignCast(listener));
 
     if (!self.is_focused) return;
 
@@ -255,11 +258,11 @@ fn handleUnfoldCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!
 
     // TODO: only remove fold commands
     try self.nonowned_process_buffer.removeAllFilters();
-    self.filter_ids.clearAndFree();
+    self.filter_ids.clearAndFree(self._alloc);
 }
 
 fn handleUnreplaceCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-    const self: *Output = @alignCast(@ptrCast(listener));
+    const self: *Output = @ptrCast(@alignCast(listener));
 
     if (!self.is_focused) return;
 
@@ -268,11 +271,11 @@ fn handleUnreplaceCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Err
 
     // TODO: only remove replace commands
     try self.nonowned_process_buffer.removeAllFilters();
-    self.filter_ids.clearAndFree();
+    self.filter_ids.clearAndFree(self._alloc);
 }
 
 fn handleFindCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-    const self: *Output = @alignCast(@ptrCast(listener));
+    const self: *Output = @ptrCast(@alignCast(listener));
     const alloc = self.arena.allocator();
 
     if (!self.is_focused) return;
@@ -297,19 +300,19 @@ fn handleFindCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error
 }
 
 fn handleFindNextCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-    const self: *Output = @alignCast(@ptrCast(listener));
+    const self: *Output = @ptrCast(@alignCast(listener));
     if (!self.is_focused) return;
     self.searchNext();
 }
 
 fn handleFindPrevCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-    const self: *Output = @alignCast(@ptrCast(listener));
+    const self: *Output = @ptrCast(@alignCast(listener));
     if (!self.is_focused) return;
     self.searchPrev();
 }
 
 fn handleJumpCmd(arg: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-    const self: *Output = @alignCast(@ptrCast(listener));
+    const self: *Output = @ptrCast(@alignCast(listener));
     if (!self.is_focused) return;
 
     const line_num: usize = std.fmt.parseInt(usize, arg, 10) catch return;
@@ -317,18 +320,18 @@ fn handleJumpCmd(arg: []const u8, listener: *anyopaque) std.mem.Allocator.Error!
 }
 
 fn handleInfoCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-    const self: *Output = @alignCast(@ptrCast(listener));
+    const self: *Output = @ptrCast(@alignCast(listener));
     if (!self.is_focused) return;
 
     self.debuginfo();
 }
 
 fn handleUncolorCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-    const self: *Output = @alignCast(@ptrCast(listener));
+    const self: *Output = @ptrCast(@alignCast(listener));
     if (!self.is_focused) return;
     self.clearStyle();
     try self.nonowned_process_buffer.removeAllReviewers();
-    self.reviewer_ids.clearAndFree();
+    self.reviewer_ids.clearAndFree(self._alloc);
 }
 
 fn fold(_: *Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.Error!Filter.TransformResult {
@@ -582,17 +585,17 @@ pub fn setupViaUiconfig(
     var applied_color_rules = try std.ArrayList(*ColorRule).initCapacity(salloc, num_color_rules);
     if (global_config) |c| {
         for (c.colorRules) |*c_rule| {
-            try applied_color_rules.append(c_rule);
+            try applied_color_rules.append(salloc, c_rule);
         }
     }
     if (self_config) |c| {
         for (c.colorRules) |*c_rule| {
-            try applied_color_rules.append(c_rule);
+            try applied_color_rules.append(salloc, c_rule);
         }
     }
 
     // parse all color rules
-    var patterns = std.ArrayList(ColorPattern).init(alloc);
+    var patterns = try std.ArrayList(ColorPattern).initCapacity(alloc, num_color_rules);
     for (applied_color_rules.items) |c_rule| {
         if (c_rule.background_color == null and c_rule.foreground_color == null) continue;
         if (c_rule.pattern == null) continue;
@@ -602,17 +605,17 @@ pub fn setupViaUiconfig(
         };
 
         // create style argument
-        var style_args = std.ArrayList([]u8).init(salloc);
+        var style_args = try std.ArrayList([]u8).initCapacity(salloc, 2);
         if (c_rule.background_color) |bg_str| {
-            try style_args.append(try salloc.dupe(u8, "bg"));
-            try style_args.append(try salloc.dupe(u8, bg_str));
+            try style_args.append(salloc, try salloc.dupe(u8, "bg"));
+            try style_args.append(salloc, try salloc.dupe(u8, bg_str));
         }
         if (c_rule.foreground_color) |fg_str| {
-            try style_args.append(try salloc.dupe(u8, "fg"));
-            try style_args.append(try salloc.dupe(u8, fg_str));
+            try style_args.append(salloc, try salloc.dupe(u8, "fg"));
+            try style_args.append(salloc, try salloc.dupe(u8, fg_str));
         }
         if (!c_rule.just_pattern) {
-            try style_args.append(try salloc.dupe(u8, "line"));
+            try style_args.append(salloc, try salloc.dupe(u8, "line"));
         }
         const style_arg = try std.mem.join(salloc, ":", style_args.items);
 
@@ -620,23 +623,23 @@ pub fn setupViaUiconfig(
         if (color_pattern == null) continue;
 
         color_pattern.?.regex = re;
-        try patterns.append(color_pattern.?);
+        try patterns.append(alloc, color_pattern.?);
     }
 
     const reviewer_data = try alloc.create(ColorReviewerData);
     reviewer_data.* = .{
         .output = self,
-        .style_patterns = try patterns.toOwnedSlice(),
+        .style_patterns = try patterns.toOwnedSlice(alloc),
     };
 
     // Create and add the reviewer to the process buffer
     const reviewer = try Reviewer.init(self.arena.allocator(), reviewer_data, color);
-    try self.reviewer_ids.append(reviewer.id);
+    try self.reviewer_ids.append(self._alloc, reviewer.id);
     try self.nonowned_process_buffer.addReviewer(reviewer);
 }
 
 fn handleColorCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-    const self: *Output = @alignCast(@ptrCast(listener));
+    const self: *Output = @ptrCast(@alignCast(listener));
     const alloc = self.arena.allocator();
 
     if (!self.is_focused) return;
@@ -655,7 +658,7 @@ fn handleColorCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Erro
 
     // each pair comes in the form of `regex` `style`
     // add each pair
-    var color_patterns = std.ArrayList(ColorPattern).init(alloc);
+    var color_patterns = try std.ArrayList(ColorPattern).initCapacity(alloc, arg_array.len / 2);
     for (0..arg_array.len / 2) |i| {
         const regex_arg = arg_array[i * 2];
         const style_arg = arg_array[i * 2 + 1];
@@ -667,19 +670,19 @@ fn handleColorCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Erro
         if (color_pattern == null) continue;
 
         color_pattern.?.regex = re;
-        try color_patterns.append(color_pattern.?);
+        try color_patterns.append(alloc, color_pattern.?);
     }
 
     // Create the data object for the colorReviewer
     const reviewer_data = try alloc.create(ColorReviewerData);
     reviewer_data.* = .{
         .output = self,
-        .style_patterns = try color_patterns.toOwnedSlice(),
+        .style_patterns = try color_patterns.toOwnedSlice(alloc),
     };
 
     // Create and add the reviewer to the process buffer
     const reviewer = try Reviewer.init(self.arena.allocator(), reviewer_data, color);
-    try self.reviewer_ids.append(reviewer.id);
+    try self.reviewer_ids.append(self._alloc, reviewer.id);
     try self.nonowned_process_buffer.addReviewer(reviewer);
 }
 
@@ -868,7 +871,7 @@ pub fn jumpToLine(self: *Output, line_num: usize) void {
 }
 
 pub fn clearStyle(self: *Output) void {
-    self.style_list.clearAndFree();
+    self.style_list.clearAndFree(self._alloc);
     self.style_map.clearAndFree();
 }
 
@@ -880,7 +883,7 @@ pub fn updateStyle(self: *Output, style: *const vaxis.Style, begin_offset: usize
                 break :blk i;
             }
         }
-        try self.style_list.append(style.*);
+        try self.style_list.append(self._alloc, style.*);
         break :blk self.style_list.items.len - 1;
     };
     for (begin_offset..end_offset) |i| {
@@ -902,7 +905,7 @@ pub fn updateStyleWithRange(self: *Output, style_range: []?vaxis.Style, begin_of
                         break :blk i;
                     }
                 }
-                try self.style_list.append(style);
+                try self.style_list.append(self._alloc, style);
                 break :blk self.style_list.items.len - 1;
             };
             try self.style_map.put(offset, style_index);
@@ -939,7 +942,7 @@ pub fn subscribeHandlersToCmd(self: *Output, cmd: *Cmd) !void {
             .listener = self,
         };
         const id = try self.cmd_ref.?.addHandler(handler);
-        try self.handlers_ids.append(id);
+        try self.handlers_ids.append(self._alloc, id);
     }
 }
 
@@ -971,7 +974,7 @@ test "folding text" {
     defer process_buffer.deinit();
     defer output.deinit();
 
-    try process_buffer.append(
+    try process_buffer.append(alloc,
         \\line 1: apples
         \\line 2: carrots
         \\line 3: carrots
@@ -1007,7 +1010,7 @@ test "coloring text" {
     defer process_buffer.deinit();
     defer output.deinit();
 
-    try process_buffer.append(
+    try process_buffer.append(alloc,
         \\line 1: apples
         \\line 2: carrots
         \\line 3: carrots
@@ -1026,9 +1029,9 @@ test "coloring text" {
     const buffer = try output.copyBuffer(alloc);
     defer alloc.free(buffer);
 
-    var expected_list = Output.StyleList.init(alloc);
-    defer expected_list.deinit();
-    try expected_list.append(vaxis.Style{ .fg = .{ .rgb = .{ 255, 0, 0 } } });
+    var expected_list = try Output.StyleList.initCapacity(alloc, 7);
+    defer expected_list.deinit(alloc);
+    try expected_list.append(alloc, vaxis.Style{ .fg = .{ .rgb = .{ 255, 0, 0 } } });
 
     var expected_map = Output.StyleMap.init(alloc);
     defer expected_map.deinit();

@@ -36,8 +36,8 @@ pub const View = struct {
         const v = try alloc.create(View);
         v.* = .{
             .alloc = alloc,
-            .outputviews = OutputViewList.init(alloc),
-            .flexitems = FlexItemList.init(alloc),
+            .outputviews = try OutputViewList.initCapacity(alloc, 1),
+            .flexitems = try FlexItemList.initCapacity(alloc, 1),
             .flexrow = .{ .children = &[_]vxfw.FlexItem{} },
         };
         return v;
@@ -48,8 +48,8 @@ pub const View = struct {
         for (self.outputviews.items) |t| {
             t.deinit();
         }
-        self.outputviews.deinit();
-        self.flexitems.deinit();
+        self.outputviews.deinit(self.alloc);
+        self.flexitems.deinit(self.alloc);
         self.alloc.destroy(self);
     }
 
@@ -143,8 +143,8 @@ pub const View = struct {
     }
 
     pub fn add_outputview(self: *View, outputview: *OutputView, pos: usize) !void {
-        try self.outputviews.insert(pos, outputview);
-        try self.flexitems.insert(pos, .{ .widget = outputview.widget() });
+        try self.outputviews.insert(self.alloc, pos, outputview);
+        try self.flexitems.insert(self.alloc, pos, .{ .widget = outputview.widget() });
 
         //std.debug.print("view: add_outputview -> {d}\n", .{self.outputviews.items.len});
         if (self.outputviews.items.len == 1) {

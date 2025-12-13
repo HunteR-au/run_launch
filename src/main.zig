@@ -18,7 +18,15 @@ const RunLaunchErrors = error{
 };
 
 pub fn main() !void {
-    const writer = std.io.getStdOut().writer();
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    _ = &stderr_writer.interface;
+
+    //const writer = std.io.getStdOut().writer();
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
 
@@ -38,17 +46,17 @@ pub fn main() !void {
         .diagnostic = &diag,
         .allocator = allocator,
     }) catch |err| {
-        diag.report(std.io.getStdErr().writer(), err) catch {};
+        diag.report(stdout, err) catch {};
         return err;
     };
     defer res.deinit();
 
     if (res.args.help != 0)
-        return clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{});
+        return clap.help(stdout, clap.Help, &params, .{});
     if (res.args.@"dry-run" != 0)
-        try writer.print("dry run set\n", .{});
+        try stdout.print("dry run set\n", .{});
     if (res.positionals[0] == null or res.positionals[1] == null) {
-        try writer.print("Invalid format: use \"run_launch.exe path name\"\n", .{});
+        try stdout.print("Invalid format: use \"run_launch.exe path name\"\n", .{});
         return RunLaunchErrors.BadPositionals;
     }
 
@@ -76,9 +84,9 @@ pub fn main() !void {
         try tui.start_tui(allocator);
     }
 
-    try writer.print("first positional arg: {s}\n", .{res.positionals[0].?});
-    try writer.print("version: {s}\n", .{launchdata.version});
-    try writer.print("first config name: {?s}\n", .{launchdata.configurations[0].name});
+    try stdout.print("first positional arg: {s}\n", .{res.positionals[0].?});
+    try stdout.print("version: {s}\n", .{launchdata.version});
+    try stdout.print("first config name: {?s}\n", .{launchdata.configurations[0].name});
 
     //_ = taskNameToRun;
     if (res.args.@"web-ui" != 0) {
@@ -98,6 +106,9 @@ pub fn main() !void {
         }
         tui.stop_tui();
     }
+
+    // Required to push buffered output to the terminal
+    try stdout.flush();
 }
 
 // https://code.visualstudio.com/docs/editor/debugging#_launchjson-attributes

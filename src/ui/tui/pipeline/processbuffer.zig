@@ -34,22 +34,22 @@ pub const ProcessBuffer = struct {
         self.* = .{
             .alloc = alloc,
             .m = std.Thread.Mutex{},
-            .buffer = std.ArrayList(u8).init(alloc),
-            .buffer_newlines = std.ArrayList(usize).init(alloc),
-            .filtered_buffer = std.ArrayList(u8).init(alloc),
-            .filtered_newlines = std.ArrayList(usize).init(alloc),
-            .nonowned_iterators = std.ArrayList(IteratorPtr).init(alloc),
+            .buffer = try std.ArrayList(u8).initCapacity(alloc, 100),
+            .buffer_newlines = try std.ArrayList(usize).initCapacity(alloc, 100),
+            .filtered_buffer = try std.ArrayList(u8).initCapacity(alloc, 100),
+            .filtered_newlines = try std.ArrayList(usize).initCapacity(alloc, 100),
+            .nonowned_iterators = try std.ArrayList(IteratorPtr).initCapacity(alloc, 100),
             .pipeline = try Pipeline.init(alloc),
         };
         return self;
     }
 
     pub fn deinit(self: *ProcessBuffer) void {
-        self.buffer.deinit();
-        self.nonowned_iterators.deinit();
-        self.buffer_newlines.deinit();
-        self.filtered_buffer.deinit();
-        self.filtered_newlines.deinit();
+        self.buffer.deinit(self.alloc);
+        self.nonowned_iterators.deinit(self.alloc);
+        self.buffer_newlines.deinit(self.alloc);
+        self.filtered_buffer.deinit(self.alloc);
+        self.filtered_newlines.deinit(self.alloc);
         self.pipeline.deinit();
         self.alloc.destroy(self);
     }
@@ -65,26 +65,27 @@ pub const ProcessBuffer = struct {
                 },
             }
         }
-        self.nonowned_iterators.clearAndFree();
+        self.nonowned_iterators.clearAndFree(self.alloc);
     }
 
     pub fn append(self: *ProcessBuffer, buf: []const u8) std.mem.Allocator.Error!void {
         self.m.lock();
         defer self.m.unlock();
 
-        try update_newline_indexs(&self.buffer_newlines, buf, self.buffer.items.len);
-        try self.buffer.appendSlice(buf);
+        try update_newline_indexs(self.alloc, &self.buffer_newlines, buf, self.buffer.items.len);
+        try self.buffer.appendSlice(self.alloc, buf);
         try self.processPipeline();
     }
 
     fn update_newline_indexs(
+        alloc: std.mem.Allocator,
         newline_cache: *std.ArrayList(usize),
         buf: []const u8,
         offset: usize,
     ) std.mem.Allocator.Error!void {
         for (buf, 0..) |c, i| {
             if (c == '\n') {
-                try newline_cache.append(i + offset);
+                try newline_cache.append(alloc, i + offset);
             }
         }
     }
@@ -106,11 +107,12 @@ pub const ProcessBuffer = struct {
                     defer self.alloc.free(filtered_lines);
                     self.lastNewLine = i + 1;
                     try update_newline_indexs(
+                        self.alloc,
                         &self.filtered_newlines,
                         filtered_lines,
                         self.filtered_buffer.items.len,
                     );
-                    try self.filtered_buffer.appendSlice(filtered_lines);
+                    try self.filtered_buffer.appendSlice(self.alloc, filtered_lines);
                 }
             },
             else => {
@@ -126,11 +128,12 @@ pub const ProcessBuffer = struct {
                     defer self.alloc.free(filtered_lines);
                     self.lastNewLine = i + 1;
                     try update_newline_indexs(
+                        self.alloc,
                         &self.filtered_newlines,
                         filtered_lines,
                         self.filtered_buffer.items.len,
                     );
-                    try self.filtered_buffer.appendSlice(filtered_lines);
+                    try self.filtered_buffer.appendSlice(self.alloc, filtered_lines);
                 }
             },
         }
@@ -189,15 +192,15 @@ pub const ProcessBuffer = struct {
         defer self.m.unlock();
 
         // get all pipeline ids
-        var id_array = std.ArrayList(Filter.HandleId).init(self.alloc);
+        var id_array = try std.ArrayList(Filter.HandleId).initCapacity(self.alloc, self.pipeline.filters.items.len);
         for (self.pipeline.filters.items) |f| {
-            try id_array.append(f.id);
+            try id_array.append(self.alloc, f.id);
         }
         for (id_array.items) |id| {
             var f = self.pipeline.removeFilter(id);
             if (f != null) f.?.deinit();
         }
-        id_array.deinit();
+        id_array.deinit(self.alloc);
         try self.reprocessPipeline();
     }
 
@@ -206,15 +209,15 @@ pub const ProcessBuffer = struct {
         defer self.m.unlock();
 
         // get all pipeline ids
-        var id_array = std.ArrayList(Reviewer.HandleId).init(self.alloc);
+        var id_array = try std.ArrayList(Reviewer.HandleId).initCapacity(self.alloc, self.pipeline.reviewers.items.len);
         for (self.pipeline.reviewers.items) |r| {
-            try id_array.append(r.id);
+            try id_array.append(self.alloc, r.id);
         }
         for (id_array.items) |id| {
             var r = self.pipeline.removeReviewer(id);
             if (r != null) r.?.deinit();
         }
-        id_array.deinit();
+        id_array.deinit(self.alloc);
         try self.reprocessPipeline();
     }
 
@@ -399,9 +402,9 @@ pub const ProcessBuffer = struct {
         };
 
         if (T == ReverseLineIterator) {
-            try self.process_buffer.nonowned_iterators.append(.{ .reverseLineIterator = self });
+            try self.process_buffer.nonowned_iterators.append(self.process_buffer.alloc, .{ .reverseLineIterator = self });
         } else if (T == LineIterator) {
-            try self.process_buffer.nonowned_iterators.append(.{ .lineIterator = self });
+            try self.process_buffer.nonowned_iterators.append(self.process_buffer.alloc, .{ .lineIterator = self });
         }
 
         return self;

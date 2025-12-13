@@ -29,7 +29,7 @@ pub const OutputView = struct {
         errdefer alloc.destroy(p);
         p.* = .{
             .alloc = alloc,
-            .outputs = OutputList.init(alloc),
+            .outputs = try OutputList.initCapacity(alloc, 1),
         };
         return p;
     }
@@ -39,13 +39,13 @@ pub const OutputView = struct {
         for (self.outputs.items) |o| {
             o.deinit();
         }
-        self.outputs.deinit();
+        self.outputs.deinit(self.alloc);
         self.alloc.destroy(self);
     }
 
     pub fn add_output(self: *OutputView, output: *OutputWidget) std.mem.Allocator.Error!void {
         // TODO: create a tab for the corresponding output
-        try self.outputs.append(output);
+        try self.outputs.append(self.alloc, output);
 
         if (self.outputs.items.len == 1) {
             self.focused_ow = output;

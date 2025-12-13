@@ -10,11 +10,11 @@ pub const CmdWidget = struct {
     cmd: Cmd.Cmd,
     last_history_idx: ?usize = null,
 
-    pub fn init(alloc: std.mem.Allocator, unicode: *const vaxis.Unicode) std.mem.Allocator.Error!CmdWidget {
+    pub fn init(alloc: std.mem.Allocator) std.mem.Allocator.Error!CmdWidget {
         return .{
             .alloc = alloc,
-            .textBox = vxfw.TextField.init(alloc, unicode),
-            .cmd = Cmd.Cmd.init(alloc),
+            .textBox = vxfw.TextField.init(alloc),
+            .cmd = try Cmd.Cmd.init(alloc),
         };
     }
 

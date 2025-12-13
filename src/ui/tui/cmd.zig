@@ -23,21 +23,23 @@ pub const Cmd = struct {
     // --- --- publish an event
 
     arena: std.heap.ArenaAllocator,
+    alloc: std.mem.Allocator,
     history: std.ArrayList([]u8),
     handlers: std.ArrayList(HandlerRef),
     lastHandleId: usize = 0,
 
-    pub fn init(alloc: std.mem.Allocator) Cmd {
+    pub fn init(alloc: std.mem.Allocator) !Cmd {
         return .{
-            .handlers = std.ArrayList(HandlerRef).init(alloc),
-            .history = std.ArrayList([]u8).init(alloc),
+            .handlers = try std.ArrayList(HandlerRef).initCapacity(alloc, 10),
+            .history = try std.ArrayList([]u8).initCapacity(alloc, 10),
             .arena = std.heap.ArenaAllocator.init(alloc),
+            .alloc = alloc,
         };
     }
 
     pub fn deinit(self: *Cmd) void {
-        self.handlers.deinit();
-        self.history.deinit();
+        self.handlers.deinit(self.alloc);
+        self.history.deinit(self.alloc);
         self.arena.deinit();
     }
 
@@ -58,7 +60,7 @@ pub const Cmd = struct {
 
     pub fn addHandler(self: *Cmd, handler: Handler) !HandleId {
         self.lastHandleId = self.lastHandleId +| 1;
-        try self.handlers.append(.{ .handler = handler, .id = self.lastHandleId });
+        try self.handlers.append(self.alloc, .{ .handler = handler, .id = self.lastHandleId });
         return self.lastHandleId;
     }
 
@@ -73,7 +75,7 @@ pub const Cmd = struct {
 
     pub fn addHistory(self: *Cmd, buffer: []const u8) !void {
         const alloc = self.arena.allocator();
-        try self.history.append(try alloc.dupe(u8, buffer));
+        try self.history.append(self.alloc, try alloc.dupe(u8, buffer));
     }
 
     pub fn getHistory(self: *Cmd, idx: usize) ?[]const u8 {

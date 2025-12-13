@@ -128,7 +128,8 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                     var char_iter_offset: usize = 0;
                     while (char_iter.next()) |char| {
                         const grapheme = char.bytes(line.bytes);
-                        char_iter_offset = char.offset;
+                        //char_iter_offset = char.offset;
+                        char_iter_offset = char.start;
 
                         if (std.mem.eql(u8, grapheme, "\t")) {
                             for (0..8) |i| {
@@ -187,7 +188,8 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                     while (char_iter.next()) |char| {
                         if (col >= container_size.width) break;
                         const grapheme = char.bytes(line);
-                        char_iter_offset = char.offset;
+                        //char_iter_offset = char.offset;
+                        char_iter_offset = char.start;
                         const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
 
                         if (col + grapheme_width >= container_size.width and
