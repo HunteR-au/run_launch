@@ -44,7 +44,7 @@ pub const Cmd = struct {
     }
 
     pub fn handleCmd(self: *const Cmd, buffer: []const u8) !void {
-        const index = findFirstChar(buffer, ':');
+        const index = findFirstChar(buffer, ' ');
 
         if (index) |idx| {
             const key = buffer[0..idx];
