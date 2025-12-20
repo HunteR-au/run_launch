@@ -182,16 +182,22 @@ pub const OutputWidget = struct {
                     self.output.searchPrev();
                     ctx.consumeAndRedraw();
                 }
-                if (key.matches(vaxis.Key.page_up, .{ .ctrl = true })) {
+                if (key.matches(vaxis.Key.page_up, .{ .ctrl = true }) or
+                    key.matches('i', .{ .ctrl = true }))
+                {
                     //self.jump_to_start() catch {};
                     try self.jump_to_start();
                     ctx.consumeAndRedraw();
                 }
-                if (key.matches(vaxis.Key.page_down, .{ .ctrl = true })) {
+                if (key.matches(vaxis.Key.page_down, .{ .ctrl = true }) or
+                    key.matches('u', .{ .ctrl = true }))
+                {
                     self.jump_to_end() catch {};
                     ctx.consumeAndRedraw();
                 }
-                if (key.matches(vaxis.Key.page_up, .{ .ctrl = false })) {
+                if (key.matches(vaxis.Key.page_up, .{ .ctrl = false }) or
+                    key.matches('i', .{ .ctrl = false }))
+                {
                     self.scroll_sticky_mode = false;
                     self.window.is_sticky = false;
                     self.scroll_bars.scroll_view.scroll.pending_lines = 0;
@@ -200,7 +206,9 @@ pub const OutputWidget = struct {
                     self.pageUp() catch {};
                     ctx.consumeAndRedraw();
                 }
-                if (key.matches(vaxis.Key.page_down, .{ .ctrl = false })) {
+                if (key.matches(vaxis.Key.page_down, .{ .ctrl = false }) or
+                    key.matches('u', .{ .ctrl = false }))
+                {
                     self.pageDown() catch {};
                     ctx.consumeAndRedraw();
                 }
