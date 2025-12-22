@@ -55,6 +55,16 @@ pub const Cmd = struct {
                     try h.handle(args, h.listener);
                 }
             }
+        } else {
+            // there must be no arguments
+            const key = buffer;
+            const args = "";
+            for (self.handlers.items) |*obj| {
+                const h = obj.handler;
+                if (std.mem.eql(u8, key, h.event_str)) {
+                    try h.handle(args, h.listener);
+                }
+            }
         }
     }
 
