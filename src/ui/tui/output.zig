@@ -291,12 +291,13 @@ fn handleFindCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error
 
     if (arguments.len < 1) return;
 
-    const top_rendered_line_buffer_offset = self.widget_ref.?.get_rendered_line_buffer_offset(.first) catch |e| switch (e) {
-        error.NoLinesRendered => return,
-        error.LineNotRendered => return,
-    };
+    const start_from_line = self.widget_ref.?.window.last_draw.top_line;
+    //const top_rendered_line_buffer_offset = self.widget_ref.?.get_rendered_line_buffer_offset(.first) catch |e| switch (e) {
+    //    error.NoLinesRendered => return,
+    //    error.LineNotRendered => return,
+    //};
 
-    self.searchStr(arguments[0], top_rendered_line_buffer_offset) catch return;
+    self.searchStr(arguments[0], start_from_line) catch return;
 }
 
 fn handleFindNextCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
@@ -719,9 +720,8 @@ fn color(_: *const Reviewer, data: *anyopaque, metadata: Pipeline.MetaData, line
     }
 }
 
-// TODO: handle errors properly
-pub fn searchStr(self: *Output, search_str: []const u8, start_search_line: usize) !void {
-    var alloc = self.widget_ref.?.alloc;
+pub fn removeSearch(self: *Output) !void {
+    const alloc = self.widget_ref.?.alloc;
 
     // unhighlight previous match
     if (self.search_info) |*sinfo| {
@@ -733,9 +733,19 @@ pub fn searchStr(self: *Output, search_str: []const u8, start_search_line: usize
                 ) catch return;
             }
         }
+
+        // remove the search info
         sinfo.deinit(alloc);
         self.search_info = null;
     }
+}
+
+// TODO: handle errors properly
+pub fn searchStr(self: *Output, search_str: []const u8, start_search_line: usize) !void {
+    var alloc = self.widget_ref.?.alloc;
+
+    // unhighlight and remove previous match
+    try self.removeSearch();
 
     // create regex
     var re = try alloc.create(Regex);
@@ -748,7 +758,7 @@ pub fn searchStr(self: *Output, search_str: []const u8, start_search_line: usize
     while (true) : (secondAttempt = true) {
         var start_searching_line: usize = 0;
         if (secondAttempt == false) {
-            start_searching_line = self.nonowned_process_buffer.getLineFromOffset(start_search_line);
+            start_searching_line = start_search_line;
         }
 
         // if start_searching_line is 0 on our first attempt, we don't search twice
