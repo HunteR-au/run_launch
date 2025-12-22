@@ -155,13 +155,7 @@ pub const OutputWidget = struct {
                     ctx.consumeAndRedraw();
                 }
                 if (key.matches(vaxis.Key.escape, .{})) {
-                    // TODO: this is busted, probably the check for if_sticky
-                    self.scroll_sticky_mode = false;
-                    self.window.is_sticky = false;
-                    self.scroll_bars.scroll_view.scroll.pending_lines = 0;
-                    self.window.pending_lines = 0;
-
-                    self.window.linesUpEx(std.math.maxInt(u32));
+                    try self.output.removeSearch();
                     ctx.consumeAndRedraw();
                 }
                 if (key.matches(vaxis.Key.down, .{}) or
@@ -177,6 +171,7 @@ pub const OutputWidget = struct {
                 }
                 if (key.matches('n', .{})) {
                     self.output.searchNext();
+                    ctx.consumeAndRedraw();
                 }
                 if (key.matches('n', .{ .ctrl = true })) {
                     self.output.searchPrev();
@@ -294,7 +289,6 @@ pub const OutputWidget = struct {
         }
 
         // get the first rendered line
-        // THIS IS BUGGED!!!
         const first_rendered_line_offset = try self.get_rendered_line_buffer_offset(.first);
         //const first_rendered_line = self.window.getLineFromOffset(first_rendered_line_offset);
         const first_rendered_line = self.window.last_draw.top_line;
@@ -303,7 +297,6 @@ pub const OutputWidget = struct {
         // Fix: maybe I need to track the last byte that was rendered
 
         // get last line rendered
-        // THIS IS BUGGED!!!
         const last_rendered_line_offset = try self.get_rendered_line_buffer_offset(.last);
         //const last_rendered_line = self.window.getLineFromOffset(last_rendered_line_offset);
         const last_rendered_line = self.window.last_draw.bottom_line;
@@ -417,6 +410,8 @@ pub const OutputWidget = struct {
         }
 
         switch (line) {
+            // This function has some problems - .first will get the top of the window not
+            // the first rendered line
             .first => {
                 return self.rendered_text_offset_at_row_start.get(0) orelse
                     {
