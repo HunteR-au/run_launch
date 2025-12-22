@@ -416,8 +416,7 @@ pub const ProcessBuffer = struct {
             self.alloc.destroy(self);
         } else {
             self.process_buffer.m.lock();
-            var mutex = self.process_buffer.m;
-            defer mutex.unlock();
+            defer self.process_buffer.m.unlock();
 
             for (self.process_buffer.nonowned_iterators.items, 0..) |iter, i| {
                 // BUG: using swapRemove may cause issues while iterating over it
