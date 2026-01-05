@@ -61,7 +61,9 @@ pub fn build(b: *std.Build) !void {
 
     // Modules
     const utils = b.createModule(.{ .root_source_file = b.path("src/utils.zig") });
+    const runner = b.createModule(.{ .root_source_file = b.path("src/runner/runner.zig") });
     const debug_ui = b.createModule(.{ .root_source_file = b.path("src/debug/debug.zig") });
+    const config = b.createModule(.{ .root_source_file = b.path("src/config/config.zig") });
     const uiconfig = b.createModule(.{ .root_source_file = b.path("src/ui/uiconfig.zig") });
     const tui = b.createModule(.{
         .root_source_file = b.path("src/ui/tui.zig"),
@@ -77,12 +79,20 @@ pub fn build(b: *std.Build) !void {
     // Setup uiconfig
     uiconfig.addImport("utils", utils);
 
+    // Setup runner
+    runner.addImport("utils", utils);
+    runner.addImport("config", config);
+
+    // Setup config
+    config.addImport("utils", utils);
+
     // Setup tui
     tui.addImport("vaxis", vaxis);
     tui.addImport("utils", utils);
     tui.addImport("uiconfig", uiconfig);
     tui.addImport("regex", regex);
     tui.addImport("debug_ui", debug_ui);
+    tui.addImport("runner", runner);
 
     // Setup the EXE
     const exe_mod = b.createModule(.{
@@ -110,7 +120,9 @@ pub fn build(b: *std.Build) !void {
     exe_mod.addImport("clap", clap);
     exe_mod.addImport("webui", webui);
     exe_mod.addImport("debug_ui", debug_ui);
+    exe_mod.addImport("runner", runner);
     exe_mod.addImport("tui", tui);
+    exe_mod.addImport("config", config);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -165,6 +177,8 @@ pub fn build(b: *std.Build) !void {
     output_unit_tests.root_module.addImport("tui", tui);
     output_unit_tests.root_module.addImport("regex", regex);
     output_unit_tests.root_module.addImport("debug_ui", debug_ui);
+    output_unit_tests.root_module.addImport("runner", runner);
+    output_unit_tests.root_module.addImport("config", config);
 
     //const output_unit_tests = b.addTest(.{
     //    .root_source_file = b.path("src/ui/tui/output.zig"),
@@ -187,6 +201,8 @@ pub fn build(b: *std.Build) !void {
     exe_unit_tests.root_module.addImport("uiconfig", uiconfig);
     exe_unit_tests.root_module.addImport("vaxis", vaxis);
     exe_unit_tests.root_module.addImport("debug_ui", debug_ui);
+    exe_unit_tests.root_module.addImport("runner", runner);
+    exe_unit_tests.root_module.addImport("config", config);
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     const run_tui_unit_tests = b.addRunArtifact(output_unit_tests);

@@ -6,6 +6,7 @@ const debug_ui = @import("debug_ui");
 const process_buffer_mod = @import("pipeline/processbuffer.zig");
 const search = @import("pipeline/search.zig");
 const cmd_mod = @import("cmd.zig");
+const transforms = @import("pipeline/transforms.zig");
 
 // ui data structures
 const vaxis = @import("vaxis");
@@ -110,24 +111,16 @@ style_map: StyleMap,
 
 const UnfoldHandlerData = .{ .event_str = "unfold", .handle = handleUnfoldCmd };
 const FoldHandlerData = .{ .event_str = "fold", .handle = handleFoldCmd };
-const FoldFilterData = struct { regexs: []Regex };
-
+const PruneHandlerData = .{ .event_str = "prune", .handle = handlePruneCmd };
 const UnreplaceHandlerData = .{ .event_str = "unreplace", .handle = handleUnreplaceCmd };
 const ReplaceHandlerData = .{ .event_str = "replace", .handle = handleReplaceCmd };
-const ReplacePattern = struct { regex: Regex, replace_str: []u8 };
-const ReplaceFilterData = struct { replace_patterns: []ReplacePattern };
-
 const FindHandlerData = .{ .event_str = "find", .handle = handleFindCmd };
-
 const NextHandlerData = .{ .event_str = "next", .handle = handleFindNextCmd };
 const PrevHandlerData = .{ .event_str = "prev", .handle = handleFindPrevCmd };
 const JumpHandlerData = .{ .event_str = "j", .handle = handleJumpCmd };
 const InfoHandlerData = .{ .event_str = "s", .handle = handleInfoCmd };
-
 const UncolorHandlerData = .{ .event_str = "uncolor", .handle = handleUncolorCmd };
 const ColorHandlerData = .{ .event_str = "color", .handle = handleColorCmd };
-const ColorPattern = struct { regex: Regex, style: vaxis.Style, full_line: bool = false };
-const ColorReviewerData = struct { style_patterns: []ColorPattern, output: *Output };
 
 pub fn init(alloc: std.mem.Allocator, process_buf: *ProcessBuffer) !Output {
     return .{
@@ -192,14 +185,49 @@ fn handleFoldCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error
         try regex_list.append(alloc, re);
     }
 
-    const filter_data = try alloc.create(FoldFilterData);
+    const filter_data = try alloc.create(transforms.FoldFilterData);
     filter_data.* = .{ .regexs = try regex_list.toOwnedSlice(alloc) };
 
     // we need to recalculate the color styles
     self.clearStyle();
 
     // Create the filter and add to the pipeline
-    const filter = try Filter.init(self.arena.allocator(), filter_data, fold);
+    const filter = try Filter.init(self.arena.allocator(), filter_data, transforms.fold);
+    try self.filter_ids.append(self._alloc, filter.id);
+    try self.nonowned_process_buffer.addFilter(filter);
+}
+
+fn handlePruneCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @ptrCast(@alignCast(listener));
+
+    if (!self.is_focused) return;
+
+    const alloc = self.arena.allocator();
+
+    // parse the arguments
+    const arguments = try utils.parseArgsLineWithQuoteGroups(alloc, args);
+    defer {
+        for (arguments) |s| alloc.free(s);
+        alloc.free(arguments);
+    }
+
+    // create a list of compiled regex objects
+    var regex_list = try std.ArrayList(Regex).initCapacity(alloc, arguments.len);
+    for (arguments) |arg| {
+        const re = Regex.compile(alloc, arg) catch {
+            continue;
+        };
+        try regex_list.append(alloc, re);
+    }
+
+    const filter_data = try alloc.create(transforms.PruneFilterData);
+    filter_data.* = .{ .regexs = try regex_list.toOwnedSlice(alloc) };
+
+    // we need to recalculate the color styles
+    self.clearStyle();
+
+    // Create the filter and add to the pipeline
+    const filter = try Filter.init(self.arena.allocator(), filter_data, transforms.prune);
     try self.filter_ids.append(self._alloc, filter.id);
     try self.nonowned_process_buffer.addFilter(filter);
 }
@@ -210,7 +238,7 @@ fn handleReplaceCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Er
 
     if (!self.is_focused) return;
 
-    // parse the arguments for the color command
+    // parse the arguments for the replace command
     const arg_array = try utils.parseArgsLineWithQuoteGroups(alloc, args);
     defer {
         for (arg_array) |s| alloc.free(s);
@@ -223,7 +251,10 @@ fn handleReplaceCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Er
     }
 
     // each pair comes in the form of `search_str` `replace_str`
-    var replace_patterns = try std.ArrayList(ReplacePattern).initCapacity(alloc, arg_array.len / 2);
+    var replace_patterns = try std.ArrayList(transforms.ReplacePattern).initCapacity(
+        alloc,
+        arg_array.len / 2,
+    );
     for (0..arg_array.len / 2) |i| {
         const search_arg = arg_array[i * 2];
         const replace_arg = arg_array[i * 2 + 1];
@@ -238,12 +269,12 @@ fn handleReplaceCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Er
     }
 
     // Create the data object for the replaceReviewer
-    const reviewer_data = try alloc.create(ReplaceFilterData);
+    const reviewer_data = try alloc.create(transforms.ReplaceFilterData);
     reviewer_data.* = .{
         .replace_patterns = try replace_patterns.toOwnedSlice(alloc),
     };
 
-    const filter = try Filter.init(self.arena.allocator(), reviewer_data, replace);
+    const filter = try Filter.init(self.arena.allocator(), reviewer_data, transforms.replace);
     try self.filter_ids.append(self._alloc, filter.id);
     try self.nonowned_process_buffer.addFilter(filter);
 }
@@ -335,62 +366,6 @@ fn handleUncolorCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error
     self.reviewer_ids.clearAndFree(self._alloc);
 }
 
-fn fold(_: *Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.Error!Filter.TransformResult {
-    if (line.len == 0) return Filter.TransformResult{ .empty = {} };
-
-    const fold_data: *FoldFilterData = @ptrCast(@alignCast(data));
-
-    for (fold_data.regexs) |*re| {
-        //std.debug.print("Output:fold() comparing \"{s}\"\n", .{line});
-        if (try re.partialMatch(line) == true) {
-            //std.debug.print("Output:fold -> regex found a match on line {s}\n", .{line});
-
-            // found match
-            return Filter.TransformResult{ .line = line };
-        }
-    }
-    return Filter.TransformResult{ .empty = {} };
-}
-
-fn replace(filter: *Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.Error!Filter.TransformResult {
-    if (line.len == 0) return Filter.TransformResult{ .empty = {} };
-
-    const alloc = filter.arena.allocator();
-    const replace_data: *ReplaceFilterData = @ptrCast(@alignCast(data));
-
-    // we need to keep the altered line for the next pattern
-    var final_result = try std.ArrayListUnmanaged(u8).initCapacity(alloc, line.len);
-    try final_result.appendSlice(alloc, line);
-    for (replace_data.replace_patterns) |*patterns| {
-        var result = try std.ArrayListUnmanaged(u8).initCapacity(alloc, final_result.items.len);
-        var start: usize = 0;
-        defer start = 0;
-
-        var iter = helpers.regexMatchAll(&patterns.regex, final_result.items);
-        while (try iter.next()) |match| {
-            try result.appendSlice(alloc, line[start..match.lowerBound]);
-            try result.appendSlice(alloc, patterns.replace_str);
-            start = match.upperBound;
-        }
-
-        // append the end of the line
-        try result.appendSlice(alloc, line[start..line.len]);
-
-        // move over the altered line into the outer array for the
-        // next pattern or to be returned
-        final_result.deinit(alloc);
-        const slice = try result.toOwnedSlice(alloc);
-        final_result = std.ArrayListUnmanaged(u8){
-            .items = slice,
-            .capacity = slice.len,
-        };
-    }
-
-    return Filter.TransformResult{
-        .line = try final_result.toOwnedSlice(alloc),
-    };
-}
-
 // a rule
 //"pattern": "\\[Error\\]",
 //"just_pattern": true,
@@ -475,7 +450,7 @@ const ArgStateMachine = enum {
     Fg,
     Bg,
 };
-fn createStyleFromArg(arg: []const u8) ?ColorPattern {
+fn createStyleFromArg(arg: []const u8) ?transforms.ColorPattern {
     // fg:color:bg:color:line
 
     //var state = ArgStateMachine.Empty;
@@ -560,7 +535,7 @@ fn createStyleFromArg(arg: []const u8) ?ColorPattern {
         },
     }
     if (result_style) |res| {
-        return ColorPattern{ .regex = undefined, .full_line = color_line, .style = res };
+        return transforms.ColorPattern{ .regex = undefined, .full_line = color_line, .style = res };
     } else return null;
 }
 
@@ -596,7 +571,7 @@ pub fn setupViaUiconfig(
     }
 
     // parse all color rules
-    var patterns = try std.ArrayList(ColorPattern).initCapacity(alloc, num_color_rules);
+    var patterns = try std.ArrayList(transforms.ColorPattern).initCapacity(alloc, num_color_rules);
     for (applied_color_rules.items) |c_rule| {
         if (c_rule.background_color == null and c_rule.foreground_color == null) continue;
         if (c_rule.pattern == null) continue;
@@ -627,14 +602,14 @@ pub fn setupViaUiconfig(
         try patterns.append(alloc, color_pattern.?);
     }
 
-    const reviewer_data = try alloc.create(ColorReviewerData);
+    const reviewer_data = try alloc.create(transforms.ColorReviewerData);
     reviewer_data.* = .{
         .output = self,
         .style_patterns = try patterns.toOwnedSlice(alloc),
     };
 
     // Create and add the reviewer to the process buffer
-    const reviewer = try Reviewer.init(self.arena.allocator(), reviewer_data, color);
+    const reviewer = try Reviewer.init(self.arena.allocator(), reviewer_data, transforms.color);
     try self.reviewer_ids.append(self._alloc, reviewer.id);
     try self.nonowned_process_buffer.addReviewer(reviewer);
 }
@@ -659,7 +634,7 @@ fn handleColorCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Erro
 
     // each pair comes in the form of `regex` `style`
     // add each pair
-    var color_patterns = try std.ArrayList(ColorPattern).initCapacity(alloc, arg_array.len / 2);
+    var color_patterns = try std.ArrayList(transforms.ColorPattern).initCapacity(alloc, arg_array.len / 2);
     for (0..arg_array.len / 2) |i| {
         const regex_arg = arg_array[i * 2];
         const style_arg = arg_array[i * 2 + 1];
@@ -675,49 +650,16 @@ fn handleColorCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Erro
     }
 
     // Create the data object for the colorReviewer
-    const reviewer_data = try alloc.create(ColorReviewerData);
+    const reviewer_data = try alloc.create(transforms.ColorReviewerData);
     reviewer_data.* = .{
         .output = self,
         .style_patterns = try color_patterns.toOwnedSlice(alloc),
     };
 
     // Create and add the reviewer to the process buffer
-    const reviewer = try Reviewer.init(self.arena.allocator(), reviewer_data, color);
+    const reviewer = try Reviewer.init(self.arena.allocator(), reviewer_data, transforms.color);
     try self.reviewer_ids.append(self._alloc, reviewer.id);
     try self.nonowned_process_buffer.addReviewer(reviewer);
-}
-
-fn color(_: *const Reviewer, data: *anyopaque, metadata: Pipeline.MetaData, line: []const u8) std.mem.Allocator.Error!void {
-    const color_data: *ColorReviewerData = @ptrCast(@alignCast(data));
-
-    // first - check for first full_line pattern and apply
-    for (color_data.style_patterns) |*pattern| {
-        if (pattern.full_line) {
-            // check if there is a regex match in the line
-            if (try pattern.regex.partialMatch(line)) {
-                try color_data.output.updateStyle(
-                    &pattern.style,
-                    metadata.bufferOffset,
-                    metadata.bufferOffset + line.len,
-                );
-
-                // now that we have applied a full line pattern, exit
-                return;
-            }
-        }
-    }
-
-    // second - if no full_line patterns, apply all other patterns
-    for (color_data.style_patterns) |*pattern| {
-        var iter = helpers.regexMatchAll(&pattern.regex, line);
-        while (try iter.next()) |match| {
-            try color_data.output.updateStyle(
-                &pattern.style,
-                metadata.bufferOffset + match.lowerBound,
-                metadata.bufferOffset + match.upperBound,
-            );
-        }
-    }
 }
 
 pub fn removeSearch(self: *Output) !void {
@@ -934,6 +876,7 @@ pub fn subscribeHandlersToCmd(self: *Output, cmd: *Cmd) !void {
     const handler_data = comptime .{
         &FoldHandlerData,
         &UnfoldHandlerData,
+        &PruneHandlerData,
         &ReplaceHandlerData,
         &UnreplaceHandlerData,
         &ColorHandlerData,
@@ -962,6 +905,7 @@ pub fn unsubscribeHandlersFromCmd(self: *Output) void {
     for (self.handlers_ids.items) |id| {
         self.cmd_ref.?.removeHandler(id);
     }
+    self.handlers_ids.clearAndFree(self._alloc);
 
     self.cmd_ref = null;
 }

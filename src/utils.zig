@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+pub const uuid = @import("utils/uuid.zig");
+
 pub const EnvTuple = struct {
     key: []u8,
     val: []u8,
@@ -163,16 +165,15 @@ pub fn parse_dotenv_file(alloc: std.mem.Allocator, filepath: []const u8) ![]EnvT
     return tuples;
 }
 
-pub const PushFnProto = fn (std.mem.Allocator, []const u8, []const u8) std.mem.Allocator.Error!void;
+pub const PushFnProto = fn (std.mem.Allocator, uuid.UUID, []const u8) std.mem.Allocator.Error!void;
 
 pub fn pullpushLoop(
     alloc: std.mem.Allocator,
-    pushfn: PushFnProto,
+    pushfn: *const PushFnProto,
     childproc: std.process.Child,
-    processname: []const u8,
+    processid: uuid.UUID,
 ) !void {
     const chunk_size: usize = 1024;
-    //std.debug.print("starting pushpull: {s}\n", .{processname});
 
     std.debug.assert(childproc.stdout_behavior == .Pipe);
     std.debug.assert(childproc.stderr_behavior == .Pipe);
@@ -186,39 +187,33 @@ pub fn pullpushLoop(
     const stdout_reader = childproc.stdout.?;
     const stderr_reader = childproc.stderr.?;
 
-    //const Stream = enum { stdout, stderr };
-    //var poller = std.Io.Poller(Stream);
-
     var poller = std.Io.poll(alloc, enum { stdout, stderr }, .{
         .stdout = stdout_reader,
         .stderr = stderr_reader,
     });
     defer poller.deinit();
 
-    //std.debug.print("polling...\n", .{});
-    while (try poller.pollTimeout(100_000_000)) {
+    while (true) {
+        const keep_polling = poller.pollTimeout(100_000_000) catch {
+            try pushfn(alloc, processid, "!!!BUFFER ENDED!!! stream ended with error\n");
+            return;
+        };
+        if (!keep_polling) break;
+
         const stdout_buf = try poller.toOwnedSlice(.stdout);
+        defer alloc.free(stdout_buf);
         if (stdout_buf.len > 0) {
-            try pushfn(alloc, processname, stdout_buf);
+            try pushfn(alloc, processid, stdout_buf);
         }
 
         const stderr_buf = try poller.toOwnedSlice(.stderr);
+        defer alloc.free(stderr_buf);
         if (stderr_buf.len > 0) {
-            try pushfn(alloc, processname, stderr_buf);
+            try pushfn(alloc, processid, stderr_buf);
         }
-
-        //const stdout = poller.fifo(.stdout).readableSlice(0);
-        //if (stdout.len > 0) {
-        //    try pushfn(alloc, processname, stdout);
-        //    poller.fifo(.stdout).discard(stdout.len);
-        //}
-
-        //const stderr = poller.fifo(.stderr).readableSlice(0);
-        //if (stderr.len > 0) {
-        //    try pushfn(alloc, processname, stderr);
-        //    poller.fifo(.stderr).discard(stderr.len);
-        //}
     }
+
+    try pushfn(alloc, processid, "!!!BUFFER ENDED!!!\n");
 }
 
 // AI impl

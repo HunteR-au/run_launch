@@ -2,6 +2,8 @@ const std = @import("std");
 const utils = @import("utils");
 const expand = @import("expand.zig");
 
+const uuid = utils.uuid;
+
 pub const TaskPresentation = struct {
     reveal: ?[]const u8,
 };
@@ -15,7 +17,7 @@ pub const Task = struct {
     presentation: ?TaskPresentation = null,
     problemMatcher: ?[]const u8 = null,
 
-    pub fn run_task(self: *const Task, allocator: std.mem.Allocator, pushfn: utils.PushFnProto) !void {
+    pub fn run_task(self: *const Task, allocator: std.mem.Allocator, id: uuid.UUID, pushfn: *const utils.PushFnProto) !std.process.Child {
         var argv: [][]const u8 = try allocator.alloc([]const u8, self.args.?.len + 1);
         defer allocator.free(argv);
         argv[0] = self.command.?;
@@ -34,7 +36,7 @@ pub const Task = struct {
             return e;
         };
 
-        _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, self.label.? });
+        _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, id });
 
         // TODO: BUG BUG BUG - child.wait will clean up and remove pipes. We probably only want to remove pipes once process ends AND
         // we have confirmed the pipe is drained
@@ -48,6 +50,7 @@ pub const Task = struct {
         //    //std.debug.print("Spawning module {any} failed.\n", .{e});
         //    return e;
         //};
+        return child;
     }
 };
 

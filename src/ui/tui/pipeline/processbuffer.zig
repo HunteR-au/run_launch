@@ -34,12 +34,12 @@ pub const ProcessBuffer = struct {
         self.* = .{
             .alloc = alloc,
             .m = std.Thread.Mutex{},
-            .buffer = try std.ArrayList(u8).initCapacity(alloc, 100),
-            .buffer_newlines = try std.ArrayList(usize).initCapacity(alloc, 100),
-            .filtered_buffer = try std.ArrayList(u8).initCapacity(alloc, 100),
-            .filtered_newlines = try std.ArrayList(usize).initCapacity(alloc, 100),
-            .nonowned_iterators = try std.ArrayList(IteratorPtr).initCapacity(alloc, 100),
-            .pipeline = try Pipeline.init(alloc),
+            .buffer = try .initCapacity(alloc, 100),
+            .buffer_newlines = try .initCapacity(alloc, 100),
+            .filtered_buffer = try .initCapacity(alloc, 100),
+            .filtered_newlines = try .initCapacity(alloc, 100),
+            .nonowned_iterators = try .initCapacity(alloc, 100),
+            .pipeline = try .init(alloc),
         };
         return self;
     }

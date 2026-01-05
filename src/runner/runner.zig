@@ -1,22 +1,289 @@
 const std = @import("std");
-const utils = @import("utils");
-const Launch = @import("../config/launch.zig");
-const Task = @import("../config/task.zig");
 const debugpy = @import("pydebug.zig");
 const native = @import("native.zig");
+const utils = @import("utils");
+const config_ = @import("config");
+const Launch = config_.Launch;
+const Task = config_.Task;
 
-pub const RunnerConfig = union(enum) {
-    config: Launch.Configuration,
-    compound: Launch.Compound,
+const uuid = utils.uuid;
+
+pub const RunnerContext = struct {
+    children: std.ArrayList(std.process.Child),
+    threads: std.ArrayList(std.Thread),
 };
 
-pub const Runner = struct {
+pub const UiFunctions = struct {
+    pub const NotifyNewProcessFn = fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!uuid.UUID;
+    pub const PushBytesFn = utils.PushFnProto;
+
+    notifyNewProcess: *const NotifyNewProcessFn,
+    pushBytes: *const PushBytesFn,
+};
+
+pub const WorkHandle = struct {
     _alloc: std.mem.Allocator,
-    children: std.ArrayList(std.process.Child),
-    config: Launch.Launch.ConfigOrCompound,
-    // config: RunnerConfig,
-    launch: Launch.Launch,
+    children: std.ArrayList(*std.process.Child),
+    results: ?std.ArrayList(std.process.Child.Term) = null,
+
+    pub fn wait(self: *WorkHandle) !void {
+        if (self.results != null) {
+            self.results.?.deinit(self._alloc);
+            self.results = null;
+        }
+        self.results = try .initCapacity(self._alloc, self.children.items.len);
+
+        for (self.children.items) |child| {
+            const term = try child.wait();
+            self.results.?.appendAssumeCapacity(term);
+        }
+    }
+
+    pub fn deinit(self: *WorkHandle) void {
+        self.children.deinit(self._alloc);
+        if (self.results != null) self.results.?.deinit(self._alloc);
+    }
+};
+
+pub const ConfiguredRunner = struct {
+    _alloc: std.mem.Allocator,
+    _context: RunnerContext,
+    _ui_funcs: UiFunctions,
+    config: Launch.Launch,
     tasks: ?Task.TaskJson = null,
+    m: std.Thread.Mutex = std.Thread.Mutex{},
+
+    const ExecType = enum { blocking, nonBlocking };
+
+    pub fn init(
+        alloc: std.mem.Allocator,
+        config: Launch.Launch,
+        tasks: ?Task.TaskJson,
+        comptime ui_funcs: UiFunctions,
+    ) !*ConfiguredRunner {
+        const runner = try alloc.create(ConfiguredRunner);
+        errdefer alloc.destroy(runner);
+
+        runner.* = .{
+            ._alloc = alloc,
+            ._context = .{
+                .threads = try .initCapacity(alloc, 1),
+                .children = try .initCapacity(alloc, 1),
+            },
+            ._ui_funcs = ui_funcs,
+            .config = config,
+            .tasks = tasks,
+        };
+        return runner;
+    }
+
+    pub fn deinit(self: *ConfiguredRunner) void {
+        self.m.lock();
+        defer self.m.unlock();
+
+        self._context.children.deinit(self._alloc);
+        self._context.threads.deinit(self._alloc);
+        self.config.deinit(self._alloc);
+        if (self.tasks) |*tasks| {
+            tasks.deinit();
+        }
+        self._alloc.destroy(self);
+    }
+
+    pub fn run(self: *ConfiguredRunner, name: []const u8, exec_type: ExecType) !?WorkHandle {
+        self.m.lock();
+        defer self.m.unlock();
+
+        const match = self.config.find_by_name(name) orelse {
+            return error.NoConfigWithName;
+        };
+
+        switch (match) {
+            .config => |config| {
+                // assume that the type is set
+                const runner_type = std.meta.stringToEnum(RunnerType, config.type.?) orelse {
+                    return error.InvalidChoice;
+                };
+
+                const child = try runRunnerTypeNonBlocking(
+                    self._alloc,
+                    runner_type,
+                    config,
+                    &self._context,
+                    self._ui_funcs.notifyNewProcess,
+                    self._ui_funcs.pushBytes,
+                );
+
+                // add the child
+                try self._context.children.append(self._alloc, child);
+
+                // return the work handle
+                var handle: WorkHandle = .{ ._alloc = self._alloc, .children = try .initCapacity(self._alloc, 1) };
+                try handle.children.append(handle._alloc, &self._context.children.items[0]);
+
+                switch (exec_type) {
+                    .blocking => try handle.wait(),
+                    .nonBlocking => {},
+                }
+
+                return handle;
+            },
+            .compound => |compound| {
+                // create a work handle for all children created
+                var handle: WorkHandle = .{ ._alloc = self._alloc, .children = try .initCapacity(self._alloc, 1) };
+                errdefer handle.deinit();
+
+                for (compound.configurations.?) |config_name| {
+                    const configmatch = self.config.find_config_by_name(config_name);
+                    if (configmatch) |config| {
+                        const runner_type = std.meta.stringToEnum(RunnerType, config.type.?) orelse {
+                            return error.InvalidChoice;
+                        };
+                        const child = try runRunnerTypeNonBlocking(
+                            self._alloc,
+                            runner_type,
+                            config,
+                            &self._context,
+                            self._ui_funcs.notifyNewProcess,
+                            self._ui_funcs.pushBytes,
+                        );
+
+                        // add the child
+                        try self._context.children.append(self._alloc, child);
+
+                        // add the child to the work handle
+                        try handle.children.append(handle._alloc, &self._context.children.items[0]);
+                    }
+                }
+
+                switch (exec_type) {
+                    .blocking => try handle.wait(),
+                    .nonBlocking => {},
+                }
+                return handle;
+            },
+        }
+    }
+
+    pub fn runPreTasks(self: *ConfiguredRunner, name: []const u8, exec_type: ExecType) !?WorkHandle {
+        self.m.lock();
+        defer self.m.unlock();
+
+        const match = self.config.find_by_name(name) orelse {
+            return error.NoConfigWithName;
+        };
+
+        var child: ?std.process.Child = null;
+
+        switch (match) {
+            .config => |config| {
+                // TODO - change this to be non-blocking
+                child = try runPreLaunchTask(
+                    self._alloc,
+                    *const Launch.Configuration,
+                    config,
+                    self.tasks,
+                    self._ui_funcs.notifyNewProcess,
+                    self._ui_funcs.pushBytes,
+                );
+            },
+            .compound => |compound| {
+                // TODO - change this to be non-blocking
+                child = try runPreLaunchTask(
+                    self._alloc,
+                    *const Launch.Compound,
+                    compound,
+                    self.tasks,
+                    self._ui_funcs.notifyNewProcess,
+                    self._ui_funcs.pushBytes,
+                );
+            },
+        }
+
+        var handle: WorkHandle = undefined;
+        if (child) |c| {
+            handle = .{ ._alloc = self._alloc, .children = try .initCapacity(self._alloc, 1) };
+            // add the child
+            try self._context.children.append(self._alloc, c);
+            // create the work handle
+            try handle.children.append(handle._alloc, &self._context.children.items[0]);
+        } else {
+            handle = .{ ._alloc = self._alloc, .children = try .initCapacity(self._alloc, 0) };
+        }
+
+        switch (exec_type) {
+            .blocking => try handle.wait(),
+            .nonBlocking => {},
+        }
+
+        return handle;
+    }
+
+    pub fn runPostTasks(self: *ConfiguredRunner, name: []const u8, exec_type: ExecType) !?WorkHandle {
+        self.m.lock();
+        defer self.m.unlock();
+
+        const match = self.config.find_by_name(name) orelse {
+            return error.NoConfigWithName;
+        };
+
+        var child: ?std.process.Child = null;
+
+        switch (match) {
+            .config => |config| {
+                // TODO - change this to be non-blocking
+                child = try runPostLaunchTask(
+                    self._alloc,
+                    *const Launch.Configuration,
+                    config,
+                    self.tasks,
+                    self._ui_funcs.pushBytes,
+                );
+            },
+            .compound => |compound| {
+                // TODO - change this to be non-blocking
+                child = try runPostLaunchTask(
+                    self._alloc,
+                    *const Launch.Compound,
+                    compound,
+                    self.tasks,
+                    self._ui_funcs.pushBytes,
+                );
+            },
+        }
+
+        var handle: WorkHandle = undefined;
+        if (child) |c| {
+            handle = .{ ._alloc = self._alloc, .children = try .initCapacity(self._alloc, 1) };
+            // add the child
+            try self._context.children.append(self._alloc, c);
+            // create the work handle
+            try handle.children.append(handle._alloc, &self._context.children.items[0]);
+        } else {
+            handle = .{ ._alloc = self._alloc, .children = try .initCapacity(self._alloc, 0) };
+        }
+
+        switch (exec_type) {
+            .blocking => try handle.wait(),
+            .nonBlocking => {},
+        }
+
+        return handle;
+    }
+
+    pub fn killAll(self: *ConfiguredRunner) !void {
+        self.m.lock();
+        defer self.m.unlock();
+
+        for (self._context.children.items) |*child| {
+            _ = child.kill() catch |err| switch (err) {
+                error.AlreadyTerminated => {},
+                else => {
+                    return err;
+                },
+            };
+        }
+    }
 };
 
 const RunnerType = enum {
@@ -33,23 +300,20 @@ pub fn run(
     tasks: ?Task.TaskJson,
     createviewprocessfn: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
     pushfn: utils.PushFnProto,
-) !Runner {
+) !RunnerContext {
     const match = launchconfig.find_by_name(name) orelse {
         return error.NoConfigWithName;
     };
 
-    var runnerif = Runner{
-        .children = try std.ArrayList(std.process.Child).initCapacity(alloc, 10),
-        .config = match,
-        .launch = launchconfig,
-        .tasks = tasks,
-        ._alloc = alloc,
+    var runnerif = RunnerContext{
+        .children = try .initCapacity(alloc, 1),
+        .threads = try .initCapacity(alloc, 1),
     };
 
     switch (match) {
         .config => |config| {
             // check if there is a preLaunchTask to run
-            try runPreLaunchTask(alloc, *const Launch.Configuration, config, tasks, createviewprocessfn, pushfn);
+            _ = try runPreLaunchTask(alloc, *const Launch.Configuration, config, tasks, createviewprocessfn, pushfn);
             // if (config.preLaunchTask != null) {
             //     try findRunTask(alloc, config.preLaunchTask.?, tasks);
             // }
@@ -61,13 +325,13 @@ pub fn run(
             try runRunnerType(alloc, runnertype, config, &runnerif, createviewprocessfn, pushfn);
 
             // check if there is a post debug task to run
-            try runPostLaunchTask(alloc, *const Launch.Configuration, config, tasks, pushfn);
+            _ = try runPostLaunchTask(alloc, *const Launch.Configuration, config, tasks, pushfn);
             // if (config.postDebugTask != null) {
             //     try findRunTask(alloc, config.postDebugTask.?, tasks);
             // }
         },
         .compound => |compound| {
-            try runPreLaunchTask(alloc, *const Launch.Compound, compound, tasks, createviewprocessfn, pushfn);
+            _ = try runPreLaunchTask(alloc, *const Launch.Compound, compound, tasks, createviewprocessfn, pushfn);
 
             for (compound.configurations.?) |configname| {
                 const configmatch = launchconfig.find_config_by_name(configname);
@@ -80,7 +344,7 @@ pub fn run(
                         return error.InvalidChoice;
                     };
                     const child = try runRunnerTypeNonBlocking(alloc, runnertype, config, &runnerif, createviewprocessfn, pushfn);
-                    try runnerif.children.append(runnerif._alloc, child);
+                    try runnerif.children.append(alloc, child);
                 }
             }
 
@@ -90,7 +354,7 @@ pub fn run(
                 _ = try child.wait();
             }
 
-            try runPostLaunchTask(alloc, *const Launch.Compound, compound, tasks, pushfn);
+            _ = try runPostLaunchTask(alloc, *const Launch.Compound, compound, tasks, pushfn);
         },
     }
     // not even sure if returning runner interface makes sense...
@@ -103,12 +367,13 @@ fn runPreLaunchTask(
     T: type,
     launchdata: T,
     tasks: ?Task.TaskJson,
-    createviewprocessfn: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
-    pushfn: utils.PushFnProto,
-) !void {
+    createviewprocessfn: *const UiFunctions.NotifyNewProcessFn,
+    pushfn: *const UiFunctions.PushBytesFn,
+) !?std.process.Child {
     if (launchdata.preLaunchTask != null) {
-        try findRunTask(alloc, launchdata.preLaunchTask.?, tasks, createviewprocessfn, pushfn);
+        return try findRunTask(alloc, launchdata.preLaunchTask.?, tasks, createviewprocessfn, pushfn);
     }
+    return null;
 }
 
 fn runPostLaunchTask(
@@ -116,37 +381,42 @@ fn runPostLaunchTask(
     T: type,
     launchdata: T,
     tasks: ?Task.TaskJson,
-    pushfn: utils.PushFnProto,
-) !void {
+    pushfn: *const UiFunctions.PushBytesFn,
+) !?std.process.Child {
     if (launchdata.postDebugTask != null) {
-        try findRunTask(alloc, launchdata.postDebugTask.?, tasks, null, pushfn);
+        return try findRunTask(alloc, launchdata.postDebugTask.?, tasks, null, pushfn);
     }
+    return null;
 }
 
 fn findRunTask(
     alloc: std.mem.Allocator,
     taskname: []const u8,
     tasks: ?Task.TaskJson,
-    createviewprocessfn: ?fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
-    pushfn: utils.PushFnProto,
-) !void {
+    createviewprocessfn: ?*const UiFunctions.NotifyNewProcessFn,
+    pushfn: *const utils.PushFnProto,
+) !?std.process.Child {
     if (tasks != null) {
         if (tasks.?.find_by_label(taskname)) |task| {
+            var id: uuid.UUID = undefined;
             if (createviewprocessfn) |create_fn| {
-                try create_fn(alloc, taskname);
+                id = try create_fn(alloc, taskname);
+            } else {
+                id = uuid.newV4();
             }
-            try task.run_task(alloc, pushfn);
+            return try task.run_task(alloc, id, pushfn);
         }
     }
+    return null;
 }
 
 fn runRunnerType(
     alloc: std.mem.Allocator,
     runtype: RunnerType,
     config: *const Launch.Configuration,
-    runnerif: *Runner,
-    createviewprocessfn: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
-    pushfn: utils.PushFnProto,
+    runnerif: *RunnerContext,
+    createviewprocessfn: *const UiFunctions.NotifyNewProcessFn,
+    pushfn: *const UiFunctions.PushBytesFn,
 ) !void {
     switch (runtype) {
         .debugpy => {
@@ -169,9 +439,9 @@ fn runRunnerTypeNonBlocking(
     alloc: std.mem.Allocator,
     runtype: RunnerType,
     config: *const Launch.Configuration,
-    runnerif: *Runner,
-    createviewprocessfn: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
-    pushfn: utils.PushFnProto,
+    runnerif: *RunnerContext,
+    createviewprocessfn: *const UiFunctions.NotifyNewProcessFn,
+    pushfn: *const UiFunctions.PushBytesFn,
 ) !std.process.Child {
     switch (runtype) {
         .debugpy => {

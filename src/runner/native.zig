@@ -1,14 +1,14 @@
 const std = @import("std");
 const utils = @import("utils");
 const runner = @import("runner.zig");
-const launch = @import("../config/launch.zig");
+const launch = @import("config").Launch;
 
 pub fn run(
     alloc: std.mem.Allocator,
-    pushfn: utils.PushFnProto,
+    pushfn: *const utils.PushFnProto,
     config: *const launch.Configuration,
-    _: *runner.Runner,
-    createprocessview: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
+    _: *runner.RunnerContext,
+    createprocessview: *const runner.UiFunctions.NotifyNewProcessFn,
 ) !void {
     var envmap: ?std.process.EnvMap = null;
     if (config.env) |envs| {
@@ -22,12 +22,12 @@ pub fn run(
 
     if (config.program) |*program| {
         if (config.args) |*args| {
-            try createprocessview(alloc, program.*);
-            return try run_native(alloc, pushfn, program.*, args.*, envmap);
+            const id = try createprocessview(alloc, program.*);
+            return try run_native(alloc, pushfn, id, program.*, args.*, envmap);
         } else {
             const empty: []const []const u8 = &[_][]const u8{};
-            try createprocessview(alloc, program.*);
-            return try run_native(alloc, pushfn, program.*, empty, envmap);
+            const id = try createprocessview(alloc, program.*);
+            return try run_native(alloc, pushfn, id, program.*, empty, envmap);
         }
     } else {
         return error.MissingConfigurationFields;
@@ -36,10 +36,10 @@ pub fn run(
 
 pub fn runNonBlocking(
     alloc: std.mem.Allocator,
-    pushfn: utils.PushFnProto,
+    pushfn: *const utils.PushFnProto,
     config: *const launch.Configuration,
-    _: *runner.Runner,
-    createprocessview: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
+    _: *runner.RunnerContext,
+    createprocessview: *const runner.UiFunctions.NotifyNewProcessFn,
 ) !std.process.Child {
     var envmap: ?std.process.EnvMap = null;
     if (config.env) |envs| {
@@ -53,12 +53,12 @@ pub fn runNonBlocking(
 
     if (config.program) |*program| {
         if (config.args) |*args| {
-            try createprocessview(alloc, program.*);
-            return try run_native_nowait(alloc, pushfn, program.*, args.*, envmap);
+            const id = try createprocessview(alloc, program.*);
+            return try run_native_nowait(alloc, pushfn, id, program.*, args.*, envmap);
         } else {
             const empty: []const []const u8 = &[_][]const u8{};
-            try createprocessview(alloc, program.*);
-            return try run_native_nowait(alloc, pushfn, program.*, empty, envmap);
+            const id = try createprocessview(alloc, program.*);
+            return try run_native_nowait(alloc, pushfn, id, program.*, empty, envmap);
         }
     } else {
         return error.MissingConfigurationFields;
@@ -67,7 +67,8 @@ pub fn runNonBlocking(
 
 fn run_native_nowait(
     allocator: std.mem.Allocator,
-    pushfn: utils.PushFnProto,
+    pushfn: *const utils.PushFnProto,
+    id: utils.uuid.UUID,
     program: []const u8,
     args: []const []const u8,
     envs: ?std.process.EnvMap,
@@ -90,13 +91,14 @@ fn run_native_nowait(
     try child.spawn();
     //std.debug.print("Spawning child process: {d}\n", .{child.id});
 
-    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, program });
+    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, id });
     return child;
 }
 
 fn run_native(
     allocator: std.mem.Allocator,
-    pushfn: utils.PushFnProto,
+    pushfn: *const utils.PushFnProto,
+    id: utils.uuid.UUID,
     program: []const u8,
     args: []const []const u8,
     envs: ?std.process.EnvMap,
@@ -120,7 +122,7 @@ fn run_native(
         return e;
     };
 
-    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, program });
+    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, id });
 
     _ = child.wait() catch |e| {
         //std.debug.print("Waiting for child {any} failed.\n", .{e});

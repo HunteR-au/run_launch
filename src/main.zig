@@ -2,11 +2,14 @@ const std = @import("std");
 const clap = @import("clap");
 
 const utils = @import("utils");
-const Launch = @import("config/launch.zig");
-const Task = @import("config/task.zig");
+const config_ = @import("config");
+const Launch = config_.Launch;
+const Task = config_.Task;
+//const Launch = @import("config/launch.zig");
+//const Task = @import("config/task.zig");
 const uiview = @import("ui/uiview.zig");
 const tui = @import("tui");
-const runner = @import("runner/runner.zig");
+const runner = @import("runner");
 
 const ui_debug = @import("debug_ui");
 
@@ -61,11 +64,11 @@ pub fn main() !void {
     }
 
     var tasks: ?Task.TaskJson = null;
-    defer {
-        if (tasks) |t| {
-            t.deinit();
-        }
-    }
+    //defer {
+    //    if (tasks) |t| {
+    //        t.deinit();
+    //    }
+    //}
     if (res.args.tasks) |tasks_filepath| {
         tasks = try Task.TaskJson.init(allocator);
         try tasks.?.parse_tasks(tasks_filepath);
@@ -75,36 +78,64 @@ pub fn main() !void {
     const launchPath = res.positionals[0].?;
     const taskNameToRun: []const u8 = res.positionals[1].?;
 
-    const launchdata = try Launch.parse_json(allocator, launchPath);
-    defer launchdata.deinit(allocator);
+    //const launchdata = try Launch.parse_json(allocator, launchPath);
+    //defer launchdata.deinit(allocator);
+
+    var executor = try runner.ConfiguredRunner.init(
+        allocator,
+        try Launch.parse_json(allocator, launchPath),
+        tasks,
+        .{
+            .notifyNewProcess = &tui.createProcessView,
+            .pushBytes = &tui.pushLogging,
+        },
+    );
+    defer executor.deinit();
 
     if (res.args.@"web-ui" != 0) {
         try uiview.setupWebUI(allocator);
     } else {
-        try tui.start_tui(allocator);
+        try tui.start_tui(allocator, executor);
     }
 
     try stdout.print("first positional arg: {s}\n", .{res.positionals[0].?});
-    try stdout.print("version: {s}\n", .{launchdata.version});
-    try stdout.print("first config name: {?s}\n", .{launchdata.configurations[0].name});
+    try stdout.print("version: {s}\n", .{executor.config.version});
+    try stdout.print("first config name: {?s}\n", .{executor.config.configurations[0].name});
 
-    //_ = taskNameToRun;
+    var pre_handle: ?runner.WorkHandle = null;
+    var run_handle: ?runner.WorkHandle = null;
+    var post_handle: ?runner.WorkHandle = null;
+
+    defer if (pre_handle) |*h| h.deinit();
+    defer if (run_handle) |*h| h.deinit();
+    defer if (post_handle) |*h| h.deinit();
+
     if (res.args.@"web-ui" != 0) {
-        _ = try runner.run(allocator, taskNameToRun, launchdata, tasks, uiview.createProcessView, uiview.pushLogging);
+        // TODO: this is currently broken as pushLogging now uses a uuid rather than a processname
+        //_ = try runner.run(allocator, taskNameToRun, executor.config, tasks, uiview.createProcessView, uiview.pushLogging);
     } else {
         if (@import("builtin").mode == .Debug) {
             try ui_debug.start_debuginfo(allocator, tui.createProcessView, tui.pushLogging);
         }
-        _ = try runner.run(allocator, taskNameToRun, launchdata, tasks, tui.createProcessView, tui.pushLogging);
+        // Currently waiting will cause the pipes to be killed before being drained properly
+        pre_handle = try executor.runPreTasks(taskNameToRun, .nonBlocking);
+        run_handle = try executor.run(taskNameToRun, .nonBlocking);
+
+        //_ = try runner.run(allocator, taskNameToRun, executor.config, tasks, tui.createProcessView, tui.pushLogging);
     }
 
     if (res.args.@"web-ui" != 0) {
         uiview.closeWebUI();
     } else {
+        tui.waitForTUIClose();
+
         if (@import("builtin").mode == .Debug) {
             ui_debug.stop_debuginfo();
         }
-        tui.stop_tui();
+
+        try executor.killAll();
+        post_handle = try executor.runPostTasks(taskNameToRun, .blocking);
+        //tui.stop_tui();
     }
 
     // Required to push buffered output to the terminal
@@ -150,9 +181,6 @@ pub fn main() !void {
 // TODO: tasks
 // TODO: tasks - problemMatcher - pretty complex data and logic...
 // TODO: make the main thread tear down if webui clicks exit
-//
-// TODO: try webview-zig
-// TODO: for tui mode try - libvaxis
 
 // TODO: BUG - current settings don't apply to non-active outputs (need to refresh)
 // TODO: BUG - there is an extra count in the last fold that shouldn't be there
