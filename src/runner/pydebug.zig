@@ -1,8 +1,11 @@
 const std = @import("std");
 const utils = @import("utils");
 const runner = @import("runner.zig");
-const launch = @import("config").Launch;
+const launch_ = @import("config");
 const builtin = @import("builtin");
+
+const Launch = launch_.Launch;
+const LaunchConfiguration = launch_.LaunchConfiguration;
 
 const python_default_path = switch (builtin.target.os.tag) {
     .windows => "py",
@@ -12,7 +15,7 @@ const python_default_path = switch (builtin.target.os.tag) {
 pub fn run(
     alloc: std.mem.Allocator,
     pushfn: *const utils.PushFnProto,
-    config: *const launch.Configuration,
+    config: *const LaunchConfiguration,
     _: *runner.RunnerContext,
     createprocessview: *const runner.UiFunctions.NotifyNewProcessFn,
 ) !void {
@@ -53,7 +56,7 @@ pub fn run(
 pub fn runNonBlocking(
     alloc: std.mem.Allocator,
     pushfn: *const utils.PushFnProto,
-    config: *const launch.Configuration,
+    config: *const LaunchConfiguration,
     _: *runner.RunnerContext,
     createprocessview: *const runner.UiFunctions.NotifyNewProcessFn,
 ) !std.process.Child {
@@ -96,7 +99,7 @@ fn run_python_script_nowait(
     allocator: std.mem.Allocator,
     pushfn: *const utils.PushFnProto,
     id: utils.uuid.UUID,
-    _: *const launch.Configuration,
+    _: *const LaunchConfiguration,
     script: []const u8,
     args: []const []const u8,
     envs: ?std.process.EnvMap,
@@ -114,6 +117,7 @@ fn run_python_script_nowait(
     var child = std.process.Child.init(argv, allocator);
     child.stdout_behavior = std.process.Child.StdIo.Pipe;
     child.stderr_behavior = std.process.Child.StdIo.Pipe;
+    child.stdin_behavior = .Ignore;
     if (envs) |*e| {
         child.env_map = e;
     }
@@ -130,7 +134,7 @@ fn run_python_script(
     allocator: std.mem.Allocator,
     pushfn: *const utils.PushFnProto,
     id: utils.uuid.UUID,
-    _: *const launch.Configuration,
+    _: *const LaunchConfiguration,
     script: []const u8,
     args: []const []const u8,
     envs: ?std.process.EnvMap,
@@ -148,6 +152,7 @@ fn run_python_script(
     var child = std.process.Child.init(argv, allocator);
     child.stdout_behavior = std.process.Child.StdIo.Pipe;
     child.stderr_behavior = std.process.Child.StdIo.Pipe;
+    child.stdin_behavior = .Ignore;
     if (envs) |*e| {
         child.env_map = e;
     }
@@ -184,7 +189,7 @@ pub fn run_python_module_nowait(
     allocator: std.mem.Allocator,
     pushfn: *const utils.PushFnProto,
     id: utils.uuid.UUID,
-    config: *const launch.Configuration,
+    config: *const LaunchConfiguration,
     module: []const u8,
     args: []const []const u8,
     envs: ?std.process.EnvMap,
@@ -207,6 +212,7 @@ pub fn run_python_module_nowait(
     var child = std.process.Child.init(argv, allocator);
     child.stdout_behavior = std.process.Child.StdIo.Pipe;
     child.stderr_behavior = std.process.Child.StdIo.Pipe;
+    child.stdin_behavior = .Ignore;
     if (envs) |*e| {
         child.env_map = e;
     }
@@ -223,7 +229,7 @@ pub fn run_python_module(
     allocator: std.mem.Allocator,
     pushfn: *const utils.PushFnProto,
     id: utils.uuid.UUID,
-    config: *const launch.Configuration,
+    config: *const LaunchConfiguration,
     module: []const u8,
     args: []const []const u8,
     envs: ?std.process.EnvMap,
@@ -246,6 +252,7 @@ pub fn run_python_module(
     var child = std.process.Child.init(argv, allocator);
     child.stdout_behavior = std.process.Child.StdIo.Pipe;
     child.stderr_behavior = std.process.Child.StdIo.Pipe;
+    child.stdin_behavior = .Ignore;
     if (envs) |*e| {
         child.env_map = e;
     }

@@ -17,8 +17,32 @@ pub const Task = struct {
     presentation: ?TaskPresentation = null,
     problemMatcher: ?[]const u8 = null,
 
+    pub fn deinit(self: *Task, alloc: std.mem.Allocator) void {
+        std.debug.print("Task:deinit()\n", .{});
+        if (self.command) |p| alloc.free(p);
+        if (self.group) |p| alloc.free(p);
+        if (self.label) |p| alloc.free(p);
+        if (self.problemMatcher) |p| alloc.free(p);
+        if (self.type) |p| alloc.free(p);
+        if (self.args) |args| {
+            for (args) |arg| alloc.free(arg);
+            alloc.free(args);
+        }
+        if (self.presentation) |presentation| {
+            if (presentation.reveal) |reveal| {
+                alloc.free(reveal);
+            }
+        }
+    }
+
     pub fn run_task(self: *const Task, allocator: std.mem.Allocator, id: uuid.UUID, pushfn: *const utils.PushFnProto) !std.process.Child {
-        var argv: [][]const u8 = try allocator.alloc([]const u8, self.args.?.len + 1);
+        var argv: [][]const u8 = undefined;
+        if (self.args != null) {
+            argv = try allocator.alloc([]const u8, self.args.?.len + 1);
+        } else {
+            argv = try allocator.alloc([]const u8, 1);
+        }
+
         defer allocator.free(argv);
         argv[0] = self.command.?;
         if (self.args) |args| {
@@ -31,11 +55,13 @@ pub const Task = struct {
 
         child.stdout_behavior = std.process.Child.StdIo.Pipe;
         child.stderr_behavior = std.process.Child.StdIo.Pipe;
+        child.stdin_behavior = .Ignore;
         child.spawn() catch |e| {
             //std.debug.print("Spawning task {any} failed.\n", .{e});
             return e;
         };
 
+        // TODO: either pass child OR return it: DON"T DO BOTH WITHOUT MUTEX
         _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, id });
 
         // TODO: BUG BUG BUG - child.wait will clean up and remove pipes. We probably only want to remove pipes once process ends AND
@@ -51,6 +77,36 @@ pub const Task = struct {
         //    return e;
         //};
         return child;
+    }
+};
+
+pub const Tasks = struct {
+    tasks: ?[]Task,
+
+    pub fn init() Tasks {
+        return .{ .tasks = null };
+    }
+
+    pub fn deinit(self: *Tasks, alloc: std.mem.Allocator) void {
+        if (self.tasks) |*tasks| {
+            for (tasks.*) |*task| {
+                task.deinit(alloc);
+            }
+            alloc.free(tasks.*);
+        }
+    }
+
+    pub fn find_by_label(self: *const Tasks, label: []const u8) ?Task {
+        std.debug.print("find_by_label:\n", .{});
+        if (self.tasks) |tasks| {
+            std.debug.print("HELLO\n", .{});
+            return for (tasks) |*task| {
+                std.debug.print("find_by_label: {s} : {s}\n", .{ label, task.label.? });
+                if (std.mem.eql(u8, label, task.label.?)) {
+                    break task.*;
+                }
+            } else null;
+        } else return null;
     }
 };
 
@@ -96,7 +152,7 @@ pub const TaskJson = struct {
         var root = parsed.value;
 
         const version_str = root.object.get("version").?.string;
-        const versioncopy = try copyAndAttemptExand(alloc, version_str);
+        const versioncopy = try copyAndAttemptExpand(alloc, version_str);
         errdefer alloc.free(versioncopy);
 
         self.version = versioncopy;
@@ -115,7 +171,7 @@ pub const TaskJson = struct {
                 task_node.object.get("command").?.string,
             };
             inline for (fields, 0..) |fieldname, j| {
-                @field(tasks[i], fieldname) = try copyAndAttemptExand(alloc, strings[j]);
+                @field(tasks[i], fieldname) = try copyAndAttemptExpand(alloc, strings[j]);
                 errdefer if (@field(tasks[i], fieldname)) |x| alloc.free(x);
             }
 
@@ -124,12 +180,12 @@ pub const TaskJson = struct {
             const problemMatcher_str = task_node.object.get("problemMatcher");
 
             if (group_str) |s| {
-                tasks[i].group = try copyAndAttemptExand(alloc, s.string);
+                tasks[i].group = try copyAndAttemptExpand(alloc, s.string);
                 errdefer alloc.free(tasks[i].group.?);
             } else tasks[i].group = null;
 
             if (problemMatcher_str) |s| {
-                tasks[i].problemMatcher = try copyAndAttemptExand(alloc, s.string);
+                tasks[i].problemMatcher = try copyAndAttemptExpand(alloc, s.string);
                 errdefer alloc.free(tasks[i].problemMatcher.?);
             } else tasks[i].problemMatcher = null;
 
@@ -145,7 +201,7 @@ pub const TaskJson = struct {
     }
 };
 
-fn copyAndAttemptExand(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+fn copyAndAttemptExpand(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     return expand.expand_string(alloc, input) catch |err| switch (err) {
         expand.ExpandErrors.NoExpansionFound => {
             return try alloc.dupe(u8, input);

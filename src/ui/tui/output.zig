@@ -5,7 +5,7 @@ const debug_ui = @import("debug_ui");
 
 const process_buffer_mod = @import("pipeline/processbuffer.zig");
 const search = @import("pipeline/search.zig");
-const cmd_mod = @import("cmd.zig");
+const cmd_mod = @import("cmd/cmd.zig");
 const transforms = @import("pipeline/transforms.zig");
 
 // ui data structures
@@ -109,18 +109,66 @@ is_focused: bool = false,
 style_list: StyleList,
 style_map: StyleMap,
 
-const UnfoldHandlerData = .{ .event_str = "unfold", .handle = handleUnfoldCmd };
-const FoldHandlerData = .{ .event_str = "fold", .handle = handleFoldCmd };
-const PruneHandlerData = .{ .event_str = "prune", .handle = handlePruneCmd };
-const UnreplaceHandlerData = .{ .event_str = "unreplace", .handle = handleUnreplaceCmd };
-const ReplaceHandlerData = .{ .event_str = "replace", .handle = handleReplaceCmd };
-const FindHandlerData = .{ .event_str = "find", .handle = handleFindCmd };
-const NextHandlerData = .{ .event_str = "next", .handle = handleFindNextCmd };
-const PrevHandlerData = .{ .event_str = "prev", .handle = handleFindPrevCmd };
-const JumpHandlerData = .{ .event_str = "j", .handle = handleJumpCmd };
-const InfoHandlerData = .{ .event_str = "s", .handle = handleInfoCmd };
-const UncolorHandlerData = .{ .event_str = "uncolor", .handle = handleUncolorCmd };
-const ColorHandlerData = .{ .event_str = "color", .handle = handleColorCmd };
+const UnfoldHandlerData = .{
+    .event_str = "unfold",
+    .arg_description = null,
+    .handle = handleUnfoldCmd,
+};
+const FoldHandlerData = .{
+    .event_str = "fold",
+    .arg_description = "str1 str2 ... strn",
+    .handle = handleFoldCmd,
+};
+const PruneHandlerData = .{
+    .event_str = "prune",
+    .arg_description = "str1 str2 ... strn",
+    .handle = handlePruneCmd,
+};
+const UnreplaceHandlerData = .{
+    .event_str = "unreplace",
+    .arg_description = null,
+    .handle = handleUnreplaceCmd,
+};
+const ReplaceHandlerData = .{
+    .event_str = "replace",
+    .arg_description = "{str1 str2} ... {strn-1 strn}",
+    .handle = handleReplaceCmd,
+};
+const FindHandlerData = .{
+    .event_str = "find",
+    .arg_description = "str",
+    .handle = handleFindCmd,
+};
+const NextHandlerData = .{
+    .event_str = "next",
+    .arg_description = null,
+    .handle = handleFindNextCmd,
+};
+const PrevHandlerData = .{
+    .event_str = "prev",
+    .arg_description = null,
+    .handle = handleFindPrevCmd,
+};
+const JumpHandlerData = .{
+    .event_str = "j",
+    .arg_description = "str",
+    .handle = handleJumpCmd,
+};
+const InfoHandlerData = .{
+    .event_str = "s",
+    .arg_description = null,
+    .handle = handleInfoCmd,
+};
+const UncolorHandlerData = .{
+    .event_str = "uncolor",
+    .arg_description = null,
+    .handle = handleUncolorCmd,
+};
+const ColorHandlerData = .{
+    .event_str = "color",
+    .arg_description = "pattern fg:color:bg:color:line",
+    .handle = handleColorCmd,
+};
 
 pub fn init(alloc: std.mem.Allocator, process_buf: *ProcessBuffer) !Output {
     return .{
@@ -891,6 +939,7 @@ pub fn subscribeHandlersToCmd(self: *Output, cmd: *Cmd) !void {
     inline for (handler_data) |data| {
         const handler: Handler = .{
             .event_str = data.event_str,
+            .arg_description = data.arg_description,
             .handle = data.handle,
             .listener = self,
         };

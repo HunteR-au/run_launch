@@ -4,6 +4,7 @@ const expand = @import("expand.zig");
 
 const EnvTuple = utils.EnvTuple;
 
+// TODO: redo the configuration
 pub const Configuration = struct {
     name: ?[]const u8 = null, // mandatory
     type: ?[]const u8 = null, // mandatory
@@ -22,9 +23,44 @@ pub const Configuration = struct {
         host: ?[]const u8 = null,
         port: u16 = 0,
     } = .{},
+
+    pub fn deinit(self: *Configuration, alloc: std.mem.Allocator) void {
+        if (self.name) |p| alloc.free(p);
+        if (self.type) |p| alloc.free(p);
+        if (self.request) |p| alloc.free(p);
+        if (self.consoleTitle) |p| alloc.free(p);
+        if (self.module) |p| alloc.free(p);
+        if (self.program) |p| alloc.free(p);
+        if (self.console) |p| alloc.free(p);
+        if (self.stopOnEntry) |p| alloc.free(p);
+        if (self.preLaunchTask) |p| alloc.free(p);
+        if (self.postDebugTask) |p| alloc.free(p);
+        if (self.envFile) |p| alloc.free(p);
+
+        if (self.connect.host) |p| alloc.free(p);
+
+        // Free args if it exists
+        if (self.args) |args| {
+            for (args) |*s| {
+                alloc.free(s.*);
+            }
+            alloc.free(args);
+        }
+        // Free env if it exists
+        if (self.env) |env| {
+            for (env) |*tuple| {
+                alloc.free(tuple.key);
+                alloc.free(tuple.val);
+            }
+            alloc.free(env);
+        }
+
+        // wipe fields to prevent accidental reuse
+        self.* = .{};
+    }
 };
 
-fn copyAndAttemptExand(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+fn copyAndAttemptExpand(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
     return expand.expand_string(alloc, input) catch |err| switch (err) {
         expand.ExpandErrors.NoExpansionFound => {
             return try alloc.dupe(u8, input);
@@ -40,19 +76,19 @@ pub const Compound = struct {
     postDebugTask: ?[]const u8 = null,
     stopAll: ?bool = null,
 
-    const CompoundParsingErrors = error{ NoNameField, NoConfigurationsField };
+    pub const CompoundParsingErrors = error{ NoNameField, NoConfigurationsField };
 
     pub fn init(allocator: std.mem.Allocator, compoundNode: std.json.Value) !Compound {
         var self = Compound{};
         const nameobj = compoundNode.object.get("name") orelse {
             return CompoundParsingErrors.NoNameField;
         };
-        self.name = try copyAndAttemptExand(allocator, nameobj.string);
+        self.name = try copyAndAttemptExpand(allocator, nameobj.string);
         errdefer allocator.free(self.name.?);
 
         const prelaunchtaskObj = compoundNode.object.get("preLaunchTask");
         if (prelaunchtaskObj) |obj| {
-            self.preLaunchTask = try copyAndAttemptExand(allocator, obj.string);
+            self.preLaunchTask = try copyAndAttemptExpand(allocator, obj.string);
             errdefer allocator.free(self.preLaunchTask.?);
         } else self.preLaunchTask = null;
 
@@ -67,7 +103,7 @@ pub const Compound = struct {
         self.configurations = try allocator.alloc([]const u8, configurationsObj.array.items.len);
         errdefer allocator.free(self.configurations.?);
         for (configurationsObj.array.items, 0..) |obj, i| {
-            self.configurations.?[i] = try copyAndAttemptExand(allocator, obj.string);
+            self.configurations.?[i] = try copyAndAttemptExpand(allocator, obj.string);
             errdefer allocator.free(self.configurations.?[i]);
         }
         return self;
@@ -105,7 +141,7 @@ pub const Launch = struct {
         var arena = std.heap.ArenaAllocator.init(alloc_gpa);
         errdefer arena.deinit();
 
-        const task = Launch{ .arena = arena, .configurations = .{}, .compound = null, .version = "" };
+        const task = Launch{ .arena = arena, .configurations = &.{}, .compounds = null, .version = "" };
         return task;
     }
 
@@ -143,34 +179,7 @@ pub const Launch = struct {
     pub fn deinit(self: *const Launch, allocator: std.mem.Allocator) void {
         if (self.*.configurations.len > 0) {
             for (self.*.configurations) |*i| {
-                // free each []const u8 in Configuration
-                inline for (@typeInfo(Configuration).@"struct".fields) |field| {
-                    switch (field.type) {
-                        ?[]const u8 => {
-                            if (@field(i.*, field.name)) |p| {
-                                allocator.free(p);
-                            }
-                        },
-                        else => {},
-                    }
-                }
-                if (i.connect.host) |p| allocator.free(p);
-
-                // Free args if it exists
-                if (i.args) |a| {
-                    for (a) |*s| {
-                        allocator.free(s.*);
-                    }
-                    allocator.free(a);
-                }
-                // Free env if it exists
-                if (i.env) |e| {
-                    for (e) |*tuple| {
-                        allocator.free(tuple.key);
-                        allocator.free(tuple.val);
-                    }
-                    allocator.free(e);
-                }
+                i.deinit(allocator);
             }
         }
 
@@ -186,83 +195,83 @@ pub const Launch = struct {
     }
 };
 
-pub fn parse_json(allocator: std.mem.Allocator, filepath: []const u8) !Launch {
-    var results: Launch = undefined;
+// pub fn parse_json(allocator: std.mem.Allocator, filepath: []const u8) !Launch {
+//     var results: Launch = undefined;
 
-    // Load the JSON data
-    const max_bytes = 1024 * 1024;
-    const data = try std.fs.cwd().readFileAlloc(allocator, filepath, max_bytes);
-    std.debug.print("\n{s}\n", .{data});
-    defer allocator.free(data);
+//     // Load the JSON data
+//     const max_bytes = 1024 * 1024;
+//     const data = try std.fs.cwd().readFileAlloc(allocator, filepath, max_bytes);
+//     std.debug.print("\n{s}\n", .{data});
+//     defer allocator.free(data);
 
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
-    defer parsed.deinit();
+//     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
+//     defer parsed.deinit();
 
-    var root = parsed.value;
+//     var root = parsed.value;
 
-    const version_str = root.object.get("version").?.string;
-    results.version = try allocator.dupe(u8, version_str);
-    errdefer allocator.free(results.version);
+//     const version_str = root.object.get("version").?.string;
+//     results.version = try allocator.dupe(u8, version_str);
+//     errdefer allocator.free(results.version);
 
-    const config = root.object.get("configurations").?;
-    if (config.array.items.len > 0) {
-        var allocated_configs: []Configuration = try allocator.alloc(Configuration, config.array.items.len);
+//     const config = root.object.get("configurations").?;
+//     if (config.array.items.len > 0) {
+//         var allocated_configs: []Configuration = try allocator.alloc(Configuration, config.array.items.len);
 
-        for (config.array.items, 0..) |item, i| {
-            // Need to initialize the fields
-            allocated_configs[i] = Configuration{};
+//         for (config.array.items, 0..) |item, i| {
+//             // Need to initialize the fields
+//             allocated_configs[i] = Configuration{};
 
-            // non-optional values: Allocate strings for field and free if anything goes wrong
-            const fields = comptime .{ "name", "type", "request" };
-            const strings = .{
-                item.object.get("name").?.string,
-                item.object.get("type").?.string,
-                item.object.get("request").?.string,
-            };
-            inline for (fields, 0..) |fieldname, j| {
-                @field(allocated_configs[i], fieldname) = try copyAndAttemptExand(allocator, strings[j]);
-                errdefer if (@field(allocated_configs[i], fieldname)) |x| allocator.free(x);
-            }
+//             // non-optional values: Allocate strings for field and free if anything goes wrong
+//             const fields = comptime .{ "name", "type", "request" };
+//             const strings = .{
+//                 item.object.get("name").?.string,
+//                 item.object.get("type").?.string,
+//                 item.object.get("request").?.string,
+//             };
+//             inline for (fields, 0..) |fieldname, j| {
+//                 @field(allocated_configs[i], fieldname) = try copyAndAttemptExpand(allocator, strings[j]);
+//                 errdefer if (@field(allocated_configs[i], fieldname)) |x| allocator.free(x);
+//             }
 
-            const optionalfields = comptime .{ "program", "module", "preLaunchTask", "postDebugTask", "consoleTitle", "console", "envFile" };
-            inline for (optionalfields) |fieldname| {
-                if (item.object.get(fieldname)) |value| {
-                    @field(allocated_configs[i], fieldname) = try copyAndAttemptExand(allocator, value.string);
-                }
-                errdefer {
-                    if (@field(allocated_configs[i], fieldname)) |p| allocator.free(p);
-                }
-            }
+//             const optionalfields = comptime .{ "program", "module", "preLaunchTask", "postDebugTask", "consoleTitle", "console", "envFile" };
+//             inline for (optionalfields) |fieldname| {
+//                 if (item.object.get(fieldname)) |value| {
+//                     @field(allocated_configs[i], fieldname) = try copyAndAttemptExpand(allocator, value.string);
+//                 }
+//                 errdefer {
+//                     if (@field(allocated_configs[i], fieldname)) |p| allocator.free(p);
+//                 }
+//             }
 
-            if (item.object.get("args")) |a| {
-                allocated_configs[i].args = try utils.parse_config_args(allocator, a.array);
-                // NOTE: no error defer - will cause mem bug - probably should create a deinit instead of writing the code here
-            }
+//             if (item.object.get("args")) |a| {
+//                 allocated_configs[i].args = try utils.parse_config_args(allocator, a.array);
+//                 // NOTE: no error defer - will cause mem bug - probably should create a deinit instead of writing the code here
+//             }
 
-            // Parse the env arguments if they are present
-            if (item.object.get("env")) |e| {
-                allocated_configs[i].env = try utils.parse_config_env(allocator, e.object);
-                // NOTE: no error defer - will cause mem bug - probably should create a deinit instead of writing the code here
-            }
+//             // Parse the env arguments if they are present
+//             if (item.object.get("env")) |e| {
+//                 allocated_configs[i].env = try utils.parse_config_env(allocator, e.object);
+//                 // NOTE: no error defer - will cause mem bug - probably should create a deinit instead of writing the code here
+//             }
 
-            if (item.object.get("connect")) |connect| {
-                const host_str = connect.object.get("host").?.string;
-                allocated_configs[i].connect.host = try copyAndAttemptExand(allocator, host_str);
-                errdefer if (allocated_configs[i].connect.host) |t| allocator.free(t);
-                allocated_configs[i].connect.port = @intCast(connect.object.get("port").?.integer);
-            }
-        }
-        results.configurations = allocated_configs;
-    }
+//             if (item.object.get("connect")) |connect| {
+//                 const host_str = connect.object.get("host").?.string;
+//                 allocated_configs[i].connect.host = try copyAndAttemptExpand(allocator, host_str);
+//                 errdefer if (allocated_configs[i].connect.host) |t| allocator.free(t);
+//                 allocated_configs[i].connect.port = @intCast(connect.object.get("port").?.integer);
+//             }
+//         }
+//         results.configurations = allocated_configs;
+//     }
 
-    if (root.object.get("compounds")) |compoundsObj| {
-        const compounds = try allocator.alloc(Compound, compoundsObj.array.items.len);
-        for (compoundsObj.array.items, 0..) |compoundObj, j| {
-            compounds[j] = try Compound.init(allocator, compoundObj);
-            errdefer compounds[j].deinit(allocator);
-        }
-        results.compounds = compounds;
-    } else results.compounds = null;
+//     if (root.object.get("compounds")) |compoundsObj| {
+//         const compounds = try allocator.alloc(Compound, compoundsObj.array.items.len);
+//         for (compoundsObj.array.items, 0..) |compoundObj, j| {
+//             compounds[j] = try Compound.init(allocator, compoundObj);
+//             errdefer compounds[j].deinit(allocator);
+//         }
+//         results.compounds = compounds;
+//     } else results.compounds = null;
 
-    return results;
-}
+//     return results;
+// }

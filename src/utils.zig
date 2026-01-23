@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const uuid = @import("utils/uuid.zig");
+pub const ringbuffers = @import("utils/ringbuffer.zig");
 
 pub const EnvTuple = struct {
     key: []u8,

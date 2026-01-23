@@ -399,7 +399,7 @@ pub const OutputWidget = struct {
         try self.rendered_text_offset_at_row_start.put(
             self.alloc,
             row,
-            offset + self.window.startingOffset(),
+            offset + self.window.startingOffset(), // this line seg faults from callback :(
         );
     }
 

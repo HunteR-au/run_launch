@@ -58,6 +58,7 @@ pub fn build(b: *std.Build) !void {
     });
     const regex_dep = b.dependency("regex", .{});
     const clap_dep = b.dependency("clap", .{});
+    const yaml_dep = b.dependency("yaml", .{});
 
     // Modules
     const utils = b.createModule(.{ .root_source_file = b.path("src/utils.zig") });
@@ -72,6 +73,7 @@ pub fn build(b: *std.Build) !void {
     const regex = regex_dep.module("regex");
     const clap = clap_dep.module("clap");
     const webui = zig_webui_dep.module("webui");
+    const yaml = yaml_dep.module("yaml");
 
     // setup debug_ui
     debug_ui.addImport("utils", utils);
@@ -85,6 +87,7 @@ pub fn build(b: *std.Build) !void {
 
     // Setup config
     config.addImport("utils", utils);
+    config.addImport("yaml", yaml);
 
     // Setup tui
     tui.addImport("vaxis", vaxis);

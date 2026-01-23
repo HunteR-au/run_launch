@@ -3,8 +3,12 @@ const debugpy = @import("pydebug.zig");
 const native = @import("native.zig");
 const utils = @import("utils");
 const config_ = @import("config");
+
 const Launch = config_.Launch;
+const Compound = config_.Compound;
+const LaunchConfiguration = config_.LaunchConfiguration;
 const Task = config_.Task;
+const Tasks = config_.Tasks;
 
 const uuid = utils.uuid;
 
@@ -49,16 +53,16 @@ pub const ConfiguredRunner = struct {
     _alloc: std.mem.Allocator,
     _context: RunnerContext,
     _ui_funcs: UiFunctions,
-    config: Launch.Launch,
-    tasks: ?Task.TaskJson = null,
+    config: Launch,
+    tasks: ?Tasks = null,
     m: std.Thread.Mutex = std.Thread.Mutex{},
 
     const ExecType = enum { blocking, nonBlocking };
 
     pub fn init(
         alloc: std.mem.Allocator,
-        config: Launch.Launch,
-        tasks: ?Task.TaskJson,
+        config: Launch,
+        tasks: ?Tasks,
         comptime ui_funcs: UiFunctions,
     ) !*ConfiguredRunner {
         const runner = try alloc.create(ConfiguredRunner);
@@ -81,11 +85,16 @@ pub const ConfiguredRunner = struct {
         self.m.lock();
         defer self.m.unlock();
 
+        std.debug.print("ConfiguredRunner:deinit()\n", .{});
         self._context.children.deinit(self._alloc);
         self._context.threads.deinit(self._alloc);
         self.config.deinit(self._alloc);
         if (self.tasks) |*tasks| {
-            tasks.deinit();
+            if (tasks.tasks) |*tasks_| {
+                std.debug.print("HERE\n", .{});
+                for (tasks_.*) |*task| task.deinit(self._alloc);
+            }
+            tasks.deinit(self._alloc);
         }
         self._alloc.destroy(self);
     }
@@ -168,7 +177,6 @@ pub const ConfiguredRunner = struct {
     pub fn runPreTasks(self: *ConfiguredRunner, name: []const u8, exec_type: ExecType) !?WorkHandle {
         self.m.lock();
         defer self.m.unlock();
-
         const match = self.config.find_by_name(name) orelse {
             return error.NoConfigWithName;
         };
@@ -180,7 +188,7 @@ pub const ConfiguredRunner = struct {
                 // TODO - change this to be non-blocking
                 child = try runPreLaunchTask(
                     self._alloc,
-                    *const Launch.Configuration,
+                    *const LaunchConfiguration,
                     config,
                     self.tasks,
                     self._ui_funcs.notifyNewProcess,
@@ -191,7 +199,7 @@ pub const ConfiguredRunner = struct {
                 // TODO - change this to be non-blocking
                 child = try runPreLaunchTask(
                     self._alloc,
-                    *const Launch.Compound,
+                    *const Compound,
                     compound,
                     self.tasks,
                     self._ui_funcs.notifyNewProcess,
@@ -234,7 +242,7 @@ pub const ConfiguredRunner = struct {
                 // TODO - change this to be non-blocking
                 child = try runPostLaunchTask(
                     self._alloc,
-                    *const Launch.Configuration,
+                    *const LaunchConfiguration,
                     config,
                     self.tasks,
                     self._ui_funcs.pushBytes,
@@ -244,7 +252,7 @@ pub const ConfiguredRunner = struct {
                 // TODO - change this to be non-blocking
                 child = try runPostLaunchTask(
                     self._alloc,
-                    *const Launch.Compound,
+                    *const Compound,
                     compound,
                     self.tasks,
                     self._ui_funcs.pushBytes,
@@ -296,8 +304,8 @@ const RunnerType = enum {
 pub fn run(
     alloc: std.mem.Allocator,
     name: []const u8,
-    launchconfig: Launch.Launch,
-    tasks: ?Task.TaskJson,
+    launchconfig: Launch,
+    tasks: ?Tasks,
     createviewprocessfn: fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!void,
     pushfn: utils.PushFnProto,
 ) !RunnerContext {
@@ -313,7 +321,7 @@ pub fn run(
     switch (match) {
         .config => |config| {
             // check if there is a preLaunchTask to run
-            _ = try runPreLaunchTask(alloc, *const Launch.Configuration, config, tasks, createviewprocessfn, pushfn);
+            _ = try runPreLaunchTask(alloc, *const LaunchConfiguration, config, tasks, createviewprocessfn, pushfn);
             // if (config.preLaunchTask != null) {
             //     try findRunTask(alloc, config.preLaunchTask.?, tasks);
             // }
@@ -325,13 +333,13 @@ pub fn run(
             try runRunnerType(alloc, runnertype, config, &runnerif, createviewprocessfn, pushfn);
 
             // check if there is a post debug task to run
-            _ = try runPostLaunchTask(alloc, *const Launch.Configuration, config, tasks, pushfn);
+            _ = try runPostLaunchTask(alloc, *const LaunchConfiguration, config, tasks, pushfn);
             // if (config.postDebugTask != null) {
             //     try findRunTask(alloc, config.postDebugTask.?, tasks);
             // }
         },
         .compound => |compound| {
-            _ = try runPreLaunchTask(alloc, *const Launch.Compound, compound, tasks, createviewprocessfn, pushfn);
+            _ = try runPreLaunchTask(alloc, *const Compound, compound, tasks, createviewprocessfn, pushfn);
 
             for (compound.configurations.?) |configname| {
                 const configmatch = launchconfig.find_config_by_name(configname);
@@ -354,7 +362,7 @@ pub fn run(
                 _ = try child.wait();
             }
 
-            _ = try runPostLaunchTask(alloc, *const Launch.Compound, compound, tasks, pushfn);
+            _ = try runPostLaunchTask(alloc, *const Compound, compound, tasks, pushfn);
         },
     }
     // not even sure if returning runner interface makes sense...
@@ -366,7 +374,7 @@ fn runPreLaunchTask(
     alloc: std.mem.Allocator,
     T: type,
     launchdata: T,
-    tasks: ?Task.TaskJson,
+    tasks: ?Tasks,
     createviewprocessfn: *const UiFunctions.NotifyNewProcessFn,
     pushfn: *const UiFunctions.PushBytesFn,
 ) !?std.process.Child {
@@ -380,7 +388,7 @@ fn runPostLaunchTask(
     alloc: std.mem.Allocator,
     T: type,
     launchdata: T,
-    tasks: ?Task.TaskJson,
+    tasks: ?Tasks,
     pushfn: *const UiFunctions.PushBytesFn,
 ) !?std.process.Child {
     if (launchdata.postDebugTask != null) {
@@ -392,7 +400,7 @@ fn runPostLaunchTask(
 fn findRunTask(
     alloc: std.mem.Allocator,
     taskname: []const u8,
-    tasks: ?Task.TaskJson,
+    tasks: ?Tasks,
     createviewprocessfn: ?*const UiFunctions.NotifyNewProcessFn,
     pushfn: *const utils.PushFnProto,
 ) !?std.process.Child {
@@ -413,7 +421,7 @@ fn findRunTask(
 fn runRunnerType(
     alloc: std.mem.Allocator,
     runtype: RunnerType,
-    config: *const Launch.Configuration,
+    config: *const LaunchConfiguration,
     runnerif: *RunnerContext,
     createviewprocessfn: *const UiFunctions.NotifyNewProcessFn,
     pushfn: *const UiFunctions.PushBytesFn,
@@ -438,7 +446,7 @@ fn runRunnerType(
 fn runRunnerTypeNonBlocking(
     alloc: std.mem.Allocator,
     runtype: RunnerType,
-    config: *const Launch.Configuration,
+    config: *const LaunchConfiguration,
     runnerif: *RunnerContext,
     createviewprocessfn: *const UiFunctions.NotifyNewProcessFn,
     pushfn: *const UiFunctions.PushBytesFn,

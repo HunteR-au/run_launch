@@ -4,7 +4,8 @@ const utils = @import("utils");
 pub const vaxis = @import("vaxis");
 pub const uiconfig = @import("uiconfig");
 pub const view = @import("tui/view.zig");
-pub const cmdwidget = @import("tui/cmdwidget.zig");
+pub const cmdwidget = @import("tui/cmd/cmdwidget.zig");
+pub const Cmd = @import("tui/cmd/cmd.zig").Cmd;
 pub const help = @import("tui/help/help.zig");
 pub const runner = @import("runner");
 
@@ -39,7 +40,8 @@ const Model = struct {
     executor: *ConfiguredRunner,
     arena: std.heap.ArenaAllocator,
     _alloc: std.mem.Allocator,
-    cmd_view: cmdwidget.CmdWidget,
+    //cmd_view: cmdwidget.CmdWidget,
+    cmd: *Cmd,
     handlers_ids: std.ArrayList(cmdwidget.Cmd.HandleId),
     help_id: ?uuid.UUID = null,
     mode: ModelState = .main,
@@ -73,7 +75,7 @@ const Model = struct {
                 if (key.matches('/', .{})) {
                     if (self.mode == .main) {
                         self.mode = .cmdview;
-                        try ctx.requestFocus(self.cmd_view.widget());
+                        try ctx.requestFocus(self.cmd.view.widget());
                         return ctx.consumeAndRedraw();
                     }
                 } else if (key.matches(vaxis.Key.escape, .{})) {
@@ -123,7 +125,8 @@ const Model = struct {
             },
             .focus_in => {
                 if (self.mode == .cmdview) {
-                    try ctx.requestFocus(self.cmd_view.widget());
+                    try ctx.requestFocus(self.cmd.view.widget());
+                    //try ctx.requestFocus(self.cmd_view.widget());
                     return ctx.consumeEvent();
                 } else if (self.mode == .main) {
                     if (self.modelview.get_focused_output_widget()) |ow| {
@@ -315,7 +318,7 @@ const Model = struct {
             .main => {
                 children = try ctx.arena.alloc(vxfw.SubSurface, 1);
                 const output_child: vxfw.SubSurface = .{
-                    .origin = .{ .row = 1, .col = 1 },
+                    .origin = .{ .row = 0, .col = 0 },
                     .surface = try self.modelview.draw(ctx),
                 };
 
@@ -324,13 +327,13 @@ const Model = struct {
             .cmdview => {
                 children = try ctx.arena.alloc(vxfw.SubSurface, 2);
                 const output_child: vxfw.SubSurface = .{
-                    .origin = .{ .row = 1, .col = 1 },
+                    .origin = .{ .row = 0, .col = 0 },
                     .surface = try self.modelview.draw(ctx),
                 };
 
                 const cmdwidget_child: vxfw.SubSurface = .{
-                    .origin = .{ .row = max_size.height - 3, .col = 0 },
-                    .surface = try self.cmd_view.draw(ctx),
+                    .origin = .{ .row = 0, .col = 0 },
+                    .surface = try self.cmd.view.draw(ctx),
                 };
 
                 children[0] = output_child;
@@ -372,14 +375,14 @@ const Model = struct {
                 .handle = data.handle,
                 .listener = self,
             };
-            const id = try self.cmd_view.cmd.addHandler(handler);
+            const id = try self.cmd.addHandler(handler);
             try self.handlers_ids.append(self._alloc, id);
         }
     }
 
     pub fn unsubscribeHandlersFromCmd(self: *Model) void {
         for (self.handlers_ids.items) |id| {
-            self.cmd_view.cmd.removeHandler(id);
+            self.cmd.removeHandler(id);
         }
         self.handlers_ids.clearAndFree(self._alloc);
     }
@@ -399,6 +402,10 @@ fn run_tui(alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner) !void {
     app = try vxfw.App.init(alloc);
     defer app.deinit();
 
+    if (builtin.target.os.tag == .windows) {
+        app.vx.enable_workarounds = true;
+    }
+
     app.vx.refresh = true;
 
     const model_view = try view.View.init(alloc);
@@ -407,7 +414,6 @@ fn run_tui(alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner) !void {
     var arena = std.heap.ArenaAllocator.init(alloc);
     const model_alloc = arena.allocator();
 
-    // TODO - I think its time the model has a init and deinit
     model = try alloc.create(Model);
     model.* = .{
         //.output_view = output_view,
@@ -418,7 +424,7 @@ fn run_tui(alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner) !void {
             .map = .{},
         },
         .executor = executor,
-        .cmd_view = try cmdwidget.CmdWidget.init(alloc),
+        .cmd = try .init(alloc),
         .arena = arena,
         ._alloc = model_alloc,
         .handlers_ids = try .initCapacity(model_alloc, 1),
@@ -569,7 +575,7 @@ pub fn createProcessView(alloc: std.mem.Allocator, processname: []const u8) std.
         }
 
         // Add a reference to the cmd
-        try p_output.output.subscribeHandlersToCmd(&model.cmd_view.cmd);
+        try p_output.output.subscribeHandlersToCmd(model.cmd);
 
         // create an outputview if none exist
         if (model.modelview.outputviews.items.len == 0) {
@@ -622,17 +628,18 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 
 // TODOs
 
-// fix the clean up management around processbuffers
+// historywidget - keep history scroll relative to bottom
+// - fix the clean up management around processbuffers
+// - I think its time the model has a init and deinit
 
 // stop using output names as a refernce and start using IDs
 
 // ADD reference to the executor to the TUI so that:
-//      - can call run on config names
+//      - can call run on config names (DONE)
 //      - can call run on custom commands
 //          - with features such as addding env or exec path
 //      - control running post tasks with UI still running
 
-// TODO make sure output commands only take effect on selected output
 // TODO Windows powershell has rendering errors...
 // TODO color title for selected outputview
 // TODO make tabs
@@ -641,10 +648,11 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 // TODO: dump buffers to disk
 // TODO: create a command to run another process
 
-// TODO: new config that uses yaml
-
 // BUGS:
+// CTRL+ENTER in the historywidget doesn't work
+// replace breaks color commands
 // ScrollBars now has a bug in handleCapture new_view_cl_start: u32 = @intFromFloat(@ceil(new_view_col_start_f))
+// fold can break updating the buffer somehow...
 
 // tasks child.wait() closes pipes
 // need to refactor the wait to not close pipes until process closed and piped emptied

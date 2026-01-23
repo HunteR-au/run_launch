@@ -1,12 +1,15 @@
 const std = @import("std");
 const utils = @import("utils");
 const runner = @import("runner.zig");
-const launch = @import("config").Launch;
+const launch_ = @import("config");
+
+const Launch = launch_.Launch;
+const LaunchConfiguration = launch_.LaunchConfiguration;
 
 pub fn run(
     alloc: std.mem.Allocator,
     pushfn: *const utils.PushFnProto,
-    config: *const launch.Configuration,
+    config: *const LaunchConfiguration,
     _: *runner.RunnerContext,
     createprocessview: *const runner.UiFunctions.NotifyNewProcessFn,
 ) !void {
@@ -37,7 +40,7 @@ pub fn run(
 pub fn runNonBlocking(
     alloc: std.mem.Allocator,
     pushfn: *const utils.PushFnProto,
-    config: *const launch.Configuration,
+    config: *const LaunchConfiguration,
     _: *runner.RunnerContext,
     createprocessview: *const runner.UiFunctions.NotifyNewProcessFn,
 ) !std.process.Child {
@@ -84,6 +87,7 @@ fn run_native_nowait(
     var child = std.process.Child.init(argv, allocator);
     child.stdout_behavior = std.process.Child.StdIo.Pipe;
     child.stderr_behavior = std.process.Child.StdIo.Pipe;
+    child.stdin_behavior = .Ignore;
     if (envs) |*e| {
         child.env_map = e;
     }
@@ -114,6 +118,7 @@ fn run_native(
     var child = std.process.Child.init(argv, allocator);
     child.stdout_behavior = std.process.Child.StdIo.Pipe;
     child.stderr_behavior = std.process.Child.StdIo.Pipe;
+    child.stdin_behavior = .Ignore;
     if (envs) |*e| {
         child.env_map = e;
     }

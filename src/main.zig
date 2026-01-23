@@ -5,6 +5,7 @@ const utils = @import("utils");
 const config_ = @import("config");
 const Launch = config_.Launch;
 const Task = config_.Task;
+const parseConfig = config_.parseConfig;
 //const Launch = @import("config/launch.zig");
 //const Task = @import("config/task.zig");
 const uiview = @import("ui/uiview.zig");
@@ -39,7 +40,7 @@ pub fn main() !void {
         \\-h, --help                    Display this help and exit
         \\-d, --dry-run                 Print out actions without executing them
         \\-w, --web-ui                  Render the web ui interface
-        \\-t, --tasks    <str>          The path to the tasks.json file
+        //\\-t, --tasks    <str>          The path to the tasks.json file
         \\<str>                         The path to the launch.json file
         \\<str>                         The configuration name to run
     );
@@ -63,16 +64,16 @@ pub fn main() !void {
         return RunLaunchErrors.BadPositionals;
     }
 
-    var tasks: ?Task.TaskJson = null;
+    //var tasks: ?Task.TaskJson = null;
     //defer {
     //    if (tasks) |t| {
     //        t.deinit();
     //    }
     //}
-    if (res.args.tasks) |tasks_filepath| {
-        tasks = try Task.TaskJson.init(allocator);
-        try tasks.?.parse_tasks(tasks_filepath);
-    }
+    //if (res.args.tasks) |tasks_filepath| {
+    //    tasks = try Task.TaskJson.init(allocator);
+    //    try tasks.?.parse_tasks(tasks_filepath);
+    //}
 
     // we have parsed what we need from the arguments...lets go!
     const launchPath = res.positionals[0].?;
@@ -81,10 +82,12 @@ pub fn main() !void {
     //const launchdata = try Launch.parse_json(allocator, launchPath);
     //defer launchdata.deinit(allocator);
 
+    // parse configuration
+    const config = try parseConfig(allocator, launchPath);
     var executor = try runner.ConfiguredRunner.init(
         allocator,
-        try Launch.parse_json(allocator, launchPath),
-        tasks,
+        config.launch,
+        config.tasks,
         .{
             .notifyNewProcess = &tui.createProcessView,
             .pushBytes = &tui.pushLogging,
