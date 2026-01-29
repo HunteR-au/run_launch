@@ -359,8 +359,6 @@ fn handleFindCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error
 
     if (!self.is_focused) return;
 
-    std.debug.print("lets find something...\n", .{});
-
     // parse the arguments
     const arguments = try utils.parseArgsLineWithQuoteGroups(alloc, args);
     defer {
@@ -565,7 +563,7 @@ fn createStyleFromArg(arg: []const u8) ?transforms.ColorPattern {
                 }
             } else if (std.mem.eql(u8, segment.?, "line") and !is_current_seg_first) {
                 // we need to parse this to make sure it is a valid
-                std.debug.print("print full line\n", .{});
+                std.log.debug("print full line\n", .{});
                 color_line = true;
                 continue :state .Empty;
             } else if (is_current_seg_first) {
@@ -973,11 +971,12 @@ test "folding text" {
     const alloc = testing.allocator;
 
     var process_buffer = try ProcessBuffer.init(alloc);
-    var output = Output.init(alloc, process_buffer);
+    var output = try Output.init(alloc, process_buffer);
     defer process_buffer.deinit();
     defer output.deinit();
 
-    try process_buffer.append(alloc,
+    std.debug.print("process_buffer.lastNewLine = {d}\n", .{process_buffer.lastNewLine});
+    try process_buffer.append(
         \\line 1: apples
         \\line 2: carrots
         \\line 3: carrots
@@ -985,18 +984,53 @@ test "folding text" {
         \\line 5: carrots
         \\line 6: apples
         \\line 7: carrots
+        \\
     );
+    std.debug.print("process_buffer.lastNewLine = {d}\n", .{process_buffer.lastNewLine});
+
+    // set focus to make sure the command works
+    output.is_focused = true;
 
     const fold_args = "apples";
     try Output.handleFoldCmd(fold_args, &output);
     const buffer = try output.copyBuffer(alloc);
     defer alloc.free(buffer);
 
+    std.debug.print("process_buffer.lastNewLine = {d}\n", .{process_buffer.lastNewLine});
+
     try testing.expectEqualStrings(
         \\line 1: apples
         \\line 4: apples
         \\line 6: apples
     , buffer);
+
+    // Add another line to be filtered
+    try process_buffer.append("line 8: carrots\n");
+    std.debug.print("process_buffer.lastNewLine = {d}\n", .{process_buffer.lastNewLine});
+
+    const buffer2 = try output.copyBuffer(alloc);
+    defer alloc.free(buffer2);
+
+    try testing.expectEqualStrings(
+        \\line 1: apples
+        \\line 4: apples
+        \\line 6: apples
+    , buffer2);
+
+    // BUG: might be due to lastNewLine not being updated....
+    // Add another line which should be included
+    try process_buffer.append("line 9: apples\n");
+    std.debug.print("process_buffer.lastNewLine = {d}\n", .{process_buffer.lastNewLine});
+
+    const buffer3 = try output.copyBuffer(alloc);
+    defer alloc.free(buffer3);
+
+    try testing.expectEqualStrings(
+        \\line 1: apples
+        \\line 4: apples
+        \\line 6: apples
+        \\line 9: apples
+    , buffer3);
 }
 
 // TODO test the color arg parsing
@@ -1009,11 +1043,11 @@ test "coloring text" {
     const alloc = testing.allocator;
 
     var process_buffer = try ProcessBuffer.init(alloc);
-    var output = Output.init(alloc, process_buffer);
+    var output = try Output.init(alloc, process_buffer);
     defer process_buffer.deinit();
     defer output.deinit();
 
-    try process_buffer.append(alloc,
+    try process_buffer.append(
         \\line 1: apples
         \\line 2: carrots
         \\line 3: carrots
@@ -1054,15 +1088,15 @@ test "coloring text" {
     }
 
     errdefer {
-        std.debug.print("expected...\n", .{});
+        std.log.debug("expected...\n", .{});
         var expected_it = expected_map.iterator();
         while (expected_it.next()) |entry| {
-            std.debug.print("map key: {d} value: {d}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+            std.log.debug("map key: {d} value: {d}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
         }
-        std.debug.print("actual...\n", .{});
+        std.log.debug("actual...\n", .{});
         var actual_it = output.style_map.iterator();
         while (actual_it.next()) |entry| {
-            std.debug.print("map key: {d} value: {d}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+            std.log.debug("map key: {d} value: {d}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
         }
     }
 

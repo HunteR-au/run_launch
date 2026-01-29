@@ -31,7 +31,7 @@ pub fn parseConfig(alloc: std.mem.Allocator, filepath: []const u8) !Configuratio
 
     const max_bytes = 1024 * 1024;
     const data = try std.fs.cwd().readFileAlloc(alloc, filepath, max_bytes);
-    std.debug.print("\n{s}\n", .{data});
+    std.log.debug("\n{s}\n", .{data});
     defer alloc.free(data);
 
     switch (config_type) {

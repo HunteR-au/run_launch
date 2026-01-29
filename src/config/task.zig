@@ -18,7 +18,6 @@ pub const Task = struct {
     problemMatcher: ?[]const u8 = null,
 
     pub fn deinit(self: *Task, alloc: std.mem.Allocator) void {
-        std.debug.print("Task:deinit()\n", .{});
         if (self.command) |p| alloc.free(p);
         if (self.group) |p| alloc.free(p);
         if (self.label) |p| alloc.free(p);
@@ -97,11 +96,10 @@ pub const Tasks = struct {
     }
 
     pub fn find_by_label(self: *const Tasks, label: []const u8) ?Task {
-        std.debug.print("find_by_label:\n", .{});
+        std.log.debug("find_by_label:\n", .{});
         if (self.tasks) |tasks| {
-            std.debug.print("HELLO\n", .{});
             return for (tasks) |*task| {
-                std.debug.print("find_by_label: {s} : {s}\n", .{ label, task.label.? });
+                std.log.debug("find_by_label: {s} : {s}\n", .{ label, task.label.? });
                 if (std.mem.eql(u8, label, task.label.?)) {
                     break task.*;
                 }
@@ -144,7 +142,7 @@ pub const TaskJson = struct {
         const max_bytes = 1024 * 1024;
         const data = try std.fs.cwd().readFileAlloc(self.arena.child_allocator, filepath, max_bytes);
         defer self.arena.child_allocator.free(data);
-        std.debug.print("\n{s}\n", .{data});
+        std.log.debug("{s}", .{data});
 
         var parsed = try std.json.parseFromSlice(std.json.Value, self.arena.child_allocator, data, .{});
         defer parsed.deinit();

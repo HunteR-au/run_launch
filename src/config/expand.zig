@@ -28,7 +28,7 @@ pub const ExpandErrors = error{
 // TODO: we should update this to ignore case!
 fn expansion_replace(alloc: std.mem.Allocator, input: []const u8, begin_idx: usize, end_idx: usize) ExpandErrors![]u8 {
     const token = input[begin_idx..end_idx];
-    std.debug.print("Token: {s}\n", .{token});
+    std.log.debug("Token: {s}\n", .{token});
 
     var list = try std.ArrayList(u8).initCapacity(alloc, 100);
     defer list.deinit(alloc);
@@ -41,9 +41,9 @@ fn expansion_replace(alloc: std.mem.Allocator, input: []const u8, begin_idx: usi
             try list.appendSlice(alloc, input[0 .. begin_idx - 2]);
             try list.appendSlice(alloc, value);
             try list.appendSlice(alloc, input[end_idx + 1 .. input.len]);
-            std.debug.print("result: {s}\n", .{input[0..begin_idx]});
-            std.debug.print("result: {s}\n", .{value});
-            std.debug.print("result: {s}\n", .{input[end_idx..input.len]});
+            std.log.debug("result: {s}\n", .{input[0..begin_idx]});
+            std.log.debug("result: {s}\n", .{value});
+            std.log.debug("result: {s}\n", .{input[end_idx..input.len]});
             return list.toOwnedSlice(alloc);
         } else |_| {}
     }
@@ -79,9 +79,9 @@ fn expansion_replace(alloc: std.mem.Allocator, input: []const u8, begin_idx: usi
             try list.appendSlice(alloc, input[0 .. begin_idx - 2]);
             try list.appendSlice(alloc, value);
             try list.appendSlice(alloc, input[end_idx + 1 .. input.len]);
-            std.debug.print("result: {s}\n", .{input[0..begin_idx]});
-            std.debug.print("result: {s}\n", .{value});
-            std.debug.print("result: {s}\n", .{input[end_idx..input.len]});
+            std.log.debug("result: {s}\n", .{input[0..begin_idx]});
+            std.log.debug("result: {s}\n", .{value});
+            std.log.debug("result: {s}\n", .{input[end_idx..input.len]});
             return list.toOwnedSlice(alloc);
         },
         else => {
@@ -98,10 +98,10 @@ pub fn expand_string(alloc: std.mem.Allocator, str: []const u8) ExpandErrors![]u
         const found = std.mem.indexOf(u8, str[start..str.len], needle);
         if (found) |rel_idx| {
             const abs_idx = start + rel_idx + needle_len;
-            std.debug.print("index of start = {d}\n", .{abs_idx});
+            std.log.debug("index of start = {d}\n", .{abs_idx});
             for (abs_idx..str.len) |idx| {
                 if (str[idx] == '}') {
-                    std.debug.print("index of end = {d}\n", .{idx});
+                    std.log.debug("index of end = {d}\n", .{idx});
                     // we found a match
                     // TODO: we should continue to look for more expansion strs
                     return try expansion_replace(alloc, str, abs_idx, idx);

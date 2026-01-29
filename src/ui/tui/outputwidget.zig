@@ -325,7 +325,6 @@ pub const OutputWidget = struct {
 
         // line is below
         if (line_num > last_rendered_line) {
-            std.debug.print("jump - going down\n", .{});
             self.removePendingLines();
             if (line_num != self.output.widget_ref.?.window.last_draw.process_buffer_num_lines) {
                 self.setStickyScroll(false);
@@ -338,7 +337,6 @@ pub const OutputWidget = struct {
 
         // line is above
         if (line_num < first_rendered_line) {
-            std.debug.print("jump - going up\n", .{});
             self.removePendingLines();
             self.setStickyScroll(false);
             self.moveOutputUpLines(first_rendered_line - line_num);
@@ -415,10 +413,13 @@ pub const OutputWidget = struct {
             .first => {
                 return self.rendered_text_offset_at_row_start.get(0) orelse
                     {
-                        std.debug.print("top_line: {d}\n", .{self.window.last_draw.top_line});
+                        // NOTE: I've obsered this being rendered where line 1 to 199 exists
+                        // in the map self.rendered_text_offset_at_row_start
+                        // but for somereason index 0 is missing... top_line was 1719
+                        std.log.debug("top_line: {d}\n", .{self.window.last_draw.top_line});
                         var it = self.rendered_text_offset_at_row_start.iterator();
                         while (it.next()) |e| {
-                            std.debug.print("{d} : {d}\n", .{ e.key_ptr.*, e.value_ptr.* });
+                            std.log.debug("{d} : {d}\n", .{ e.key_ptr.*, e.value_ptr.* });
                         }
                         return error.LineNotRendered;
                     };

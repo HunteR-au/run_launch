@@ -40,11 +40,11 @@ pub fn parseLaunch(alloc: std.mem.Allocator, yaml: Yaml) !Launch {
             launch.configurations = configs;
         },
         else => {
-            std.debug.print("'configurations' field is not a list\n", .{});
+            std.log.debug("'configurations' field is not a list\n", .{});
             return error.ParseFailure;
         },
     } else {
-        std.debug.print("No 'configurations' field\n", .{});
+        std.log.debug("No 'configurations' field\n", .{});
         return error.ParseFailure;
     }
 
@@ -66,7 +66,7 @@ pub fn parseLaunch(alloc: std.mem.Allocator, yaml: Yaml) !Launch {
             launch.compounds = compound_list;
         },
         else => {
-            std.debug.print("'configurations' field is not a list\n", .{});
+            std.log.debug("'configurations' field is not a list\n", .{});
             return error.ParseFailure;
         },
     };
@@ -103,7 +103,7 @@ pub fn parseTasks(alloc: std.mem.Allocator, yaml: Yaml) !?Tasks {
             tasks.tasks = task_array;
         },
         else => {
-            std.debug.print("'configurations' field is not a list\n", .{});
+            std.log.debug("'configurations' field is not a list\n", .{});
             return error.ParseFailure;
         },
     } else {

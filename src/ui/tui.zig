@@ -640,7 +640,6 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 //          - with features such as addding env or exec path
 //      - control running post tasks with UI still running
 
-// TODO Windows powershell has rendering errors...
 // TODO color title for selected outputview
 // TODO make tabs
 
@@ -649,6 +648,9 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 // TODO: create a command to run another process
 
 // BUGS:
+// jumping when folded crashes
+// jump to bottom breaks when folded
+
 // CTRL+ENTER in the historywidget doesn't work
 // replace breaks color commands
 // ScrollBars now has a bug in handleCapture new_view_cl_start: u32 = @intFromFloat(@ceil(new_view_col_start_f))

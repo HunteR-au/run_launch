@@ -48,7 +48,7 @@ pub fn getHelpString() []const u8 {
     \\
     \\      - Remove all string replacements
     \\
-    \\color fg:color:bg:color:line
+    \\color pattern fg:color:bg:color:line
     \\
     \\      - Color any regex matches, arguments are broken up by ":"
     \\          - {opt} bg following a color arg - colors the background

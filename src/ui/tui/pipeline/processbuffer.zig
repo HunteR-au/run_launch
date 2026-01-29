@@ -99,6 +99,8 @@ pub const ProcessBuffer = struct {
                 if (idx) |i| {
                     if (i <= self.lastNewLine) return;
                     const newlines = self.buffer.items[self.lastNewLine .. i + 1];
+                    // NOTE: if filter_lines is missing newline at the end it may be
+                    // problematic...
                     const filtered_lines = try self.pipeline.runPipeline(
                         self.alloc,
                         newlines,
@@ -140,6 +142,8 @@ pub const ProcessBuffer = struct {
     }
 
     fn reprocessPipeline(self: *ProcessBuffer) !void {
+        std.log.debug("ProcessBuffer:reprocessPipeline()", .{});
+
         self.filtered_newlines.clearRetainingCapacity();
         self.filtered_buffer.clearRetainingCapacity();
         self.lastNewLine = 0;
@@ -151,7 +155,7 @@ pub const ProcessBuffer = struct {
         self.m.lock();
         defer self.m.unlock();
 
-        //std.debug.print("ProcessBuffer:addFilter()\n", .{});
+        std.log.debug("ProcessBuffer:addFilter()", .{});
 
         try self.pipeline.appendFilter(filter);
         try self.reprocessPipeline();
@@ -160,6 +164,8 @@ pub const ProcessBuffer = struct {
     pub fn removeFilter(self: *ProcessBuffer, id: Filter.HandleId) void {
         self.m.lock();
         defer self.m.unlock();
+
+        std.log.debug("ProcessBuffer:removeFilter()", .{});
 
         const filter = self.pipeline.removeFilter(id);
         if (filter) |f| f.deinit();
@@ -172,6 +178,8 @@ pub const ProcessBuffer = struct {
         self.m.lock();
         defer self.m.unlock();
 
+        std.log.debug("ProcessBuffer:addReviewer()", .{});
+
         try self.pipeline.appendReviewer(reviewer);
 
         try self.reprocessPipeline();
@@ -180,6 +188,8 @@ pub const ProcessBuffer = struct {
     pub fn removeReviewer(self: *ProcessBuffer, id: Reviewer.HandleId) !void {
         self.m.lock();
         defer self.m.unlock();
+
+        std.log.debug("ProcessBuffer:removeReviewer()", .{});
 
         const reviewer = self.pipeline.reviewReviewer(id);
         if (reviewer) |r| r.deinit();

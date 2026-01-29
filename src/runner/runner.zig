@@ -85,13 +85,11 @@ pub const ConfiguredRunner = struct {
         self.m.lock();
         defer self.m.unlock();
 
-        std.debug.print("ConfiguredRunner:deinit()\n", .{});
         self._context.children.deinit(self._alloc);
         self._context.threads.deinit(self._alloc);
         self.config.deinit(self._alloc);
         if (self.tasks) |*tasks| {
             if (tasks.tasks) |*tasks_| {
-                std.debug.print("HERE\n", .{});
                 for (tasks_.*) |*task| task.deinit(self._alloc);
             }
             tasks.deinit(self._alloc);

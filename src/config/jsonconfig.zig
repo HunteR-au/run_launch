@@ -115,7 +115,7 @@ pub fn parseTasks(alloc: Alloc, root_object: JsonValue) !?Tasks {
             tasks.tasks = task_array;
         },
         else => {
-            std.debug.print("'configurations' field is not an array\n", .{});
+            std.log.debug("'configurations' field is not an array\n", .{});
             return error.ParseFailure;
         },
     } else {

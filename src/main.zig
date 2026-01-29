@@ -14,12 +14,61 @@ const runner = @import("runner");
 
 const ui_debug = @import("debug_ui");
 
+const builtin = @import("builtin");
+const debug = (builtin.mode == std.builtin.OptimizeMode.Debug);
+
 const vaxis = @import("dependencies/vaxis");
 
 const RunLaunchErrors = error{
     BadPositionals,
     NoConfigWithName,
 };
+
+var g_log_file: ?std.fs.File = null;
+var g_log_mutex = std.Thread.Mutex{};
+var g_log_buffer: [4096]u8 = undefined;
+var g_log_writer: std.fs.File.Writer = undefined;
+
+pub fn initLogger(path: []const u8) !void {
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    g_log_file = file;
+    g_log_writer = g_log_file.?.writer(&g_log_buffer);
+}
+
+pub fn deinitLogger() void {
+    if (g_log_file) |file| {
+        file.close();
+        g_log_file = null;
+    }
+}
+
+pub const std_options: std.Options = .{
+    .logFn = logFn,
+};
+
+pub fn logFn(
+    comptime level: std.log.Level,
+    comptime scope: @TypeOf(.EnumLiteral),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (g_log_file) |_| {
+        g_log_mutex.lock();
+        defer g_log_mutex.unlock();
+
+        var writer = &g_log_writer.interface;
+        writer.print("[{s}] [{s}] " ++ format ++ "\n", .{
+            @tagName(level),
+            @tagName(scope),
+        } ++ args) catch |e| {
+            std.debug.print("ERROR: {any}", .{e});
+        };
+
+        writer.flush() catch |e| {
+            std.debug.print("ERROR: {any}", .{e});
+        };
+    }
+}
 
 pub fn main() !void {
     var stdout_buffer: [1024]u8 = undefined;
@@ -29,6 +78,10 @@ pub fn main() !void {
     var stderr_buffer: [1024]u8 = undefined;
     var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
     _ = &stderr_writer.interface;
+
+    if (debug) {
+        try initLogger("logs.txt");
+    }
 
     //const writer = std.io.getStdOut().writer();
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -101,9 +154,9 @@ pub fn main() !void {
         try tui.start_tui(allocator, executor);
     }
 
-    try stdout.print("first positional arg: {s}\n", .{res.positionals[0].?});
-    try stdout.print("version: {s}\n", .{executor.config.version});
-    try stdout.print("first config name: {?s}\n", .{executor.config.configurations[0].name});
+    std.log.debug("first positional arg: {s}\n", .{res.positionals[0].?});
+    std.log.debug("version: {s}\n", .{executor.config.version});
+    std.log.debug("first config name: {?s}\n", .{executor.config.configurations[0].name});
 
     var pre_handle: ?runner.WorkHandle = null;
     var run_handle: ?runner.WorkHandle = null;
@@ -139,6 +192,10 @@ pub fn main() !void {
         try executor.killAll();
         post_handle = try executor.runPostTasks(taskNameToRun, .blocking);
         //tui.stop_tui();
+    }
+
+    if (debug) {
+        deinitLogger();
     }
 
     // Required to push buffered output to the terminal
