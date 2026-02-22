@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const utils = @import("utils");
 const helpers = @import("helpers.zig");
 const debug_ui = @import("debug_ui");
@@ -110,17 +111,17 @@ style_list: StyleList,
 style_map: StyleMap,
 
 const UnfoldHandlerData = .{
-    .event_str = "unfold",
+    .event_str = "unfilter",
     .arg_description = null,
     .handle = handleUnfoldCmd,
 };
 const FoldHandlerData = .{
-    .event_str = "fold",
+    .event_str = "keep",
     .arg_description = "str1 str2 ... strn",
     .handle = handleFoldCmd,
 };
 const PruneHandlerData = .{
-    .event_str = "prune",
+    .event_str = "hide",
     .arg_description = "str1 str2 ... strn",
     .handle = handlePruneCmd,
 };
@@ -321,6 +322,9 @@ fn handleReplaceCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Er
     reviewer_data.* = .{
         .replace_patterns = try replace_patterns.toOwnedSlice(alloc),
     };
+
+    // we need to recalculate the color styles
+    self.clearStyle();
 
     const filter = try Filter.init(self.arena.allocator(), reviewer_data, transforms.replace);
     try self.filter_ids.append(self._alloc, filter.id);
@@ -764,7 +768,7 @@ pub fn searchStr(self: *Output, search_str: []const u8, start_search_line: usize
         if (match) |*m| {
             // jump to the line containing the start of the match
             self.widget_ref.?.jump_output_to_line(
-                self.widget_ref.?.window.getLineFromOffset(m.lowerBound),
+                self.nonowned_process_buffer.filtered_buffer.getLineIndexFromOffset(m.lowerBound).?,
             ) catch return;
 
             // free previous search_info and save new one
@@ -803,7 +807,7 @@ pub fn searchNext(self: *Output) void {
         if (sinfo.iterator.next() catch return) |*match| {
             // jump to the line containing the start of the match
             self.widget_ref.?.jump_output_to_line(
-                self.widget_ref.?.window.getLineFromOffset(match.lowerBound),
+                self.nonowned_process_buffer.filtered_buffer.getLineIndexFromOffset(match.lowerBound).?,
             ) catch return;
 
             // unhighlight previous match
@@ -822,6 +826,9 @@ pub fn searchNext(self: *Output) void {
 
             // highlight new match
             self.updateStyle(&self.search_info.?.highlight_style, match.lowerBound, match.upperBound) catch return;
+        } else {
+            // the iterator got to the end, attempt to back off to the last match
+            _ = sinfo.iterator.prev() catch {};
         }
     }
 }
@@ -832,7 +839,7 @@ pub fn searchPrev(self: *Output) void {
         if (sinfo.iterator.prev() catch return) |*match| {
             // jump to the line container the  start of the match
             self.widget_ref.?.jump_output_to_line(
-                self.widget_ref.?.window.getLineFromOffset(match.lowerBound),
+                self.nonowned_process_buffer.filtered_buffer.getLineIndexFromOffset(match.lowerBound).?,
             ) catch return;
 
             // unhighlight previous match
@@ -851,17 +858,22 @@ pub fn searchPrev(self: *Output) void {
 
             // highlight new match
             self.updateStyle(&self.search_info.?.highlight_style, match.lowerBound, match.upperBound) catch return;
+        } else {
+            // the iterator got to the start, attempt to back off to the first match
+            _ = sinfo.iterator.next() catch {};
         }
     }
 }
 
 pub fn debuginfo(self: *Output) void {
-    debug_ui.print("output {s}\n", .{self.widget_ref.?.process_name}) catch {};
-    debug_ui.print("top_line {d}\n", .{self.widget_ref.?.window.last_draw.top_line}) catch {};
-    debug_ui.print("is focused {any}\n", .{self.is_focused}) catch {};
-    debug_ui.print("window: ...\n", .{}) catch {};
-    debug_ui.print("window: top_line {d}\n", .{self.widget_ref.?.window.top_line}) catch {};
-    debug_ui.print("window: num_lines {d}\n", .{self.widget_ref.?.window.num_lines}) catch {};
+    if (builtin.mode == .Debug) {
+        debug_ui.print("output {s}\n", .{self.widget_ref.?.process_name}) catch {};
+        debug_ui.print("top_line {d}\n", .{self.widget_ref.?.window.last_draw.top_line}) catch {};
+        debug_ui.print("is focused {any}\n", .{self.is_focused}) catch {};
+        debug_ui.print("window: ...\n", .{}) catch {};
+        debug_ui.print("window: top_line {d}\n", .{self.widget_ref.?.window.top_line}) catch {};
+        debug_ui.print("window: num_lines {d}\n", .{self.widget_ref.?.window.num_lines}) catch {};
+    }
 }
 
 pub fn jumpToLine(self: *Output, line_num: usize) void {

@@ -409,7 +409,6 @@ fn run_tui(alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner) !void {
     app.vx.refresh = true;
 
     const model_view = try view.View.init(alloc);
-    defer model_view.deinit();
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     const model_alloc = arena.allocator();
@@ -450,8 +449,18 @@ fn run_tui(alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner) !void {
         model.process_buffers.m.unlock();
     }
 
+    // this code here is a problem
+    defer arena.deinit();
     defer model.process_buffers.map.deinit(alloc);
-    defer model.arena.deinit();
+    defer {
+        model.process_buffers.m.lock();
+        var iter = model.process_buffers.map.iterator();
+        while (iter.next()) |i| {
+            i.value_ptr.*.deinit();
+        }
+        model.process_buffers.m.unlock();
+    }
+    defer model_view.deinit();
 
     //std.debug.print("color_scheme_updates : {?}\n", .{app.vx.caps.color_scheme_updates});
     //std.debug.print("explicit_width : {?}\n", .{app.vx.caps.explicit_width});
@@ -482,16 +491,6 @@ fn run_tui(alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner) !void {
 
     try app.vx.setMouseMode(&app.tty.tty_writer.interface, true);
     try app.run(model.widget(), .{});
-
-    // deinit the process buffers
-    defer {
-        model.process_buffers.m.lock();
-        var iter = model.process_buffers.map.iterator();
-        while (iter.next()) |i| {
-            i.value_ptr.*.deinit();
-        }
-        model.process_buffers.m.unlock();
-    }
 
     model.unsubscribeHandlersFromCmd();
     keep_running.store(false, .seq_cst);
@@ -628,11 +627,14 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 
 // TODOs
 
+// create option to render the tail
+//  - this is going to be kinda complicated
+
 // historywidget - keep history scroll relative to bottom
 // - fix the clean up management around processbuffers
 // - I think its time the model has a init and deinit
 
-// stop using output names as a refernce and start using IDs
+// stop using output names as a reference and start using IDs
 
 // ADD reference to the executor to the TUI so that:
 //      - can call run on config names (DONE)
@@ -647,34 +649,34 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 // TODO: dump buffers to disk
 // TODO: create a command to run another process
 
-// BUGS:
-// jumping when folded crashes
-// jump to bottom breaks when folded
+// TODO: be able to grow/shrink outputviews
+// TODO: be able to set on/off/hover line numbers
+// TODO: select a view group with the mouse
 
-// CTRL+ENTER in the historywidget doesn't work
-// replace breaks color commands
+// BUGS:
+
 // ScrollBars now has a bug in handleCapture new_view_cl_start: u32 = @intFromFloat(@ceil(new_view_col_start_f))
-// fold can break updating the buffer somehow...
 
 // tasks child.wait() closes pipes
 // need to refactor the wait to not close pipes until process closed and piped emptied
 
-// next/prev can get stuck on .begin .end iterator values
-
 // TODO parse ui config in TUI
 // ---> options
 // ------> when process starts, run color commands
-// ------> when matching output starts, run setup functiony
-
-// TODO: text is being sent to the wrong buffer????
+// ------> when matching output starts, run setup function
 
 // new runners
 // file based
 // remote runners - ie ssh/sftp
 
+// IDEA: have some preconfiguration setups
+// logcolors
+// justerrors
+// noinfo
+
 // cmd ideas
 // prune ... (done)
-// change fold to include
+// change fold to keep (done)
 // fold +string -string2 (both prune and include)
 // replace ... (done)
 //

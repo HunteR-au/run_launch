@@ -36,30 +36,29 @@ pub fn freeMemory(self: *Filter) void {
     _ = self.arena.reset(.retain_capacity);
 }
 
+//
+// TODO: define the requirements for this function
+//
 pub fn transform(self: *Filter, buffer: []const u8) ![]const u8 {
     const alloc = self.arena.allocator();
 
     var lines = try std.ArrayList([]const u8).initCapacity(alloc, 1);
 
+    // TODO: This contains bugs. newlines are being chopped apart and not put back together!!!
     switch (builtin.target.os.tag) {
         .windows => {
-            const sep = "\n";
+            const sep = "\r\n";
             var it = std.mem.tokenizeSequence(u8, buffer, sep);
-            //std.debug.print("filter:transform()\n", .{});
             while (it.next()) |line| {
-                //std.debug.print("processing line: {s}\n", .{line});
-                //std.debug.print("\n", .{});
                 switch (try self.transformLine(self, self.data, line)) {
                     .line => |new_buf| {
-                        //std.debug.print("for line: {s}\ntransforming to: {s}\n", .{ line, new_buf });
                         try lines.append(alloc, new_buf);
                     },
-                    .empty => {
-                        //std.debug.print("filter:empty...\n", .{});
-                    },
+                    .empty => {},
                 }
             }
-            const new_buffer = try std.mem.join(alloc, sep, lines.items);
+            const new_buffer = try joinWithEndingSep(alloc, sep, lines.items);
+            std.log.debug("filtered lines: {s}", .{new_buffer});
             return new_buffer;
         },
         else => {
@@ -77,9 +76,37 @@ pub fn transform(self: *Filter, buffer: []const u8) ![]const u8 {
                 return "";
             } else {
                 try lines.append(alloc, "");
-                const new_buffer = try std.mem.join(alloc, &[1]u8{sep}, lines.items);
+                const new_buffer = try joinWithEndingSep(alloc, &[1]u8{sep}, lines.items);
                 return new_buffer;
             }
         },
     }
+}
+
+/// Naively combines a series of slices with a separator plus a separator at the end.
+/// Allocates memory for the result, which must be freed by the caller.
+fn joinWithEndingSep(allocator: std.mem.Allocator, separator: []const u8, slices: []const []const u8) std.mem.Allocator.Error![]u8 {
+    if (slices.len == 0) return &[0]u8{};
+
+    const total_len = blk: {
+        var sum: usize = separator.len * (slices.len);
+        for (slices) |slice| sum += slice.len;
+        break :blk sum;
+    };
+
+    const buf = try allocator.alloc(u8, total_len);
+    errdefer allocator.free(buf);
+
+    @memcpy(buf[0..slices[0].len], slices[0]);
+    var buf_index: usize = slices[0].len;
+    for (slices[1..]) |slice| {
+        @memcpy(buf[buf_index .. buf_index + separator.len], separator);
+        buf_index += separator.len;
+        @memcpy(buf[buf_index .. buf_index + slice.len], slice);
+        buf_index += slice.len;
+    }
+    @memcpy(buf[buf_index .. buf_index + separator.len], separator);
+
+    // No need for shrink since buf is exactly the correct size.
+    return buf;
 }

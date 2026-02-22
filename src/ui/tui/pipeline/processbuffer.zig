@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 pub const Pipeline = @import("pipeline.zig");
 pub const Filter = @import("filter.zig");
 pub const Reviewer = @import("reviewer.zig");
+pub const LineBuffer = @import("linebuffer.zig").LineBuffer;
 pub const MetaData = Pipeline.MetaData;
 
 pub const ProcessBuffer = struct {
@@ -11,12 +12,15 @@ pub const ProcessBuffer = struct {
     };
     alloc: std.mem.Allocator,
     m: std.Thread.Mutex,
-    buffer: std.ArrayList(u8),
-    buffer_newlines: std.ArrayList(usize),
-    filtered_buffer: std.ArrayList(u8),
-    filtered_newlines: std.ArrayList(usize),
+    //buffer: std.ArrayList(u8),
+    //buffer_newlines: std.ArrayList(usize),
+    buffer: LineBuffer,
+    //filtered_buffer: std.ArrayList(u8),
+    //filtered_newlines: std.ArrayList(usize),
+    filtered_buffer: LineBuffer,
     nonowned_iterators: std.ArrayList(IteratorPtr),
     lastNewLine: usize = 0,
+    lines_processed: usize = 0,
     pipeline: Pipeline,
 
     pub const IteratorKind = enum {
@@ -34,10 +38,12 @@ pub const ProcessBuffer = struct {
         self.* = .{
             .alloc = alloc,
             .m = std.Thread.Mutex{},
-            .buffer = try .initCapacity(alloc, 100),
-            .buffer_newlines = try .initCapacity(alloc, 100),
-            .filtered_buffer = try .initCapacity(alloc, 100),
-            .filtered_newlines = try .initCapacity(alloc, 100),
+            //.buffer = try .initCapacity(alloc, 100),
+            .buffer = try .init(alloc),
+            //.buffer_newlines = try .initCapacity(alloc, 100),
+            //.filtered_buffer = try .initCapacity(alloc, 100),
+            //.filtered_newlines = try .initCapacity(alloc, 100),
+            .filtered_buffer = try .init(alloc),
             .nonowned_iterators = try .initCapacity(alloc, 100),
             .pipeline = try .init(alloc),
         };
@@ -45,11 +51,11 @@ pub const ProcessBuffer = struct {
     }
 
     pub fn deinit(self: *ProcessBuffer) void {
-        self.buffer.deinit(self.alloc);
+        //self.buffer.deinit(self.alloc);
         self.nonowned_iterators.deinit(self.alloc);
-        self.buffer_newlines.deinit(self.alloc);
-        self.filtered_buffer.deinit(self.alloc);
-        self.filtered_newlines.deinit(self.alloc);
+        //self.buffer_newlines.deinit(self.alloc);
+        self.filtered_buffer.deinit();
+        // self.filtered_newlines.deinit(self.alloc);
         self.pipeline.deinit();
         self.alloc.destroy(self);
     }
@@ -72,8 +78,9 @@ pub const ProcessBuffer = struct {
         self.m.lock();
         defer self.m.unlock();
 
-        try update_newline_indexs(self.alloc, &self.buffer_newlines, buf, self.buffer.items.len);
-        try self.buffer.appendSlice(self.alloc, buf);
+        //try update_newline_indexs(self.alloc, &self.buffer_newlines, buf, self.buffer.items.len);
+        //try self.buffer.appendSlice(self.alloc, buf);
+        try self.buffer.append(buf);
         try self.processPipeline();
     }
 
@@ -91,65 +98,96 @@ pub const ProcessBuffer = struct {
     }
 
     pub fn processPipeline(self: *ProcessBuffer) !void {
-        // pass any new lines into the pipeline
-        switch (builtin.target.os.tag) {
-            .windows => {
-                const sep = "\n";
-                const idx = std.mem.lastIndexOf(u8, self.buffer.items, sep);
-                if (idx) |i| {
-                    if (i <= self.lastNewLine) return;
-                    const newlines = self.buffer.items[self.lastNewLine .. i + 1];
-                    // NOTE: if filter_lines is missing newline at the end it may be
-                    // problematic...
-                    const filtered_lines = try self.pipeline.runPipeline(
-                        self.alloc,
-                        newlines,
-                        MetaData{ .bufferOffset = self.lastNewLine },
-                    );
-                    defer self.alloc.free(filtered_lines);
-                    self.lastNewLine = i + 1;
-                    try update_newline_indexs(
-                        self.alloc,
-                        &self.filtered_newlines,
-                        filtered_lines,
-                        self.filtered_buffer.items.len,
-                    );
-                    try self.filtered_buffer.appendSlice(self.alloc, filtered_lines);
-                }
-            },
-            else => {
-                const sep = '\n';
-                const idx = std.mem.lastIndexOfScalar(u8, self.buffer.items, sep);
-                if (idx) |i| {
-                    const newlines = self.buffer.items[self.lastNewLine .. i + 1];
-                    const filtered_lines = try self.pipeline.runPipeline(
-                        self.alloc,
-                        newlines,
-                        MetaData{ .bufferOffset = self.lastNewLine },
-                    );
-                    defer self.alloc.free(filtered_lines);
-                    self.lastNewLine = i + 1;
-                    try update_newline_indexs(
-                        self.alloc,
-                        &self.filtered_newlines,
-                        filtered_lines,
-                        self.filtered_buffer.items.len,
-                    );
-                    try self.filtered_buffer.appendSlice(self.alloc, filtered_lines);
-                }
-            },
+        // check if there are any new lines to process
+        const current_lines = self.buffer.countLines();
+        if (self.lines_processed < current_lines) {
+            const new_filtered_lines: []u8 = try self.pipeline.runPipeline(
+                self.alloc,
+                self.buffer.getLinesStartingFrom(self.lines_processed).?,
+                MetaData{ .bufferOffset = self.filtered_buffer.count() },
+            );
+
+            defer self.alloc.free(new_filtered_lines);
+
+            try self.filtered_buffer.append(new_filtered_lines);
+            self.lines_processed = current_lines;
+
+            // TODO work out what to do about the tail!!
         }
     }
+
+    // pub fn processPipeline(self: *ProcessBuffer) !void {
+    //     // pass any new lines into the pipeline
+    //     switch (builtin.target.os.tag) {
+    //         .windows => {
+    //             const sep = "\n";
+    //             const idx = std.mem.lastIndexOf(u8, self.buffer.items, sep);
+    //             if (idx) |i| {
+    //                 if (i <= self.lastNewLine) return;
+    //                 const newlines = self.buffer.items[self.lastNewLine .. i + 1];
+    //                 // NOTE: if filter_lines is missing newline at the end it may be
+    //                 // problematic...
+    //                 const filtered_lines = try self.pipeline.runPipeline(
+    //                     self.alloc,
+    //                     newlines,
+    //                     MetaData{ .bufferOffset = self.lastNewLine },
+    //                 );
+    //                 defer self.alloc.free(filtered_lines);
+    //                 self.lastNewLine = i + 1;
+    //                 try update_newline_indexs(
+    //                     self.alloc,
+    //                     &self.filtered_newlines,
+    //                     filtered_lines,
+    //                     self.filtered_buffer.items.len,
+    //                 );
+    //                 try self.filtered_buffer.appendSlice(self.alloc, filtered_lines);
+    //             }
+    //         },
+    //         else => {
+    //             const sep = '\n';
+    //             const idx = std.mem.lastIndexOfScalar(u8, self.buffer.items, sep);
+    //             if (idx) |i| {
+    //                 const newlines = self.buffer.items[self.lastNewLine .. i + 1];
+    //                 const filtered_lines = try self.pipeline.runPipeline(
+    //                     self.alloc,
+    //                     newlines,
+    //                     MetaData{ .bufferOffset = self.lastNewLine },
+    //                 );
+    //                 defer self.alloc.free(filtered_lines);
+    //                 self.lastNewLine = i + 1;
+    //                 try update_newline_indexs(
+    //                     self.alloc,
+    //                     &self.filtered_newlines,
+    //                     filtered_lines,
+    //                     self.filtered_buffer.items.len,
+    //                 );
+    //                 try self.filtered_buffer.appendSlice(self.alloc, filtered_lines);
+    //             }
+    //         },
+    //     }
+    // }
 
     fn reprocessPipeline(self: *ProcessBuffer) !void {
         std.log.debug("ProcessBuffer:reprocessPipeline()", .{});
 
-        self.filtered_newlines.clearRetainingCapacity();
+        // NOTE: this doesn't consider external pipeline data that is managed by
+        // a reviewer...
+
         self.filtered_buffer.clearRetainingCapacity();
-        self.lastNewLine = 0;
+        self.lines_processed = 0;
         self.invalidateAllIterators();
         try self.processPipeline();
     }
+
+    // fn reprocessPipeline(self: *ProcessBuffer) !void {
+    //     std.log.debug("ProcessBuffer:reprocessPipeline()", .{});
+
+    //     self.filtered_newlines.clearRetainingCapacity();
+    //     self.filtered_buffer.clearRetainingCapacity();
+    //     self.lastNewLine = 0;
+    //     self.invalidateAllIterators();
+    //     try self.processPipeline();
+    // }
 
     pub fn addFilter(self: *ProcessBuffer, filter: Filter) !void {
         self.m.lock();
@@ -247,7 +285,7 @@ pub const ProcessBuffer = struct {
         self.m.lock();
         defer self.m.unlock();
 
-        return try alloc.dupe(u8, self.filtered_buffer.items);
+        return try alloc.dupe(u8, self.filtered_buffer.buf.items);
     }
 
     pub fn copyUnfilteredBuffer(
@@ -257,7 +295,7 @@ pub const ProcessBuffer = struct {
         self.m.lock();
         defer self.m.unlock();
 
-        return try alloc.dupe(u8, self.filter.items);
+        return try alloc.dupe(u8, self.buffer.buf.items);
     }
 
     pub fn copyRange(
@@ -269,15 +307,15 @@ pub const ProcessBuffer = struct {
         self.m.lock();
         defer self.m.unlock();
 
-        if (offset + len > self.filtered_buffer.items.len) {
-            //std.debug.print("buffer length: {d}, offset: {d}, to_idx: {d}\n", .{
-            //    self.buffer.items.len,
-            //    offset,
-            //    len,
-            //});
+        if (offset + len > self.filtered_buffer.buf.items.len) {
+            std.log.debug("buffer length: {d}, offset: {d}, to_idx: {d}\n", .{
+                self.filtered_buffer.buf.items.len,
+                offset,
+                len,
+            });
             return Error.InvalidArguments;
         }
-        return try alloc.dupe(u8, self.filtered_buffer.items[offset .. offset + len]);
+        return try alloc.dupe(u8, self.filtered_buffer.buf.items[offset .. offset + len]);
     }
 
     pub fn copyUnfilteredRange(
@@ -289,10 +327,10 @@ pub const ProcessBuffer = struct {
         self.m.lock();
         defer self.m.unlock();
 
-        if (offset + len > self.buffer.items.len) {
+        if (offset + len > self.buffer.buf.items.len) {
             return Error.InvalidArguments;
         }
-        return try alloc.dupe(u8, self.buffer.items[offset .. offset + len]);
+        return try alloc.dupe(u8, self.buffer.buf.items[offset .. offset + len]);
     }
 
     pub fn getFilteredBufferLength(
@@ -300,7 +338,7 @@ pub const ProcessBuffer = struct {
     ) usize {
         self.m.lock();
         defer self.m.unlock();
-        return self.filtered_buffer.items.len;
+        return self.filtered_buffer.count();
     }
 
     pub fn getNumFilteredNewlines(
@@ -308,26 +346,13 @@ pub const ProcessBuffer = struct {
     ) usize {
         self.m.lock();
         defer self.m.unlock();
-        return self.filtered_newlines.items.len;
+        return self.filtered_buffer.newlines.items.len;
     }
 
-    // newlines count as part of the preceding line
     pub fn getLineFromOffset(self: *ProcessBuffer, offset: usize) usize {
         self.m.lock();
         defer self.m.unlock();
-        const filtered_newlines_slice = self.filtered_newlines.items;
-
-        const last_rendered_line = std.sort.lowerBound(
-            usize,
-            filtered_newlines_slice,
-            offset,
-            struct {
-                pub fn compare(lhs: usize, rhs: usize) std.math.Order {
-                    return std.math.order(lhs, rhs);
-                }
-            }.compare,
-        );
-        return last_rendered_line;
+        self.filtered_buffer.getLineIndexFromOffset(offset).?;
     }
 
     const Index = union(enum) {
@@ -343,19 +368,12 @@ pub const ProcessBuffer = struct {
     }
 
     // set the offset of the first character of the line
-    // TODO: This needs a review
     pub fn getOffsetFromLine(self: *ProcessBuffer, line_num: usize) !usize {
         self.m.lock();
         defer self.m.unlock();
-        const idx = self.calNewlineIndex(line_num);
-        switch (idx) {
-            .idx => |i| {
-                const offset = self.filtered_newlines.items[i] + 1;
-                return offset;
-            },
-            .first => return 0,
-            .outOfBounds => error.OutOfBounds,
-        }
+        const offset = self.filtered_buffer.getIndexOfLine(line_num);
+        // This line isn't considering tails
+        return if (offset) |ofs| ofs else error.OutOfBounds;
     }
 
     pub fn createLineIterator(
@@ -387,7 +405,7 @@ pub const ProcessBuffer = struct {
         if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
         self.process_buffer.m.lock();
         defer self.process_buffer.m.unlock();
-        self.newlines_index = index;
+        self.line_index = index;
     }
 
     fn commonInvalidate(self: anytype) void {
@@ -408,7 +426,7 @@ pub const ProcessBuffer = struct {
         self.* = .{
             .alloc = alloc,
             .process_buffer = pProcessBuffer,
-            .newlines_index = inital_index,
+            .line_index = inital_index,
         };
 
         if (T == ReverseLineIterator) {
@@ -451,27 +469,27 @@ pub const ProcessBuffer = struct {
         defer self.process_buffer.m.unlock();
 
         if (T == LineIterator) {
-            const next_index: IteratorIndex = switch (self.newlines_index) {
+            const next_index: IteratorIndex = switch (self.line_index) {
                 .start => .{ .index = 0 },
                 .index => |i| .{ .index = i +| 1 },
                 .end => unreachable,
             };
             if (!self._checkBounds(next_index.index)) return null;
-            self.newlines_index = next_index;
+            self.line_index = next_index;
         } else if (T == ReverseLineIterator) {
-            const next_index: IteratorIndex = switch (self.newlines_index) {
-                .start => .{ .index = self.process_buffer.filtered_newlines.items.len },
+            const next_index: IteratorIndex = switch (self.line_index) {
+                .start => .{ .index = self.process_buffer.filtered_buffer.countLines() - 1 },
                 .index => |i| if (i == 0) .end else .{ .index = i -| 1 },
                 .end => return null,
             };
 
             if (next_index == .end) {
-                self.newlines_index = next_index;
+                self.line_index = next_index;
                 return null;
             } else if (self._checkBounds(next_index.index)) {
                 return null;
             } else {
-                self.newlines_index = next_index;
+                self.line_index = next_index;
             }
         }
 
@@ -489,29 +507,29 @@ pub const ProcessBuffer = struct {
         defer self.process_buffer.m.unlock();
 
         if (T == LineIterator) {
-            const next_index: IteratorIndex = switch (self.newlines_index) {
+            const next_index: IteratorIndex = switch (self.line_index) {
                 .start => return null,
                 .index => |i| if (i == 0) .start else .{ .index = i -| 1 },
                 .end => unreachable,
             };
 
             if (next_index == .start) {
-                self.newlines_index = next_index;
+                self.line_index = next_index;
                 return null;
             } else if (!self._checkBounds(next_index.index)) {
                 return null;
             } else {
-                self.newlines_index = next_index;
+                self.line_index = next_index;
             }
         } else if (T == ReverseLineIterator) {
-            const next_index: IteratorIndex = switch (self.newlines_index) {
+            const next_index: IteratorIndex = switch (self.line_index) {
                 .start => return null,
                 .index => |i| .{ .index = i +| 1 },
                 .end => .{ .index = 0 },
             };
 
             if (!self._checkBounds(next_index.index)) return null;
-            self.newlines_index = next_index;
+            self.line_index = next_index;
         }
 
         const result = try self._peek() orelse return null;
@@ -536,7 +554,7 @@ pub const ProcessBuffer = struct {
     pub const LineIterator = struct {
         alloc: std.mem.Allocator,
         process_buffer: *ProcessBuffer,
-        newlines_index: IteratorIndex,
+        line_index: IteratorIndex,
         _invalid: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
         pub fn init(alloc: std.mem.Allocator, pProcessBuffer: *ProcessBuffer) !*LineIterator {
@@ -560,43 +578,49 @@ pub const ProcessBuffer = struct {
         }
 
         pub fn _checkBounds(self: *LineIterator, line_index: usize) bool {
-            return if (line_index > self.process_buffer.filtered_newlines.items.len) false else true;
+            return if (line_index >= self.process_buffer.filtered_buffer.countLines()) false else true;
         }
 
         fn _peek(self: *LineIterator) !?IteratorResult {
             if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
-            if (self.newlines_index == .start) return null;
-            if (self.newlines_index == .end) return null;
-            if (self.newlines_index.index > self.process_buffer.filtered_newlines.items.len) return null;
+            if (self.line_index == .start) return null;
+            if (self.line_index == .end) return null;
+            if (self.line_index.index >= self.process_buffer.filtered_buffer.countLines()) return null;
 
-            var line_start: usize = undefined;
-            var line_end: usize = undefined;
-
-            if (self.newlines_index.index == self.process_buffer.filtered_newlines.items.len) {
-                line_end = self.process_buffer.filtered_buffer.items.len;
-            } else {
-                line_end = self.process_buffer.filtered_newlines.items[self.newlines_index.index];
-            }
-
-            if (self.newlines_index.index == 0) {
-                line_start = 0;
-            } else {
-                // TODO: check that +1 doesn't go over buffer length
-                line_start = self.process_buffer.filtered_newlines.items[self.newlines_index.index - 1] + 1;
-            }
+            std.log.debug("peek: index = {d} filter_buffer_num_lines = {d}", .{ self.line_index.index, self.process_buffer.filtered_buffer.countLines() });
 
             return .{
-                .line = self.process_buffer.filtered_buffer.items[line_start..line_end],
-                .buffer_offset = line_start,
+                .line = self.process_buffer.filtered_buffer.getLine(self.line_index.index).?,
+                .buffer_offset = self.process_buffer.filtered_buffer.getIndexOfLine(self.line_index.index).?,
             };
+
+            // if (self.line_index.index == 0) {
+            //     line_start = 0;
+            // } else {
+            //     // TODO: check that +1 doesn't go over buffer length
+            //     line_start = self.process_buffer.filtered_newlines.items[self.line_index.index - 1] + 1;
+            // }
+
+            // if (self.line_index.index == self.process_buffer.filtered_buffer.countLines) {
+            //     //line_end = self.process_buffer.filtered_buffer.items.len;
+            //     line_end = self.process_buffer.filtered_buffer.getLine().?.len + line_start;
+            // } else {
+            //     line_end = self.process_buffer.filtered_buffer.getLine
+            //     //line_end = self.process_buffer.filtered_newlines.items[self.line_index.index];
+            // }
+
+            // return .{
+            //     .line = self.process_buffer.filtered_buffer.items[line_start..line_end],
+            //     .buffer_offset = line_start,
+            // };
         }
 
         pub fn setLine(self: *LineIterator, line_num: usize) !void {
             self.process_buffer.m.lock();
             defer self.process_buffer.m.unlock();
             // validate that the line number is within bounds
-            if (line_num > self.process_buffer.filtered_newlines.items.len) return error.OutOfRange;
-            self.newlines_index = .{ .index = line_num };
+            if (line_num >= self.process_buffer.filtered_buffer.countLines()) return error.OutOfRange;
+            self.line_index = .{ .index = line_num };
         }
 
         pub fn reset(self: *LineIterator) void {
@@ -611,7 +635,7 @@ pub const ProcessBuffer = struct {
     pub const ReverseLineIterator = struct {
         alloc: std.mem.Allocator,
         process_buffer: *ProcessBuffer,
-        newlines_index: IteratorIndex,
+        line_index: IteratorIndex,
         _invalid: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
         pub fn init(alloc: std.mem.Allocator, pProcessBuffer: *ProcessBuffer) !*ReverseLineIterator {
@@ -635,32 +659,17 @@ pub const ProcessBuffer = struct {
         }
 
         fn _checkBounds(self: *ReverseLineIterator, line_index: usize) bool {
-            return if (line_index > self.process_buffer.filtered_newlines.items.len) false else true;
+            return if (line_index >= self.process_buffer.filtered_buffer.countLines()) false else true;
         }
 
         fn _peek(self: *ReverseLineIterator) !?IteratorResult {
             if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
-            //if (self.newlines_index == 0) return null;
-            if (self.newlines_index.index > self.process_buffer.filtered_newlines.items.len) return null;
-
-            var line_start: usize = undefined;
-            var line_end: usize = undefined;
-
-            if (self.newlines_index.index == self.process_buffer.filtered_newlines.items.len) {
-                line_end = self.process_buffer.filtered_buffer.items.len;
-            } else {
-                line_end = self.process_buffer.filtered_newlines.items[self.newlines_index.index];
-            }
-
-            if (self.newlines_index.index == 1) {
-                line_start = 0;
-            } else {
-                line_start = self.process_buffer.filtered_newlines.items[self.newlines_index.index - 1] + 1;
-            }
+            //if (self.line_index == 0) return null;
+            if (self.line_index.index >= self.process_buffer.filtered_buffer.countLines()) return null;
 
             return .{
-                .line = self.process_buffer.filtered_buffer.items[line_start..line_end],
-                .buffer_offset = line_start,
+                .line = self.process_buffer.filtered_buffer.getLine(self.line_index.index).?,
+                .buffer_offset = self.process_buffer.filtered_buffer.getIndexOfLine(self.line_index.index).?,
             };
         }
 
@@ -673,8 +682,8 @@ pub const ProcessBuffer = struct {
             defer self.process_buffer.m.unlock();
             const internal_index = line_num + 1;
             // validate that the line number is within bounds
-            if (internal_index > self.process_buffer.filtered_newlines.items.len + 1) return error.OutOfRange;
-            self.newlines_index = .{ .index = line_num };
+            if (internal_index >= self.process_buffer.filtered_buffer.countLines()) return error.OutOfRange;
+            self.line_index = .{ .index = line_num };
         }
 
         pub fn invalidate(self: *ReverseLineIterator) void {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const utils = @import("utils");
 const debug_ui = @import("debug_ui");
 
@@ -25,7 +26,6 @@ pub const OutputWidget = struct {
     text: MultiStyleText = undefined,
     scroll_bars: ScrollBar,
     scroll_sticky_mode: bool = false,
-    force_sticky_off: bool = false,
     border: Border,
     process_name: []const u8,
     temp: vxfw.Text = undefined,
@@ -251,17 +251,6 @@ pub const OutputWidget = struct {
         }
     }
 
-    fn calculate_sticky_scroll(self: *OutputWidget) void {
-        if (self.scroll_sticky_mode == true) {
-            if (self.force_sticky_off) return;
-            self.moveOutputDownLines(1);
-        } else {
-            if (self.force_sticky_off) {
-                self.force_sticky_off = false;
-            }
-        }
-    }
-
     pub fn jump_to_start(self: *OutputWidget) !void {
         try self.jump_output_to_line(0);
     }
@@ -303,25 +292,29 @@ pub const OutputWidget = struct {
 
         // check if line is already within rendered bounds
         if (first_rendered_line <= line_num and line_num <= last_rendered_line) {
-            try debug_ui.print("--\njump - no need to jump\n", .{});
-            try debug_ui.print("jump - first row {d}\n", .{self.window.last_draw.top_line});
-            try debug_ui.print("jump - last row {d}\n", .{self.window.last_draw.bottom_line});
-            try debug_ui.print("jump - first_rendered_line_offset: {d}\n", .{first_rendered_line_offset});
-            try debug_ui.print("jump - first_rendered_line {d}\n", .{first_rendered_line});
-            try debug_ui.print("jump - line_num {d}\n", .{line_num});
-            try debug_ui.print("jump - last_rendered_line {d}\n", .{last_rendered_line});
+            if (builtin.mode == .Debug) {
+                try debug_ui.print("--\njump - no need to jump\n", .{});
+                try debug_ui.print("jump - first row {d}\n", .{self.window.last_draw.top_line});
+                try debug_ui.print("jump - last row {d}\n", .{self.window.last_draw.bottom_line});
+                try debug_ui.print("jump - first_rendered_line_offset: {d}\n", .{first_rendered_line_offset});
+                try debug_ui.print("jump - first_rendered_line {d}\n", .{first_rendered_line});
+                try debug_ui.print("jump - line_num {d}\n", .{line_num});
+                try debug_ui.print("jump - last_rendered_line {d}\n", .{last_rendered_line});
+            }
             return;
         }
 
         // last_rendered_line AND first_rendered_line are WRONG!!!
-        try debug_ui.print("--\njump - starting offset {d}\n", .{self.window.startingOffset()});
-        try debug_ui.print("jump - first row {d}\n", .{self.window.last_draw.top_line});
-        try debug_ui.print("jump - last row {d}\n", .{self.window.last_draw.bottom_line});
-        try debug_ui.print("jump - line_num: {d}\n", .{line_num});
-        try debug_ui.print("jump - last_rendered_line_offset: {d}\n", .{last_rendered_line_offset});
-        try debug_ui.print("jump - last_rendered_line: {d}\n", .{last_rendered_line});
-        try debug_ui.print("jump - first_rendered_line_offset: {d}\n", .{first_rendered_line_offset});
-        try debug_ui.print("jump - first_rendered_line: {d}\n\n", .{first_rendered_line});
+        if (builtin.mode == .Debug) {
+            try debug_ui.print("--\njump - starting offset {d}\n", .{self.window.startingOffset()});
+            try debug_ui.print("jump - first row {d}\n", .{self.window.last_draw.top_line});
+            try debug_ui.print("jump - last row {d}\n", .{self.window.last_draw.bottom_line});
+            try debug_ui.print("jump - line_num: {d}\n", .{line_num});
+            try debug_ui.print("jump - last_rendered_line_offset: {d}\n", .{last_rendered_line_offset});
+            try debug_ui.print("jump - last_rendered_line: {d}\n", .{last_rendered_line});
+            try debug_ui.print("jump - first_rendered_line_offset: {d}\n", .{first_rendered_line_offset});
+            try debug_ui.print("jump - first_rendered_line: {d}\n\n", .{first_rendered_line});
+        }
 
         // line is below
         if (line_num > last_rendered_line) {
@@ -370,7 +363,7 @@ pub const OutputWidget = struct {
         if (!is_sticky) {
             self.scroll_sticky_mode = false;
             self.window.is_sticky = false;
-            self.force_sticky_off = true;
+            //self.force_sticky_off = true;
             //self.scroll_bars.scroll_view.scroll.pending_lines = 0;
             //self.window.pending_lines = 0;
         } else {
@@ -446,7 +439,7 @@ pub const OutputWidget = struct {
 
         // copy the style list
         var list_cpy = try std.ArrayList(vaxis.Style).initCapacity(ctx.arena, self.output.style_list.items.len);
-        //var list_cpy = try ctx.arena.alloc(vaxis.Style, self.output.style_list.items.len);
+
         try list_cpy.appendSlice(ctx.arena, self.output.style_list.items);
 
         // copy the style map
@@ -478,9 +471,6 @@ pub const OutputWidget = struct {
         } else {
             self.border.style = vaxis.Style{ .fg = .{ .rgb = .{ 255, 255, 255 } } };
         }
-
-        // This should probably be in a tick event
-        self.calculate_sticky_scroll();
 
         const border_child: vxfw.SubSurface = .{
             .origin = .{ .row = 0, .col = 0 },
@@ -544,26 +534,15 @@ const Window = struct {
         if (line_num >= self.last_draw.process_buffer_num_lines) {
             return .outOfBounds;
         }
-        return .{ .idx = line_num - 1 };
+        return .{ .idx = line_num };
     }
 
     // newlines count as part of the preceding line
-    pub fn getLineFromOffset(self: *Window, offset: usize) usize {
-        // TODO: this needs an atomic access to filtered_newlines
-        const filtered_newlines_slice = self.output.nonowned_process_buffer.filtered_newlines.items;
-
-        const last_rendered_line = std.sort.lowerBound(
-            usize,
-            filtered_newlines_slice,
-            offset,
-            struct {
-                pub fn compare(lhs: usize, rhs: usize) std.math.Order {
-                    return std.math.order(lhs, rhs);
-                }
-            }.compare,
-        );
-        return last_rendered_line;
-    }
+    //pub fn getLineFromOffset(self: *Window, offset: usize) usize {
+    //    // TODO: this needs an atomic access to filtered_newlines
+    //
+    //    return self.output.nonowned_process_buffer.getLineFromOffset(offset);
+    //}
 
     // set the offset of the first character of the line
     pub fn getOffsetFromLine(self: *Window, line_num: usize) !usize {
@@ -584,12 +563,16 @@ const Window = struct {
         const idx = self.calNewlineIndex(self.top_line);
         switch (idx) {
             .idx => |i| {
-                std.debug.assert(self.output.nonowned_process_buffer.filtered_newlines.items.len >= i);
+                std.debug.assert(self.output.nonowned_process_buffer.filtered_buffer.newlines.items.len >= i);
 
-                const offset = self.output.nonowned_process_buffer
-                    .filtered_newlines.items[i] + 1;
-                //std.debug.assert(offset < self.last_draw.process_buffer_len);
-                return offset;
+                // NOTE: this doesn't consider the tail
+                return self
+                    .output
+                    .nonowned_process_buffer
+                    .filtered_buffer
+                    .getIndexOfLine(i) orelse {
+                    @panic("Windows starting offset is beyond the buffer length");
+                };
             },
             .first => return 0,
             .outOfBounds => @panic("Windows starting offset is beyond buffer length"),
@@ -597,26 +580,33 @@ const Window = struct {
     }
 
     pub fn windowByteLen(self: *Window) usize {
-        const last_line = self.lastLine();
-        const idx = self.calNewlineIndex(last_line);
         const ofs = self.startingOffset();
-        switch (idx) {
-            .idx => |i| {
-                if (self.last_draw.process_buffer_num_lines < 2) { // if there is only 1 newline
-                    return self.last_draw.process_buffer_len - ofs;
-                }
-                if (i > self.last_draw.process_buffer_num_lines - 2) { // if i is last newline
-                    return self.last_draw.process_buffer_len - ofs;
-                } else {
-                    const buffer_ofs = self.output.nonowned_process_buffer.filtered_newlines.items[i + 1];
-                    return buffer_ofs - ofs;
-                }
-            },
-            .first => return 0,
-            .outOfBounds => {
-                return self.last_draw.process_buffer_len - ofs;
-            },
-        }
+        const last_line = self.lastLine();
+        //const idx = self.calNewlineIndex(last_line);
+
+        const end_index = self.output.nonowned_process_buffer.filtered_buffer.getLineEndIndex(last_line) orelse {
+            // The index of the lastline is beyond the amount of lines
+            return self.last_draw.process_buffer_len - ofs;
+        };
+        return end_index - ofs;
+
+        // switch (idx) {
+        //     .idx => |i| {
+        //         if (self.last_draw.process_buffer_num_lines < 2) { // if there is only 1 newline
+        //             return self.last_draw.process_buffer_len - ofs;
+        //         }
+        //         if (i > self.last_draw.process_buffer_num_lines - 2) { // if i is last newline
+        //             return self.last_draw.process_buffer_len - ofs;
+        //         } else {
+        //             const buffer_ofs = self.output.nonowned_process_buffer.filtered_newlines.items[i + 1];
+        //             return buffer_ofs - ofs;
+        //         }
+        //     },
+        //     .first => return 0,
+        //     .outOfBounds => {
+        //         return self.last_draw.process_buffer_len - ofs;
+        //     },
+        // }
     }
 
     pub fn getParentTotalLines(self: *Window) usize {
@@ -643,6 +633,14 @@ const Window = struct {
         return self.top_line + self.num_lines - 1;
     }
 
+    // Use the information in the last_draw to determine if
+    // the window is at the bottom of the buffer
+    fn isOnBottom(self: *Window) bool {
+        if (self.last_draw.process_buffer_num_lines == 0) return true;
+        if (self.last_draw.bottom_line >= self.last_draw.process_buffer_num_lines - 1) return true;
+        return false;
+    }
+
     // TODO: change this from returning if move, to returning the number moved
     pub fn linesUp(self: *Window, n: u32) bool {
         if (self.top_line == 0) return false;
@@ -658,6 +656,14 @@ const Window = struct {
         self.pending_lines +|= n;
     }
 
+    fn isPendingUp(self: *Window) bool {
+        return if (self.pending_lines < 0) true else false;
+    }
+
+    fn isPendingDown(self: *Window) bool {
+        return if (self.pending_lines > 0) true else false;
+    }
+
     // TODO: change this from returning if move, to returning the number moved
     pub fn linesDown(self: *Window, n: u32) bool {
         if (!self.has_more_vertical) return false;
@@ -665,33 +671,14 @@ const Window = struct {
         return true;
     }
 
+    // Update last_draw information regarding the process_buffer. Note the last_draw fields
+    // are populated after movement is updated post render.
     pub fn updateWindow(self: *Window) void {
-        // before update, check if window previously was on the buffers last line
-        const prev_last_line = self.lastLine();
-
-        var prev_at_bottom = false;
-        if (self.last_draw.process_buffer_num_lines == 0) {
-            prev_at_bottom = true;
-        } else if (self.last_draw.process_buffer_num_lines == 0) {
-            prev_at_bottom = true;
-        } else if (prev_last_line >= self.last_draw.process_buffer_num_lines - 1) {
-            prev_at_bottom = true;
+        if (!self.is_sticky and self.isOnBottom() and !self.isPendingUp()) {
+            self.is_sticky = true;
         }
 
-        const prev_bottom_line_drawn = self.last_draw.bottom_line;
-        const prev_number_of_lines = self.last_draw.process_buffer_num_lines;
-        const scroll_pending_lines = self.output.widget_ref.?.scroll_bars.scroll_view.scroll.pending_lines;
-        const window_pending_lines = self.pending_lines;
-
-        var previously_scrolled_to_bottom: bool = false;
-        if (prev_bottom_line_drawn == 0 or prev_number_of_lines == 0) {
-            previously_scrolled_to_bottom = true;
-        } else if (scroll_pending_lines >= 0 and
-            window_pending_lines >= 0 and
-            prev_bottom_line_drawn == prev_number_of_lines - 1)
-        {
-            previously_scrolled_to_bottom = true;
-        }
+        if (self.is_sticky) self.linesDownEx(1);
 
         // update parent buffer length
         self.last_draw.process_buffer_len = self.output
@@ -702,20 +689,6 @@ const Window = struct {
         self.last_draw.process_buffer_num_lines = self.output
             .nonowned_process_buffer
             .getNumFilteredNewlines();
-
-        if (prev_last_line < self.last_draw.process_buffer_num_lines) {
-            self.has_more_vertical = true;
-        } else {
-            self.has_more_vertical = false;
-        }
-
-        // if previously the window was at the end of the buffer, keep it there
-        if (previously_scrolled_to_bottom) {
-            self.top_line = self.last_draw.process_buffer_num_lines -| self.num_lines;
-            self.has_more_vertical = false;
-            self.is_sticky = true;
-            self.output.widget_ref.?.scroll_sticky_mode = true;
-        }
     }
 
     pub fn updateWindowPostRender(self: *Window, window_size: usize) void {
@@ -802,35 +775,10 @@ const Window = struct {
 
         // reset pending lines
         self.pending_lines = 0;
-
-        // if (self.pending_lines >= 0) {
-        //     self.top_line = self.top_line + @as(usize, @intCast(self.pending_lines));
-        // } else {
-        //     // BUG: this is broken when window is full
-        //     const pending_delta: i64 = @as(i64, @intCast(self.top_line)) + self.pending_lines;
-        //     if (pending_delta < 0) self.top_line = 0 else self.top_line = @intCast(pending_delta);
-        // }
-        // self.pending_lines = 0;
-
-        // // make sure the window doesn't reach passed the bottom of the buffer
-        // const last_line = self.lastLine();
-        // if (self.last_draw.process_buffer_num_lines <= last_line) {
-        //     self.has_more_vertical = false;
-
-        //     // check if the buffer is NOT smaller than the window
-        //     if (self.last_draw.process_buffer_num_lines > self.num_lines) {
-        //         self.top_line = self.last_draw.process_buffer_num_lines - self.num_lines;
-        //     } else {
-        //         self.top_line = 0;
-        //     }
-        // }
     }
 
     pub fn getSlice(self: *Window, alloc: std.mem.Allocator) ![]const u8 {
-        // resolve pending lines
-        self.resolvePendingLines();
-
-        if (self.output.nonowned_process_buffer.filtered_buffer.items.len == 0) return "";
+        if (self.output.nonowned_process_buffer.filtered_buffer.count() == 0) return "";
 
         const ofs = self.startingOffset();
         return try self

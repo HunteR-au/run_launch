@@ -15,8 +15,9 @@ pub fn fold(_: *Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.Er
     const fold_data: *FoldFilterData = @ptrCast(@alignCast(data));
 
     for (fold_data.regexs) |*re| {
-        //std.debug.print("Output:fold() comparing \"{s}\"\n", .{line});
+        std.log.debug("Output:fold() comparing \"{s}\"", .{line});
         if (try re.partialMatch(line) == true) {
+            std.log.debug("MATCH", .{});
             //std.debug.print("Output:fold -> regex found a match on line {s}\n", .{line});
 
             // found match

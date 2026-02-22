@@ -114,7 +114,7 @@ pub const HistoryWidget = struct {
             self.history.items[self.line_selected.?].style = selected;
 
             if (self.history.last_drawn_top) |rendered_top| {
-                if (rendered_top < self.line_selected.?) self.history.scrollUp();
+                if (rendered_top <= self.line_selected.?) self.history.scrollUp();
             }
         }
     }
@@ -123,8 +123,10 @@ pub const HistoryWidget = struct {
         if (pos >= self.history.items.len) return error.OutOfBounds;
         if (self.line_selected) |line| self.history.items[line].style = nonselected;
 
-        self.line_selected = pos;
-        self.history.items[pos].style = selected;
+        const line_from_bottom: usize = (self.history.items.len - 1) - pos;
+
+        self.line_selected = @intCast(line_from_bottom);
+        self.history.items[line_from_bottom].style = selected;
     }
 
     pub fn getHeight(self: *HistoryWidget) usize {

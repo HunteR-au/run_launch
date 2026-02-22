@@ -89,9 +89,9 @@ pub const ConfiguredRunner = struct {
         self._context.threads.deinit(self._alloc);
         self.config.deinit(self._alloc);
         if (self.tasks) |*tasks| {
-            if (tasks.tasks) |*tasks_| {
-                for (tasks_.*) |*task| task.deinit(self._alloc);
-            }
+            //if (tasks.tasks) |*tasks_| {
+            //    for (tasks_.*) |*task| task.deinit(self._alloc);
+            //}
             tasks.deinit(self._alloc);
         }
         self._alloc.destroy(self);

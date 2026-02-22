@@ -35,9 +35,21 @@ pub fn deinit(self: *Pipeline) void {
     self.arena.deinit();
 }
 
-pub fn runPipeline(self: *Pipeline, alloc: std.mem.Allocator, buffer: []const u8, metadata: MetaData) ![]u8 {
+/// runPipeline processes the buffer through a series of filters which transform each individual
+/// line based on their internal rules. The resulting series of transformed lines are then passed
+/// through 2nd pass via a series of objects called reviewers. Reviewers do not make edit to the buffer!
+pub fn runPipeline(
+    self: *Pipeline,
+    alloc: std.mem.Allocator,
+    /// A list of lines, noting that a line is defined as a string ending in a '\n'
+    buffer: []const u8,
+    metadata: MetaData,
+) ![]u8 {
     self.m.lock();
     defer self.m.unlock();
+
+    // Require that the buffer consist of ONLY lines
+    std.debug.assert(buffer[buffer.len - 1] == '\n');
 
     var temp_buf = buffer;
     for (self.filters.items) |*filter| {
@@ -54,6 +66,9 @@ pub fn runPipeline(self: *Pipeline, alloc: std.mem.Allocator, buffer: []const u8
     for (self.reviewers.items) |*reviewer| {
         try reviewer.review(result, metadata);
     }
+
+    // Require that we are returning a buffer of lines with no tail
+    if (result.len > 0) std.debug.assert(result[result.len - 1] == '\n');
 
     return result;
 }

@@ -32,13 +32,17 @@ pub fn getHelpString() []const u8 {
     \\  - Note: Arguments can be in quotes
     \\
     \\
-    \\fold str1 str2 ... strn
+    \\keep str1 str2 ... strn
     \\      
     \\      - Keep lines that match any of the following regex patterns
     \\
-    \\unfold
+    \\hide str1 str2 ... strn
+    \\      
+    \\      - Hide lines that match any of the following regex patterns
     \\
-    \\      - Remove any fold filters from the buffer
+    \\unfilter
+    \\
+    \\      - Remove any keep/hide filters from the buffer
     \\
     \\replace {str1 str2} {str3 str4} ... {strn-1 strn}
     \\
