@@ -108,6 +108,11 @@ pub fn build(b: *std.Build) !void {
         .root_module = exe_mod,
     });
 
+    if (exe.root_module.optimize != .Debug) {
+        // This is a release build - strip
+        exe.root_module.strip = true;
+    }
+
     // Add files from ui folder recursively using the embededArgs
     for (embededArgs.items) |item| {
         const prefix = "src/ui/";

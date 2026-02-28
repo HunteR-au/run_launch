@@ -10,6 +10,7 @@ const ScrollBar = vxfw.ScrollBars;
 const ScrollView = vxfw.ScrollView;
 const graphemedata = vaxis.Graphemes;
 const Unicode = vaxis.Unicode;
+const UUID = utils.uuid.UUID;
 
 pub const UiConfig = @import("uiconfig").UiConfig;
 pub const Output = @import("output.zig");
@@ -28,6 +29,7 @@ pub const OutputWidget = struct {
     scroll_sticky_mode: bool = false,
     border: Border,
     process_name: []const u8,
+    id: UUID,
     temp: vxfw.Text = undefined,
     output: Output,
     window: Window,
@@ -43,6 +45,7 @@ pub const OutputWidget = struct {
     pub fn init(
         alloc: std.mem.Allocator,
         processname: []const u8,
+        id: UUID,
         buffer: *ProcessBuffer,
     ) !*OutputWidget {
         const pname = try alloc.dupe(u8, processname);
@@ -52,6 +55,7 @@ pub const OutputWidget = struct {
         output_widget.* = .{
             .alloc = alloc,
             .process_name = pname,
+            .id = id,
             .scroll_bars = undefined,
             .border = undefined,
             .output = try Output.init(alloc, buffer),

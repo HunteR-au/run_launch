@@ -438,14 +438,17 @@ fn run_tui(alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner) !void {
         try model_view.add_outputview(output_view, 0);
         try model_view.add_outputview(output_view2, 1);
 
+        const id1 = uuid.newV4();
+        const id2 = uuid.newV4();
+
         const buf = try ProcessBuffer.init(alloc);
         const buf2 = try ProcessBuffer.init(alloc);
-        try output_view.add_output(try OutputWidget.init(alloc, "default_output", buf));
-        try output_view2.add_output(try OutputWidget.init(alloc, "default_output2", buf2));
+        try output_view.add_output(try OutputWidget.init(alloc, "default_output", id1, buf));
+        try output_view2.add_output(try OutputWidget.init(alloc, "default_output2", id2, buf2));
 
         model.process_buffers.m.lock();
-        try model.process_buffers.map.put(alloc, uuid.newV4(), buf);
-        try model.process_buffers.map.put(alloc, uuid.newV4(), buf2);
+        try model.process_buffers.map.put(alloc, id1, buf);
+        try model.process_buffers.map.put(alloc, id2, buf2);
         model.process_buffers.m.unlock();
     }
 
@@ -565,6 +568,7 @@ pub fn createProcessView(alloc: std.mem.Allocator, processname: []const u8) std.
         const p_output = try OutputWidget.init(
             alloc,
             processname,
+            process_id,
             buf,
         );
         errdefer p_output.deinit();
@@ -634,8 +638,6 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 // - fix the clean up management around processbuffers
 // - I think its time the model has a init and deinit
 
-// stop using output names as a reference and start using IDs
-
 // ADD reference to the executor to the TUI so that:
 //      - can call run on config names (DONE)
 //      - can call run on custom commands
@@ -644,14 +646,15 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 
 // TODO color title for selected outputview
 // TODO make tabs
-
 // TODO: report errors when processes die
-// TODO: dump buffers to disk
+//
+// TODO: get text selection, copy, paste working
 // TODO: create a command to run another process
-
 // TODO: be able to grow/shrink outputviews
 // TODO: be able to set on/off/hover line numbers
 // TODO: select a view group with the mouse
+// TODO: dump logs using the configuration name OR the task's label
+// TODO: cursor on cmd bar is not showing
 
 // BUGS:
 
@@ -679,13 +682,13 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 // change fold to keep (done)
 // fold +string -string2 (both prune and include)
 // replace ... (done)
+// dump buffers to disk (done)
 //
 // pipeline visulizer
-// remove find
-// jump ie j
+// remove find (done)
+// jump ie j (done)
 // color (done)
 // expand (ie expand a fold)
-// dump
 // kill process/runner (refactor runner/child_processes to make it easier for interaction with UI)
 // start cmd
 //

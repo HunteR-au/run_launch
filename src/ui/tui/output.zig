@@ -7,6 +7,7 @@ const debug_ui = @import("debug_ui");
 const process_buffer_mod = @import("pipeline/processbuffer.zig");
 const search = @import("pipeline/search.zig");
 const cmd_mod = @import("cmd/cmd.zig");
+const actions = @import("actions/actions.zig");
 const transforms = @import("pipeline/transforms.zig");
 
 // ui data structures
@@ -169,6 +170,11 @@ const ColorHandlerData = .{
     .event_str = "color",
     .arg_description = "pattern fg:color:bg:color:line",
     .handle = handleColorCmd,
+};
+const DumpBufferHandlerData = .{
+    .event_str = "dump",
+    .arg_description = "{--all | -a} {--filtered | -f}",
+    .handle = handleDumpCmd,
 };
 
 pub fn init(alloc: std.mem.Allocator, process_buf: *ProcessBuffer) !Output {
@@ -664,6 +670,49 @@ pub fn setupViaUiconfig(
     try self.nonowned_process_buffer.addReviewer(reviewer);
 }
 
+fn handleDumpCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @ptrCast(@alignCast(listener));
+    const alloc = self.arena.allocator();
+
+    var isAll = false;
+    var isFiltered = false;
+
+    // parse arguments
+    const arg_array = try utils.parseArgsLineWithQuoteGroups(alloc, args);
+    for (arg_array) |arg| {
+        if (std.mem.eql(u8, arg, "--all")) {
+            isAll = true;
+        } else if (std.mem.eql(u8, arg, "-a")) {
+            isAll = true;
+        } else if (std.mem.eql(u8, arg, "--filtered")) {
+            isFiltered = true;
+        } else if (std.mem.eql(u8, arg, "-f")) {
+            isFiltered = true;
+        }
+    }
+
+    if (!isAll and !self.is_focused) return;
+
+    // copy the filtered or non-filtered buffer
+    var buffer: ?[]u8 = null;
+    if (isFiltered) {
+        buffer = try self.copyUnfiltedBuffer(alloc);
+    } else {
+        buffer = try self.copyBuffer(alloc);
+    }
+    defer if (buffer) |b| alloc.free(b);
+
+    // dump to disk
+    actions.dumpOutputBuffer(
+        alloc,
+        buffer.?,
+        self.widget_ref.?.id,
+        self.widget_ref.?.process_name,
+    ) catch {
+        return;
+    };
+}
+
 fn handleColorCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
     const alloc = self.arena.allocator();
@@ -944,6 +993,7 @@ pub fn subscribeHandlersToCmd(self: *Output, cmd: *Cmd) !void {
         &PrevHandlerData,
         &JumpHandlerData,
         &InfoHandlerData,
+        &DumpBufferHandlerData,
     };
 
     inline for (handler_data) |data| {
@@ -975,7 +1025,7 @@ fn copyBuffer(self: *const Output, alloc: std.mem.Allocator) std.mem.Allocator.E
 
 fn copyUnfiltedBuffer(self: *const Output, alloc: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
     // TODO
-    self.nonowned_process_buffer.copy(alloc);
+    return self.nonowned_process_buffer.copyUnfilteredBuffer(alloc);
 }
 
 test "folding text" {

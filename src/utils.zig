@@ -289,6 +289,61 @@ pub fn get_home_path(alloc: std.mem.Allocator) ?[]const u8 {
     };
 }
 
+pub fn makeWindowsSafeFilename(
+    alloc: std.mem.Allocator,
+    input: []const u8,
+) ![]u8 {
+    // Forbidden characters on Windows
+    const forbidden = "\\/:*?\"<>|";
+
+    var list = try std.ArrayList(u8).initCapacity(alloc, 0);
+    errdefer list.deinit(alloc);
+
+    for (input) |c| {
+        if (c < 32) continue; // skip control chars
+        if (std.mem.indexOfScalar(u8, forbidden, c) != null) {
+            try list.append(alloc, '_');
+        } else {
+            try list.append(alloc, c);
+        }
+    }
+
+    var out = try list.toOwnedSlice(alloc);
+
+    // Trim trailing spaces and periods
+    while (out.len > 0 and (out[out.len - 1] == ' ' or out[out.len - 1] == '.')) {
+        out = out[0 .. out.len - 1];
+    }
+
+    // Avoid empty filename
+    if (out.len == 0) {
+        return try alloc.dupe(u8, "unnamed");
+    }
+
+    // Avoid reserved device names
+    const lower = try alloc.alloc(u8, out.len);
+    _ = std.ascii.lowerString(lower, out);
+    defer alloc.free(lower);
+
+    const reserved = [_][]const u8{
+        "con",  "prn",  "aux",  "nul",
+        "com1", "com2", "com3", "com4",
+        "com5", "com6", "com7", "com8",
+        "com9", "lpt1", "lpt2", "lpt3",
+        "lpt4", "lpt5", "lpt6", "lpt7",
+        "lpt8", "lpt9",
+    };
+
+    for (reserved) |r| {
+        if (std.mem.eql(u8, lower, r)) {
+            // Append underscore to avoid collision
+            return try std.mem.concat(alloc, u8, &.{ out, "_" });
+        }
+    }
+
+    return out;
+}
+
 const testing = std.testing;
 test "parseArgsLineWithQuoteGroups: with quotes" {
     const alloc = testing.allocator_instance.allocator();
