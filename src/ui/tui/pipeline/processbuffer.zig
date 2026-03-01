@@ -12,11 +12,7 @@ pub const ProcessBuffer = struct {
     };
     alloc: std.mem.Allocator,
     m: std.Thread.Mutex,
-    //buffer: std.ArrayList(u8),
-    //buffer_newlines: std.ArrayList(usize),
     buffer: LineBuffer,
-    //filtered_buffer: std.ArrayList(u8),
-    //filtered_newlines: std.ArrayList(usize),
     filtered_buffer: LineBuffer,
     nonowned_iterators: std.ArrayList(IteratorPtr),
     lastNewLine: usize = 0,
@@ -38,11 +34,7 @@ pub const ProcessBuffer = struct {
         self.* = .{
             .alloc = alloc,
             .m = std.Thread.Mutex{},
-            //.buffer = try .initCapacity(alloc, 100),
             .buffer = try .init(alloc),
-            //.buffer_newlines = try .initCapacity(alloc, 100),
-            //.filtered_buffer = try .initCapacity(alloc, 100),
-            //.filtered_newlines = try .initCapacity(alloc, 100),
             .filtered_buffer = try .init(alloc),
             .nonowned_iterators = try .initCapacity(alloc, 100),
             .pipeline = try .init(alloc),
@@ -51,11 +43,8 @@ pub const ProcessBuffer = struct {
     }
 
     pub fn deinit(self: *ProcessBuffer) void {
-        //self.buffer.deinit(self.alloc);
         self.nonowned_iterators.deinit(self.alloc);
-        //self.buffer_newlines.deinit(self.alloc);
         self.filtered_buffer.deinit();
-        // self.filtered_newlines.deinit(self.alloc);
         self.pipeline.deinit();
         self.alloc.destroy(self);
     }
@@ -78,8 +67,6 @@ pub const ProcessBuffer = struct {
         self.m.lock();
         defer self.m.unlock();
 
-        //try update_newline_indexs(self.alloc, &self.buffer_newlines, buf, self.buffer.items.len);
-        //try self.buffer.appendSlice(self.alloc, buf);
         try self.buffer.append(buf);
         try self.processPipeline();
     }
@@ -116,57 +103,6 @@ pub const ProcessBuffer = struct {
         }
     }
 
-    // pub fn processPipeline(self: *ProcessBuffer) !void {
-    //     // pass any new lines into the pipeline
-    //     switch (builtin.target.os.tag) {
-    //         .windows => {
-    //             const sep = "\n";
-    //             const idx = std.mem.lastIndexOf(u8, self.buffer.items, sep);
-    //             if (idx) |i| {
-    //                 if (i <= self.lastNewLine) return;
-    //                 const newlines = self.buffer.items[self.lastNewLine .. i + 1];
-    //                 // NOTE: if filter_lines is missing newline at the end it may be
-    //                 // problematic...
-    //                 const filtered_lines = try self.pipeline.runPipeline(
-    //                     self.alloc,
-    //                     newlines,
-    //                     MetaData{ .bufferOffset = self.lastNewLine },
-    //                 );
-    //                 defer self.alloc.free(filtered_lines);
-    //                 self.lastNewLine = i + 1;
-    //                 try update_newline_indexs(
-    //                     self.alloc,
-    //                     &self.filtered_newlines,
-    //                     filtered_lines,
-    //                     self.filtered_buffer.items.len,
-    //                 );
-    //                 try self.filtered_buffer.appendSlice(self.alloc, filtered_lines);
-    //             }
-    //         },
-    //         else => {
-    //             const sep = '\n';
-    //             const idx = std.mem.lastIndexOfScalar(u8, self.buffer.items, sep);
-    //             if (idx) |i| {
-    //                 const newlines = self.buffer.items[self.lastNewLine .. i + 1];
-    //                 const filtered_lines = try self.pipeline.runPipeline(
-    //                     self.alloc,
-    //                     newlines,
-    //                     MetaData{ .bufferOffset = self.lastNewLine },
-    //                 );
-    //                 defer self.alloc.free(filtered_lines);
-    //                 self.lastNewLine = i + 1;
-    //                 try update_newline_indexs(
-    //                     self.alloc,
-    //                     &self.filtered_newlines,
-    //                     filtered_lines,
-    //                     self.filtered_buffer.items.len,
-    //                 );
-    //                 try self.filtered_buffer.appendSlice(self.alloc, filtered_lines);
-    //             }
-    //         },
-    //     }
-    // }
-
     fn reprocessPipeline(self: *ProcessBuffer) !void {
         std.log.debug("ProcessBuffer:reprocessPipeline()", .{});
 
@@ -178,16 +114,6 @@ pub const ProcessBuffer = struct {
         self.invalidateAllIterators();
         try self.processPipeline();
     }
-
-    // fn reprocessPipeline(self: *ProcessBuffer) !void {
-    //     std.log.debug("ProcessBuffer:reprocessPipeline()", .{});
-
-    //     self.filtered_newlines.clearRetainingCapacity();
-    //     self.filtered_buffer.clearRetainingCapacity();
-    //     self.lastNewLine = 0;
-    //     self.invalidateAllIterators();
-    //     try self.processPipeline();
-    // }
 
     pub fn addFilter(self: *ProcessBuffer, filter: Filter) !void {
         self.m.lock();
@@ -593,26 +519,6 @@ pub const ProcessBuffer = struct {
                 .line = self.process_buffer.filtered_buffer.getLine(self.line_index.index).?,
                 .buffer_offset = self.process_buffer.filtered_buffer.getIndexOfLine(self.line_index.index).?,
             };
-
-            // if (self.line_index.index == 0) {
-            //     line_start = 0;
-            // } else {
-            //     // TODO: check that +1 doesn't go over buffer length
-            //     line_start = self.process_buffer.filtered_newlines.items[self.line_index.index - 1] + 1;
-            // }
-
-            // if (self.line_index.index == self.process_buffer.filtered_buffer.countLines) {
-            //     //line_end = self.process_buffer.filtered_buffer.items.len;
-            //     line_end = self.process_buffer.filtered_buffer.getLine().?.len + line_start;
-            // } else {
-            //     line_end = self.process_buffer.filtered_buffer.getLine
-            //     //line_end = self.process_buffer.filtered_newlines.items[self.line_index.index];
-            // }
-
-            // return .{
-            //     .line = self.process_buffer.filtered_buffer.items[line_start..line_end],
-            //     .buffer_offset = line_start,
-            // };
         }
 
         pub fn setLine(self: *LineIterator, line_num: usize) !void {

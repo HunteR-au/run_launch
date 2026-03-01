@@ -163,11 +163,20 @@ pub const CmdWidget = struct {
             children[1] = hinter_child;
         }
 
-        return .{
+        var surface: vxfw.Surface = .{
             .size = max_size,
             .widget = self.widget(),
             .buffer = &.{},
             .children = children,
         };
+
+        // set the cursor position
+        surface.cursor = vxfw.CursorState{
+            .row = @as(u16, @truncate(@as(u17, @bitCast(cmdbar_height_origin)))) + 1,
+            .col = self.cmdbar_view.textBox.prev_cursor_col + 1,
+            .shape = .block,
+        };
+
+        return surface;
     }
 };

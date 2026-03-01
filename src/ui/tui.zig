@@ -183,9 +183,6 @@ const Model = struct {
                     try self.modelview.focus_outputview_by_idx(0);
                     try output_view.eventHandler(ctx, event);
                 }
-
-                //try self.output_view.eventHandler(ctx, event);
-                //try self.output_view.focused_ow.?.handleEvent(ctx, event);
             },
             .key_press => |key| {
                 if (key.matches('c', .{ .ctrl = false })) {
@@ -217,15 +214,18 @@ const Model = struct {
                 } else if (key.matches('e', .{ .shift = true }) or
                     key.matches(vaxis.Key.tab, .{}))
                 {
-                    const output_view = self.modelview.get_focused();
-                    if (output_view) |ov| {
-                        const output = ov.focus_next();
-                        if (output) |o| {
-                            try ctx.requestFocus(o.widget());
-                            return ctx.consumeAndRedraw();
+                    // Only switch outputs in the main mode
+                    if (self.mode == .main) {
+                        const output_view = self.modelview.get_focused();
+                        if (output_view) |ov| {
+                            const output = ov.focus_next();
+                            if (output) |o| {
+                                try ctx.requestFocus(o.widget());
+                                return ctx.consumeAndRedraw();
+                            }
                         }
+                        return;
                     }
-                    return;
                 } else if (key.matches('s', .{})) {
                     const output_view = self.modelview.get_focused();
                     if (output_view) |ov| {
@@ -631,10 +631,11 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 
 // TODOs
 
+// create a wrapped line mode
+
 // create option to render the tail
 //  - this is going to be kinda complicated
 
-// historywidget - keep history scroll relative to bottom
 // - fix the clean up management around processbuffers
 // - I think its time the model has a init and deinit
 
@@ -654,10 +655,10 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 // TODO: be able to set on/off/hover line numbers
 // TODO: select a view group with the mouse
 // TODO: dump logs using the configuration name OR the task's label
-// TODO: cursor on cmd bar is not showing
 
 // BUGS:
 
+// TAB breaks the focus for the cmdwidget!!!!
 // ScrollBars now has a bug in handleCapture new_view_cl_start: u32 = @intFromFloat(@ceil(new_view_col_start_f))
 
 // tasks child.wait() closes pipes
@@ -678,20 +679,11 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 // noinfo
 
 // cmd ideas
-// prune ... (done)
-// change fold to keep (done)
 // fold +string -string2 (both prune and include)
-// replace ... (done)
-// dump buffers to disk (done)
 //
 // pipeline visulizer
-// remove find (done)
-// jump ie j (done)
-// color (done)
-// expand (ie expand a fold)
 // kill process/runner (refactor runner/child_processes to make it easier for interaction with UI)
 // start cmd
-//
 
 // !!advanced ideas!!
 // combine two buffers
