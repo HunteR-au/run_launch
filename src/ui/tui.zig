@@ -307,11 +307,6 @@ const Model = struct {
         const self: *Model = @ptrCast(@alignCast(ptr));
         const max_size = ctx.max.size();
 
-        //const child_ctx = ctx.withConstraints(ctx.min, .{
-        //    .width = 150,
-        //    .height = 100,
-        //});
-
         var children: []vxfw.SubSurface = undefined;
 
         switch (self.mode) {
@@ -342,8 +337,6 @@ const Model = struct {
             .jsonview => {},
         }
 
-        //return try vxfw.Surface.initWithChildren(ctx.arena, self.widget(), vxfw.Size{ .height = 50, .width = 10 }, children);
-
         return .{
             // A Surface must have a size. Our root widget is the size of the screen
             .size = max_size,
@@ -362,16 +355,46 @@ const Model = struct {
         if (handle) |*h| h.deinit();
     }
 
-    const StartHandlerData = .{ .event_str = "start", .handle = handleStartCmd };
+    fn handleQuitCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+        //const _: *Model = @ptrCast(@alignCast(listener));
+        _ = listener;
+        _ = args;
+        keep_running.store(false, .seq_cst);
+        // TODO: not sure how to force an event update here
+    }
+
+    fn handleQuitSaveCmd(args: []const u8, listner: *anyopaque) std.mem.Allocator.Error!void {
+        _ = listner;
+        _ = args;
+        keep_running.store(false, .seq_cst);
+    }
+
+    const StartHandlerData = .{
+        .event_str = "start",
+        .handle = handleStartCmd,
+        .arg_description = "cmd_str",
+    };
+    const QuitHandlerData = .{
+        .event_str = "q",
+        .handle = handleQuitCmd,
+        .arg_description = null,
+    };
+    const QuitSaveHandlerData = .{
+        .event_str = "qw",
+        .handle = handleQuitSaveCmd,
+        .arg_description = null,
+    };
 
     pub fn subscribeHandlersToCmd(self: *Model) !void {
         const hander_data = comptime .{
             &StartHandlerData,
+            &QuitHandlerData,
         };
 
         inline for (hander_data) |data| {
             const handler: Handler = .{
                 .event_str = data.event_str,
+                .arg_description = data.arg_description,
                 .handle = data.handle,
                 .listener = self,
             };
@@ -653,12 +676,13 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 // TODO: create a command to run another process
 // TODO: be able to grow/shrink outputviews
 // TODO: be able to set on/off/hover line numbers
+//  -   set to show on hover (not done)
+//  -   show actual lines when filtering (not done)
 // TODO: select a view group with the mouse
 // TODO: dump logs using the configuration name OR the task's label
 
 // BUGS:
 
-// TAB breaks the focus for the cmdwidget!!!!
 // ScrollBars now has a bug in handleCapture new_view_cl_start: u32 = @intFromFloat(@ceil(new_view_col_start_f))
 
 // tasks child.wait() closes pipes
@@ -678,6 +702,12 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 // justerrors
 // noinfo
 
+// IDEA: make a simple file which lists a bunch of cmd lines so that it is easy to use run_launch
+
+// IDEA: quit like vim. With a wq (to save all logs) or a q
+// FEATURE: grid views
+// IDEA:
+
 // cmd ideas
 // fold +string -string2 (both prune and include)
 //
@@ -694,46 +724,3 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 // how do to splitting -- not sure
 // need childProcessBuffers which use the same base buffer
 // but clone filter rules and grandfather them in
-
-// Segmentation fault at address 0xffffffffffffffff
-// C:\_\zig\p\uucode-0.1.0-ZZjBPj96QADXyt5sqwBJUnhaDYs_qBeeKijZvlRa0eqM\src\grapheme.zig:32:44: 0x7ff6f8187ea6 in init (run_launch_zcu.obj)
-//             const next_cp = next_cp_it.next();
-//                                            ^
-// C:\_\zig\p\vaxis-0.5.1-BWNV_GMyCQBtxcEkSAEb_EXbm8A24FWJFC7fXiWUVx9Y\src\unicode.zig:24:73: 0x7ff6f81d278c in init (run_launch_zcu.obj)
-//             .inner = uucode.grapheme.Iterator(uucode.utf8.Iterator).init(.init(str)),
-//                                                                         ^
-// C:\_\zig\p\vaxis-0.5.1-BWNV_GMyCQBtxcEkSAEb_EXbm8A24FWJFC7fXiWUVx9Y\src\unicode.zig:63:33: 0x7ff6f81b039d in graphemeIterator (run_launch_zcu.obj)
-//     return GraphemeIterator.init(str);
-//                                 ^
-// C:\_\zig\p\vaxis-0.5.1-BWNV_GMyCQBtxcEkSAEb_EXbm8A24FWJFC7fXiWUVx9Y\src\vxfw\TextField.zig:137:40: 0x7ff6f81ea32f in insertSliceAtCursor (run_launch_zcu.obj)
-//     var iter = unicode.graphemeIterator(data);
-//                                        ^
-// C:\_\zig\p\vaxis-0.5.1-BWNV_GMyCQBtxcEkSAEb_EXbm8A24FWJFC7fXiWUVx9Y\src\vxfw\TextField.zig:115:45: 0x7ff6f81de685 in handleEvent (run_launch_zcu.obj)
-//                 try self.insertSliceAtCursor(text);
-//                                             ^
-// C:\dev\run_launch\src\ui\tui\cmdwidget.zig:102:49: 0x7ff6f81dd6af in eventHandler (run_launch_zcu.obj)
-//                     try self.textBox.handleEvent(ctx, event);
-//                                                 ^
-// C:\dev\run_launch\src\ui\tui\cmdwidget.zig:61:37: 0x7ff6f81bde3e in typeErasedEventHandler (run_launch_zcu.obj)
-//         return try self.eventHandler(ctx, event);
-//                                     ^
-// C:\_\zig\p\vaxis-0.5.1-BWNV_GMyCQBtxcEkSAEb_EXbm8A24FWJFC7fXiWUVx9Y\src\vxfw\vxfw.zig:283:26: 0x7ff6f8184382 in handleEvent (run_launch_zcu.obj)
-//             return handle(self.userdata, ctx, event);
-//                          ^
-// C:\_\zig\p\vaxis-0.5.1-BWNV_GMyCQBtxcEkSAEb_EXbm8A24FWJFC7fXiWUVx9Y\src\vxfw\App.zig:592:31: 0x7ff6f80ccca2 in handleEvent (run_launch_zcu.obj)
-//         try target.handleEvent(ctx, event);
-//                               ^
-// C:\_\zig\p\vaxis-0.5.1-BWNV_GMyCQBtxcEkSAEb_EXbm8A24FWJFC7fXiWUVx9Y\src\vxfw\App.zig:137:54: 0x7ff6f808b899 in run (run_launch_zcu.obj)
-//                         try focus_handler.handleEvent(&ctx, event);
-//                                                      ^
-// C:\dev\run_launch\src\ui\tui.zig:485:16: 0x7ff6f808a2c5 in run_tui (run_launch_zcu.obj)
-//     try app.run(model.widget(), .{});
-//                ^
-// C:\_\Microsoft\WinGet\Packages\zig.zig_Microsoft.Winget.Source_8wekyb3d8bbwe\zig-x86_64-windows-0.15.2\lib\std\Thread.zig:528:21: 0x7ff6f8048585 in callFn__anon_41297 (run_launch_zcu.obj)
-//                     @call(.auto, f, args) catch |err| {
-//                     ^
-// C:\_\Microsoft\WinGet\Packages\zig.zig_Microsoft.Winget.Source_8wekyb3d8bbwe\zig-x86_64-windows-0.15.2\lib\std\Thread.zig:622:30: 0x7ff6f802e4d4 in entryFn (run_launch_zcu.obj)
-//                 return callFn(f, self.fn_args);
-//                              ^
-// ???:?:?: 0x7ffe643fe8d6 in ??? (KERNEL32.DLL)
-// ???:?:?: 0x7ffe653ac53b in ??? (ntdll.dll)

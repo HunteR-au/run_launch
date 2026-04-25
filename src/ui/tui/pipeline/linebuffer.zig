@@ -69,6 +69,7 @@ pub const LineBuffer = struct {
 
     pub fn getLines(self: *LineBuffer) ?[]const u8 {
         if (self.isEmpty()) return null;
+        if (self.countLines() == 0) return null;
 
         return self.buf.items[0 .. self.newlines.items[self.newlines.items.len - 1] + 1];
     }

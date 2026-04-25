@@ -8,6 +8,8 @@ const vxfw = vaxis.vxfw;
 const Border = vxfw.Border;
 const ScrollBar = vxfw.ScrollBars;
 const ScrollView = vxfw.ScrollView;
+const LineNumbers = @import("widgets/linenumbers.zig").LineNumbersWidget;
+const LinesAndTextWidget = @import("widgets/linesandtext.zig").LinesAndTextWidget;
 const graphemedata = vaxis.Graphemes;
 const Unicode = vaxis.Unicode;
 const UUID = utils.uuid.UUID;
@@ -20,6 +22,9 @@ const MultiStyleText = @import("widgets/mutistyletext.zig").MultiStyleText(
     Output.StyleList,
 );
 
+const FocusedBorder: vaxis.Style = .{ .fg = .{ .rgb = .{ 255, 255, 0 } } };
+const UnfocusedBorder: vaxis.Style = .{ .fg = .{ .rgb = .{ 255, 255, 255 } } };
+
 pub const OutputWidget = struct {
     const RowInfo = struct { row: usize, offset: usize };
 
@@ -27,7 +32,7 @@ pub const OutputWidget = struct {
     text: MultiStyleText = undefined,
     scroll_bars: ScrollBar,
     scroll_sticky_mode: bool = false,
-    border: Border,
+    lines_widget: *LineNumbers,
     process_name: []const u8,
     id: UUID,
     temp: vxfw.Text = undefined,
@@ -57,7 +62,7 @@ pub const OutputWidget = struct {
             .process_name = pname,
             .id = id,
             .scroll_bars = undefined,
-            .border = undefined,
+            .lines_widget = try .init(alloc),
             .output = try Output.init(alloc, buffer),
             .window = .{ .num_lines = 200, .output = undefined },
         };
@@ -78,13 +83,12 @@ pub const OutputWidget = struct {
             .estimated_content_width = 30,
         };
 
-        output_widget.border = .{ .child = output_widget.scroll_bars.widget() };
-
         return output_widget;
     }
 
     pub fn deinit(self: *OutputWidget) void {
         self.alloc.free(self.process_name);
+        self.lines_widget.deinit();
         self.output.deinit();
         self.alloc.destroy(self);
     }
@@ -353,23 +357,12 @@ pub const OutputWidget = struct {
 
     pub fn moveOutputDownLines(self: *OutputWidget, n: usize) void {
         self.window.linesDownEx(@truncate(n));
-
-        //// TODO: allow a larger number than u8
-        //if (self.window.linesDown(@intCast(n))) {
-        //    //std.debug.print("window linesjDown returned\n", .{});
-        //} else {
-        //    //std.debug.print("scroll_view linesDown returned\n", .{});
-        //    _ = self.scroll_bars.scroll_view.scroll.linesDown(@intCast(n));
-        //}
     }
 
     pub fn setStickyScroll(self: *OutputWidget, is_sticky: bool) void {
         if (!is_sticky) {
             self.scroll_sticky_mode = false;
             self.window.is_sticky = false;
-            //self.force_sticky_off = true;
-            //self.scroll_bars.scroll_view.scroll.pending_lines = 0;
-            //self.window.pending_lines = 0;
         } else {
             self.scroll_sticky_mode = true;
             self.window.is_sticky = true;
@@ -396,6 +389,35 @@ pub const OutputWidget = struct {
             row,
             offset + self.window.startingOffset(), // this line seg faults from callback :(
         );
+    }
+
+    // Used as a callback to remove type information for widgets needing to call this
+    fn rowToLineCallback(ptr: *anyopaque, row: usize) ?usize {
+        var self: *OutputWidget = @ptrCast(@alignCast(ptr));
+        const scroll_offset: usize = @intCast(self.scroll_bars.scroll_view.scroll.vertical_offset);
+        const text_row = row + scroll_offset;
+        return self.getLineNumberViaRow(text_row);
+    }
+
+    // TODO: this needs some thought, what is row in this context?
+    // I've had to adjust for the scroll offset in the callback but it should
+    // probably be in here.
+    pub fn getLineNumberViaRow(self: *OutputWidget, row: usize) ?usize {
+        const buffer_ofs = self.rendered_text_offset_at_row_start.get(row);
+        if (buffer_ofs) |ofs| {
+            // convert the buffer offset to line number
+            const line_num = self.output
+                .nonowned_process_buffer
+                .filtered_buffer
+                .getLineIndexFromOffset(ofs);
+
+            std.debug.print("row={} ofs={} line={?}\n", .{ row, ofs, line_num });
+
+            return line_num;
+        }
+
+        // the row doesn't exist
+        return null;
     }
 
     const LineType = enum { first, last };
@@ -435,6 +457,10 @@ pub const OutputWidget = struct {
     pub fn draw(self: *OutputWidget, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const max_size = ctx.max.size();
 
+        // Pre-calculate gutter width
+        const total_lines = self.output.nonowned_process_buffer.filtered_buffer.countLines();
+        const gutter_width = self.lines_widget.calculateGutterWidth(total_lines);
+
         // clear the rendered buffer offsets at starting row positions
         self.rendered_text_offset_at_row_start.clearAndFree(self.alloc);
         self.rendered_text_offset_highest_key = null;
@@ -458,42 +484,71 @@ pub const OutputWidget = struct {
 
         self.window.resolvePendingLines();
 
+        // build the MultiStyleText structure
         self.text = .{
+            // copy the windowed text
             .text = self.window.getSlice(ctx.arena) catch @panic("Window requested buffer out of range!"),
+            // copy the style cache
             .style_cache = .init(
                 &map_cpy,
                 &list_cpy,
                 self.window.startingOffset(),
             ),
+            // add the callback information
             .cb_ptr = self,
             .cb_buffer_offset_at_row = save_rendered_buffer_offset,
         };
 
-        if (self.output.is_focused) {
-            // color border yellow
-            self.border.style = vaxis.Style{ .fg = .{ .rgb = .{ 255, 255, 0 } } };
+        var border_child: vxfw.SubSurface = undefined;
+        if (self.output.show_lines) {
+            // Create the lines and text widget
+            var lines_and_text = try ctx.arena.create(LinesAndTextWidget);
+            lines_and_text.* = .{
+                .gutter_width = gutter_width,
+                .window_ofs = self.window.last_draw.top_line,
+                .text = self.scroll_bars.widget(),
+                .lines = self.lines_widget,
+                .line_to_row = .{
+                    .ptr = self,
+                    .callback = rowToLineCallback,
+                },
+            };
+
+            // Create the border widget
+            const is_focused = self.output.is_focused;
+            const border: vxfw.Border = .{
+                .child = lines_and_text.widget(),
+                .style = if (is_focused) FocusedBorder else UnfocusedBorder,
+                .labels = &.{.{
+                    .text = self.process_name,
+                    .alignment = .top_left,
+                }},
+            };
+            border_child = .{
+                .origin = .{ .row = 0, .col = 0 },
+                .surface = try border.draw(ctx),
+            };
         } else {
-            self.border.style = vaxis.Style{ .fg = .{ .rgb = .{ 255, 255, 255 } } };
+            const is_focused = self.output.is_focused;
+            const border: vxfw.Border = .{
+                .child = self.scroll_bars.widget(),
+                .style = if (is_focused) FocusedBorder else UnfocusedBorder,
+                .labels = &.{.{
+                    .text = self.process_name,
+                    .alignment = .top_left,
+                }},
+            };
+            border_child = .{
+                .origin = .{ .row = 0, .col = 0 },
+                .surface = try border.draw(ctx),
+            };
         }
-
-        const border_child: vxfw.SubSurface = .{
-            .origin = .{ .row = 0, .col = 0 },
-            .surface = try self.border.draw(ctx),
-        };
-
-        const title: vxfw.Text = .{ .text = self.process_name };
-        const title_child: vxfw.SubSurface = .{
-            .z_index = 1,
-            .origin = .{ .row = 0, .col = 2 },
-            .surface = try title.draw(ctx),
-        };
 
         // somehow this is causing a bug
         self.window.updateWindowPostRender(border_child.surface.size.height - 2);
 
-        const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
+        const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
         children[0] = border_child;
-        children[1] = title_child;
 
         return .{
             .size = max_size,
@@ -541,13 +596,6 @@ const Window = struct {
         return .{ .idx = line_num };
     }
 
-    // newlines count as part of the preceding line
-    //pub fn getLineFromOffset(self: *Window, offset: usize) usize {
-    //    // TODO: this needs an atomic access to filtered_newlines
-    //
-    //    return self.output.nonowned_process_buffer.getLineFromOffset(offset);
-    //}
-
     // set the offset of the first character of the line
     pub fn getOffsetFromLine(self: *Window, line_num: usize) !usize {
         const idx = self.calNewlineIndex(line_num);
@@ -586,31 +634,12 @@ const Window = struct {
     pub fn windowByteLen(self: *Window) usize {
         const ofs = self.startingOffset();
         const last_line = self.lastLine();
-        //const idx = self.calNewlineIndex(last_line);
 
         const end_index = self.output.nonowned_process_buffer.filtered_buffer.getLineEndIndex(last_line) orelse {
             // The index of the lastline is beyond the amount of lines
             return self.last_draw.process_buffer_len - ofs;
         };
         return end_index - ofs;
-
-        // switch (idx) {
-        //     .idx => |i| {
-        //         if (self.last_draw.process_buffer_num_lines < 2) { // if there is only 1 newline
-        //             return self.last_draw.process_buffer_len - ofs;
-        //         }
-        //         if (i > self.last_draw.process_buffer_num_lines - 2) { // if i is last newline
-        //             return self.last_draw.process_buffer_len - ofs;
-        //         } else {
-        //             const buffer_ofs = self.output.nonowned_process_buffer.filtered_newlines.items[i + 1];
-        //             return buffer_ofs - ofs;
-        //         }
-        //     },
-        //     .first => return 0,
-        //     .outOfBounds => {
-        //         return self.last_draw.process_buffer_len - ofs;
-        //     },
-        // }
     }
 
     pub fn getParentTotalLines(self: *Window) usize {

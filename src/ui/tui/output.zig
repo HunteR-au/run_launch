@@ -107,6 +107,7 @@ handlers_ids: std.ArrayList(cmd_mod.HandleId),
 filter_ids: std.ArrayList(Filter.HandleId),
 reviewer_ids: std.ArrayList(Reviewer.HandleId),
 is_focused: bool = false,
+show_lines: bool = true,
 
 style_list: StyleList,
 style_map: StyleMap,
@@ -170,6 +171,11 @@ const ColorHandlerData = .{
     .event_str = "color",
     .arg_description = "pattern fg:color:bg:color:line",
     .handle = handleColorCmd,
+};
+const ShowLinesHandlerData = .{
+    .event_str = "lines",
+    .arg_description = "{--all on|off}",
+    .handle = handleShowLinesCmd,
 };
 const DumpBufferHandlerData = .{
     .event_str = "dump",
@@ -670,6 +676,42 @@ pub fn setupViaUiconfig(
     try self.nonowned_process_buffer.addReviewer(reviewer);
 }
 
+fn handleShowLinesCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @ptrCast(@alignCast(listener));
+    const alloc = self.arena.allocator();
+
+    // parse arguments
+    const arg_array = try utils.parseArgsLineWithQuoteGroups(alloc, args);
+    var b_all_flag = false;
+
+    // check for --all, if so set the correct value and exit
+    for (arg_array) |arg| {
+        if (std.mem.eql(u8, arg, "--all")) {
+            b_all_flag = true;
+            continue;
+        }
+        if (b_all_flag == true) {
+            if (std.mem.eql(u8, arg, "on")) {
+                self.show_lines = true;
+                return;
+            } else if (std.mem.eql(u8, arg, "off")) {
+                self.show_lines = false;
+                return;
+            } else {
+                // an invalid argument
+                return;
+            }
+        }
+    }
+
+    // The all flag wasn't set so only proceed if we are focused
+    if (!self.is_focused) return;
+
+    // the global flag isn't used, toggle the value
+    self.show_lines = if (self.show_lines) false else true;
+    return;
+}
+
 fn handleDumpCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
     const alloc = self.arena.allocator();
@@ -993,6 +1035,7 @@ pub fn subscribeHandlersToCmd(self: *Output, cmd: *Cmd) !void {
         &PrevHandlerData,
         &JumpHandlerData,
         &InfoHandlerData,
+        &ShowLinesHandlerData,
         &DumpBufferHandlerData,
     };
 

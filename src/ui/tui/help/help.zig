@@ -83,5 +83,10 @@ pub fn getHelpString() []const u8 {
     \\j n     
     \\
     \\      - jump to line n
+    \\
+    \\lines {--all on|off}
+    \\
+    \\      - toggle focused output lines on or off OR
+    \\          set for all outputs
     ;
 }
