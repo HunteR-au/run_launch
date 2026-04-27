@@ -1043,7 +1043,7 @@ pub fn subscribeHandlersToCmd(self: *Output, cmd: *Cmd) !void {
         const handler: Handler = .{
             .event_str = data.event_str,
             .arg_description = data.arg_description,
-            .handle = data.handle,
+            .handle = .{ .regular_fn = data.handle },
             .listener = self,
         };
         const id = try self.cmd_ref.?.addHandler(handler);

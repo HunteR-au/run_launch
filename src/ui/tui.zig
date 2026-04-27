@@ -9,6 +9,9 @@ pub const Cmd = @import("tui/cmd/cmd.zig").Cmd;
 pub const help = @import("tui/help/help.zig");
 pub const runner = @import("runner");
 
+const cmdevents = @import("tui/cmd/cmdevents.zig");
+const actions = @import("tui/actions/actions.zig");
+
 pub const ConfiguredRunner = runner.ConfiguredRunner;
 pub const OutputView = view.OutputView;
 pub const vxfw = vaxis.vxfw;
@@ -58,7 +61,7 @@ const Model = struct {
         };
     }
 
-    fn typeErasedCaptureHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
+    pub fn typeErasedCaptureHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         const self: *Model = @ptrCast(@alignCast(ptr));
         return self.handleCapture(ctx, event);
     }
@@ -91,19 +94,6 @@ const Model = struct {
                 } else if (key.matches(vaxis.Key.f2, .{})) {
                     if (self.mode == .main) {
                         const does_help_exist = self.help_id != null;
-
-                        //{
-                        //    // check if a help output already exists
-                        //    self.process_buffers.m.lock();
-                        //    defer self.process_buffers.m.unlock();
-                        //    var iter = self.process_buffers.map.keyIterator();
-                        //    while (iter.next()) |map_key| {
-                        //        if (std.mem.eql(u8, &map_key.*.bytes, &self.help_id.bytes)) {
-                        //            does_help_exist = true;
-                        //            break;
-                        //        }
-                        //    }
-                        //}
 
                         if (!does_help_exist) {
                             try self.show_help(self.arena.allocator());
@@ -142,7 +132,7 @@ const Model = struct {
     }
 
     /// This function will be called from the vxfw runtime.
-    fn typeErasedEventHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
+    pub fn typeErasedEventHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         const self: *Model = @ptrCast(@alignCast(ptr));
 
         // For some reason tick doesn't seem to be triggered
@@ -292,12 +282,29 @@ const Model = struct {
             },
             .mouse => |mouse| {
                 _ = mouse;
-                //std.debug.print("model: mouse type {?}\n", .{mouse.type});
-                //std.debug.print("mouse x {?}\n", .{mouse.col});
-                //std.debug.print("mouse y {?}\n", .{mouse.row});
             },
             .focus_in => {
                 return ctx.requestFocus(self.widget());
+            },
+            .app => |appevent| {
+                const cmdevent = cmdevents.getCmdEvent(appevent);
+                if (cmdevent) |e| switch (e.*) {
+                    .run_cmd => |cmd| {
+                        if (std.mem.eql(u8, cmd.cmd_str, QuitHandlerData.event_str)) {
+                            // quit the app
+                            keep_running.store(false, .seq_cst);
+                            ctx.quit = true;
+                            return;
+                        } else if (std.mem.eql(u8, cmd.cmd_str, QuitSaveHandlerData.event_str)) {
+                            // save then quit
+                            try self.dumpAllOutputs();
+                            keep_running.store(false, .seq_cst);
+                            ctx.quit = true;
+                            return;
+                        }
+                    },
+                    else => {},
+                };
             },
             else => {},
         }
@@ -355,18 +362,18 @@ const Model = struct {
         if (handle) |*h| h.deinit();
     }
 
-    fn handleQuitCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-        //const _: *Model = @ptrCast(@alignCast(listener));
-        _ = listener;
-        _ = args;
-        keep_running.store(false, .seq_cst);
-        // TODO: not sure how to force an event update here
-    }
-
-    fn handleQuitSaveCmd(args: []const u8, listner: *anyopaque) std.mem.Allocator.Error!void {
-        _ = listner;
-        _ = args;
-        keep_running.store(false, .seq_cst);
+    fn dumpAllOutputs(self: *Model) !void {
+        // Dump all output buffers to disk
+        for (self.modelview.outputviews.items) |outputview| {
+            for (outputview.outputs.items) |output| {
+                try actions.dumpOutputBuffer(
+                    self._alloc,
+                    try output.output.nonowned_process_buffer.copyUnfilteredBuffer(self._alloc),
+                    output.id,
+                    output.process_name,
+                );
+            }
+        }
     }
 
     const StartHandlerData = .{
@@ -376,26 +383,39 @@ const Model = struct {
     };
     const QuitHandlerData = .{
         .event_str = "q",
-        .handle = handleQuitCmd,
         .arg_description = null,
     };
     const QuitSaveHandlerData = .{
         .event_str = "qw",
-        .handle = handleQuitSaveCmd,
         .arg_description = null,
     };
 
     pub fn subscribeHandlersToCmd(self: *Model) !void {
         const hander_data = comptime .{
             &StartHandlerData,
+        };
+
+        const evented_handler_data = comptime .{
             &QuitHandlerData,
+            &QuitSaveHandlerData,
         };
 
         inline for (hander_data) |data| {
             const handler: Handler = .{
                 .event_str = data.event_str,
                 .arg_description = data.arg_description,
-                .handle = data.handle,
+                .handle = .{ .regular_fn = data.handle },
+                .listener = self,
+            };
+            const id = try self.cmd.addHandler(handler);
+            try self.handlers_ids.append(self._alloc, id);
+        }
+
+        inline for (evented_handler_data) |data| {
+            const handler: Handler = .{
+                .event_str = data.event_str,
+                .arg_description = data.arg_description,
+                .handle = .{ .event_fn = Model.typeErasedEventHandler },
                 .listener = self,
             };
             const id = try self.cmd.addHandler(handler);
@@ -487,31 +507,6 @@ fn run_tui(alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner) !void {
         model.process_buffers.m.unlock();
     }
     defer model_view.deinit();
-
-    //std.debug.print("color_scheme_updates : {?}\n", .{app.vx.caps.color_scheme_updates});
-    //std.debug.print("explicit_width : {?}\n", .{app.vx.caps.explicit_width});
-    //std.debug.print("kitty_graphics : {?}\n", .{app.vx.caps.kitty_graphics});
-    //std.debug.print("kitty_keyboard : {?}\n", .{app.vx.caps.kitty_keyboard});
-    //std.debug.print("rgb : {?}\n", .{app.vx.caps.rgb});
-    //std.debug.print("scaled_text : {?}\n", .{app.vx.caps.scaled_text});
-    //std.debug.print("sgr_pixels : {?}\n", .{app.vx.caps.sgr_pixels});
-
-    //std.debug.print("width: {d}\n", .{app.vx.screen.width});
-    //std.debug.print("height: {d}\n", .{app.vx.screen.height});
-
-    //switch (builtin.target.os.tag) {
-    //    .windows => {},
-    //    else => {
-    //        const colorterm = std.posix.getenv("COLORTERM") orelse "";
-    //        if (std.mem.eql(u8, colorterm, "truecolor") or
-    //            std.mem.eql(u8, colorterm, "24bit"))
-    //        {
-    //            if (@hasField(vxfw.Event, "cap_rgb")) {
-    //                vaxis.Vaxis. .postEvent(.cap_rgb);
-    //            }
-    //        }
-    //    },
-    //}
 
     try model.subscribeHandlersToCmd();
 
@@ -704,7 +699,6 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 
 // IDEA: make a simple file which lists a bunch of cmd lines so that it is easy to use run_launch
 
-// IDEA: quit like vim. With a wq (to save all logs) or a q
 // FEATURE: grid views
 // IDEA:
 
@@ -717,6 +711,7 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 
 // !!advanced ideas!!
 // combine two buffers
+//  - time stamps for each line
 // split into virtual buffers
 //  split (ie if in rule b1 else b2)
 // OR tee (ie if in rule b1 and b2 ELSE b1)

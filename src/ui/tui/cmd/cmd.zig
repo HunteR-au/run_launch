@@ -4,11 +4,13 @@ const Output = @import("../outputwidget.zig").Output;
 const CmdWidget = @import("../cmd//cmdwidget.zig").CmdWidget;
 const CmdHinter = @import("cmdhints.zig").CommandHinter;
 
+const vxfw = @import("vaxis").vxfw;
+
 const StaticRingBuffer = utils.ringbuffers.StaticRingBuffer;
 
 pub const Handler = struct {
     listener: *anyopaque,
-    handle: *const HandleFn,
+    handle: HandleFn,
     event_str: []const u8,
     arg_description: ?[]const u8 = null,
 };
@@ -18,8 +20,14 @@ const HandlerRef = struct {
     id: HandleId,
 };
 
-pub const HandleFn = fn (args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void;
+pub const HandleEventFn = fn (ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void;
+pub const HandleRawFn = fn (args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void;
 pub const HandleId = usize;
+
+pub const HandleFn = union(enum) {
+    regular_fn: *const HandleRawFn,
+    event_fn: *const HandleEventFn,
+};
 
 pub const Cmd = struct {
     // what does this do
@@ -57,7 +65,7 @@ pub const Cmd = struct {
         self.alloc.destroy(self);
     }
 
-    pub fn handleCmd(self: *const Cmd, buffer: []const u8) !void {
+    pub fn handleCmd(self: *const Cmd, buffer: []const u8, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         const index = findFirstChar(buffer, ' ');
 
         if (index) |idx| {
@@ -66,7 +74,10 @@ pub const Cmd = struct {
             for (self.handlers.items) |*obj| {
                 const h = obj.handler;
                 if (std.mem.eql(u8, key, h.event_str)) {
-                    try h.handle(args, h.listener);
+                    switch (h.handle) {
+                        .regular_fn => |func| try func(args, h.listener),
+                        .event_fn => |func| try func(h.listener, ctx, event),
+                    }
                 }
             }
         } else {
@@ -76,7 +87,10 @@ pub const Cmd = struct {
             for (self.handlers.items) |*obj| {
                 const h = obj.handler;
                 if (std.mem.eql(u8, key, h.event_str)) {
-                    try h.handle(args, h.listener);
+                    switch (h.handle) {
+                        .regular_fn => |func| try func(args, h.listener),
+                        .event_fn => |func| try func(h.listener, ctx, event),
+                    }
                 }
             }
         }
@@ -117,14 +131,6 @@ pub const Cmd = struct {
                 .{ idx, history_count },
             );
         };
-
-        //const reverse_idx = history_count - 1 -| idx;
-        //return self.history.get(reverse_idx) catch {
-        //    std.debug.panic(
-        //        "getHistory OOB error - index: {d} capacity: {d} ",
-        //        .{ reverse_idx, history_count },
-        //    );
-        //};
     }
 
     fn findFirstChar(s: []const u8, token: u8) ?usize {

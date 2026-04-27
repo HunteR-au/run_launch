@@ -119,6 +119,7 @@ pub const CmdWidget = struct {
                         const hints = try self.cmd.hinter.generateHints(self.hinter_view.alloc, evt.cmd_str);
                         try self.hinter_view.updateHints(hints);
                     },
+                    else => {},
                 };
             },
             else => {

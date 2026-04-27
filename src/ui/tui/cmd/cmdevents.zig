@@ -52,6 +52,13 @@ pub const CmdEvent = union(enum) {
     history_update: HistoryUpdateEvt,
     select_history: SelectHistoryEvt,
     cmdbar_change: CmdBarBufferChange,
+    run_cmd: RunCmdEvt,
+};
+
+pub const RunCmdEvt = struct {
+    const name: []const u8 = "cmd";
+
+    cmd_str: []u8,
 };
 
 pub const CmdBarBufferChange = struct {

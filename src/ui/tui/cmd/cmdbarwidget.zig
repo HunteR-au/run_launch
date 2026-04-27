@@ -33,8 +33,9 @@ pub const CmdBarWidget = struct {
         //if (self.history_view) |v| v.deinit(self.alloc);
     }
 
-    pub fn runCmd(self: *CmdBarWidget, cmdstr: []u8) !void {
-        try self.cmd.handleCmd(cmdstr);
+    pub fn runCmd(self: *CmdBarWidget, cmdstr: []u8, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+        // run old style cmds
+        try self.cmd.handleCmd(cmdstr, ctx, event);
         self.textBox.clearAndFree();
     }
 
@@ -151,7 +152,13 @@ pub const CmdBarWidget = struct {
                         u8,
                         self.textBox.buf.buffer[0..real_length],
                     );
-                    try self.runCmd(cmdstr);
+                    try self.runCmd(
+                        cmdstr,
+                        ctx,
+                        cmdevents.makeEvent(&cmdevents.CmdEvent{ .run_cmd = .{
+                            .cmd_str = cmdstr,
+                        } }),
+                    );
                     try self.cmd.view.handleEvent(
                         ctx,
                         cmdevents.makeEvent(&cmdevents.CmdEvent{
