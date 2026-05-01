@@ -1,9 +1,6 @@
 const std = @import("std");
 
-// what is this actually doing
-// I want something that...
-// acts as a reader/writer for a buffer that needs to
-// track lines + a tail
+// Lines are zero indexed
 pub const LineBuffer = struct {
     alloc: std.mem.Allocator,
     buf: std.ArrayList(u8),
