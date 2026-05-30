@@ -1,0 +1,39 @@
+configurations:
+  - name: "Attach"
+    type: "debugpy"
+    module: "http.server"
+    request: "attach"
+    preLaunchTask: "list"
+    connect: 
+      host: "remote-machine-name"
+      port: 5678
+  - name: "Print"
+    type: "debugpy"
+    program: '.\data\printlines.py'
+    request: "attach"
+    preLaunchTask: "list"
+    connect: 
+       host: "remote-machine-name"
+       port: 5678
+    
+tasks:
+  - label: "list"
+    type: "shell"
+    command: "ls"
+    args: ["."]
+  - label: "build"
+    type: "shell"
+    command: "zig"
+    args: ["build", "-freference-trace"]
+  - label: "build2"
+    type: "shell"
+    command: "msbuild"
+    args: [
+        "/property:GenerateFullPaths=true",
+        "/t:build",
+        "/consoleloggerparameters:NoSummary"
+    ]
+    group: "build"
+    presentation: 
+      reveal: "silent"
+    problemMatcher: "$msCompile"
