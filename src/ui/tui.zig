@@ -8,6 +8,10 @@ pub const cmdwidget = @import("tui/cmd/cmdwidget.zig");
 pub const Cmd = @import("tui/cmd/cmd.zig").Cmd;
 pub const help = @import("tui/help/help.zig");
 pub const runner = @import("runner");
+pub const buffermgr = @import("tui/buffermanager.zig");
+pub const processviewmgr = @import("tui/processviewmgr.zig");
+
+const AppModel = @import("tui/AppModel.zig");
 
 const cmdevents = @import("tui/cmd/cmdevents.zig");
 const actions = @import("tui/actions/actions.zig");
@@ -20,6 +24,7 @@ const graphemedata = vaxis.grapheme.GraphemeData;
 pub const OutputWidget = view.OutputWidget;
 pub const ProcessBuffer = view.output_view_mod.ProcessBuffer;
 pub const Handler = cmdwidget.Cmd.Handler;
+pub const BufferMgr = buffermgr.BufferMgr;
 
 const uuid = utils.uuid;
 
@@ -36,15 +41,39 @@ pub const TUISignal = struct {
     isClosing: bool = false,
 };
 
-const Model = struct {
-    modelview: *view.View,
-    uiconfig: ?*uiconfig.UiConfig = null,
-    process_buffers: ProcessBuffersMap,
-    executor: *ConfiguredRunner,
+const Key = struct {
+    cp: u21,
+    mod: vaxis.Key.Modifiers,
+};
+
+const TuiBindings = struct {
+    pub const FocusCmdWindow = Key{ .cp = '/', .mod = .{} };
+    pub const Escape = Key{ .cp = vaxis.Key.escape, .mod = .{} };
+    pub const ShowHelp = Key{ .cp = vaxis.Key.f2, .mod = .{} };
+    pub const FastQuit = Key{ .cp = 'c', .mod = .{ .ctrl = false } };
+    pub const OutputViewPrev1 = Key{ .cp = 'w', .mod = .{ .shift = true } };
+    pub const OutputViewPrev2 = Key{ .cp = vaxis.Key.tab, .mod = .{ .shift = true } };
+    pub const OutputViewNext1 = Key{ .cp = 'e', .mod = .{ .shift = true } };
+    pub const OutputViewNext2 = Key{ .cp = vaxis.Key.tab, .mod = .{} };
+    pub const ViewPrev = Key{ .cp = 'w', .mod = .{ .shift = false } };
+    pub const ViewNext = Key{ .cp = 'e', .mod = .{ .shift = false } };
+    pub const MoveOutputViewLeft = Key{ .cp = 's', .mod = .{} };
+    pub const MoveOutputViewRight = Key{ .cp = 'd', .mod = .{} };
+    pub const SplitOutputViewLeft = Key{ .cp = 's', .mod = .{ .shift = true } };
+    pub const SplitOutputViewRight = Key{ .cp = 'd', .mod = .{ .shift = true } };
+};
+
+const TuiApp = struct {
+    app_model: AppModel,
+    // modelview: *view.View,
+    // uiconfig: ?*uiconfig.UiConfig = null,
+    // process_buffers: ProcessBuffersMap,
+    // buffers: *BufferMgr,
+    // executor: *ConfiguredRunner,
     arena: std.heap.ArenaAllocator,
     _alloc: std.mem.Allocator,
-    //cmd_view: cmdwidget.CmdWidget,
-    cmd: *Cmd,
+    cmd_view: cmdwidget.CmdWidget,
+    // cmd: *Cmd,
     handlers_ids: std.ArrayList(cmdwidget.Cmd.HandleId),
     help_id: ?uuid.UUID = null,
     mode: ModelState = .main,
@@ -52,46 +81,46 @@ const Model = struct {
     // views -> view-group -> tab-group && output-group
 
     /// Helper function to return a vxfw.Widget struct
-    pub fn widget(self: *Model) vxfw.Widget {
+    pub fn widget(self: *TuiApp) vxfw.Widget {
         return .{
             .userdata = self,
-            .eventHandler = Model.typeErasedEventHandler,
-            .captureHandler = Model.typeErasedCaptureHandler,
-            .drawFn = Model.typeErasedDrawFn,
+            .eventHandler = TuiApp.typeErasedEventHandler,
+            .captureHandler = TuiApp.typeErasedCaptureHandler,
+            .drawFn = TuiApp.typeErasedDrawFn,
         };
     }
 
     pub fn typeErasedCaptureHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
-        const self: *Model = @ptrCast(@alignCast(ptr));
+        const self: *TuiApp = @ptrCast(@alignCast(ptr));
         return self.handleCapture(ctx, event);
     }
 
-    fn show_help(self: *Model, alloc: std.mem.Allocator) !void {
+    fn show_help(self: *TuiApp, alloc: std.mem.Allocator) !void {
         const id = try createProcessView(alloc, "help");
         try pushLogging(alloc, id, help.getHelpString());
         self.help_id = id;
     }
 
-    pub fn handleCapture(self: *Model, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
+    pub fn handleCapture(self: *TuiApp, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         switch (event) {
             .key_press => |key| {
-                if (key.matches('/', .{})) {
+                if (key.matches(TuiBindings.FocusCmdWindow.cp, TuiBindings.FocusCmdWindow.mod)) {
                     if (self.mode == .main) {
                         self.mode = .cmdview;
-                        try ctx.requestFocus(self.cmd.view.widget());
+                        try ctx.requestFocus(self.app_model.cmd.view.widget());
                         return ctx.consumeAndRedraw();
                     }
-                } else if (key.matches(vaxis.Key.escape, .{})) {
+                } else if (key.matches(TuiBindings.Escape.cp, TuiBindings.Escape.mod)) {
                     if (self.mode == .cmdview) {
                         self.mode = .main;
-                        if (self.modelview.get_focused_output_widget()) |ow| {
+                        if (self.app_model.model_view.get_focused_output_widget()) |ow| {
                             try ctx.requestFocus(ow.widget());
                         } else {
                             try ctx.requestFocus(self.widget());
                         }
                         return ctx.consumeEvent();
                     }
-                } else if (key.matches(vaxis.Key.f2, .{})) {
+                } else if (key.matches(TuiBindings.ShowHelp.cp, TuiBindings.ShowHelp.mod)) {
                     if (self.mode == .main) {
                         const does_help_exist = self.help_id != null;
 
@@ -100,7 +129,7 @@ const Model = struct {
                         }
 
                         // find the outputview that contain's help
-                        for (self.modelview.outputviews.items) |ov| {
+                        for (self.app_model.model_view.outputviews.items) |ov| {
                             for (ov.outputs.items) |o| {
                                 if (std.mem.eql(u8, o.process_name, "help")) {
                                     // focus the help's output widget
@@ -115,11 +144,11 @@ const Model = struct {
             },
             .focus_in => {
                 if (self.mode == .cmdview) {
-                    try ctx.requestFocus(self.cmd.view.widget());
+                    try ctx.requestFocus(self.app_model.cmd.view.widget());
                     //try ctx.requestFocus(self.cmd_view.widget());
                     return ctx.consumeEvent();
                 } else if (self.mode == .main) {
-                    if (self.modelview.get_focused_output_widget()) |ow| {
+                    if (self.app_model.model_view.get_focused_output_widget()) |ow| {
                         try ctx.requestFocus(ow.widget());
                     } else {
                         try ctx.requestFocus(self.widget());
@@ -133,7 +162,7 @@ const Model = struct {
 
     /// This function will be called from the vxfw runtime.
     pub fn typeErasedEventHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
-        const self: *Model = @ptrCast(@alignCast(ptr));
+        const self: *TuiApp = @ptrCast(@alignCast(ptr));
 
         // For some reason tick doesn't seem to be triggered
         if (!keep_running.load(.seq_cst)) {
@@ -168,21 +197,21 @@ const Model = struct {
                 }
 
                 // if there output views in the model - focus
-                if (self.modelview.outputviews.items.len != 0) {
-                    const output_view = self.modelview.outputviews.items[0];
-                    try self.modelview.focus_outputview_by_idx(0);
+                if (self.app_model.model_view.outputviews.items.len != 0) {
+                    const output_view = self.app_model.model_view.outputviews.items[0];
+                    try self.app_model.model_view.focus_outputview_by_idx(0);
                     try output_view.eventHandler(ctx, event);
                 }
             },
             .key_press => |key| {
-                if (key.matches('c', .{ .ctrl = false })) {
+                if (key.matches(TuiBindings.FastQuit.cp, TuiBindings.FastQuit.mod)) {
                     // This will current kill the tui but not kill the program...
                     ctx.quit = true;
                     return;
-                } else if (key.matches('w', .{ .shift = true }) or
-                    key.matches(vaxis.Key.tab, .{ .shift = true }))
+                } else if (key.matches(TuiBindings.OutputViewPrev1.cp, TuiBindings.OutputViewPrev1.mod) or
+                    key.matches(TuiBindings.OutputViewPrev2.cp, TuiBindings.OutputViewPrev2.mod))
                 {
-                    const output_view = self.modelview.get_focused();
+                    const output_view = self.app_model.model_view.get_focused();
                     if (output_view) |ov| {
                         const output = ov.focus_prev();
                         if (output) |o| {
@@ -191,22 +220,28 @@ const Model = struct {
                         }
                     }
                     return;
-                } else if (key.matches('w', .{ .shift = false })) {
-                    if (self.modelview.focus_prev()) |ov| {
+                } else if (key.matches(TuiBindings.ViewPrev.cp, TuiBindings.ViewPrev.mod)) {
+                    if (self.app_model.model_view.focus_prev()) |ov| {
                         if (ov.focused_ow) |o| try ctx.requestFocus(o.widget());
                     }
                     return ctx.consumeAndRedraw();
-                } else if (key.matches('e', .{ .shift = false })) {
-                    if (self.modelview.focus_next()) |ov| {
+                } else if (key.matches(TuiBindings.ViewNext.cp, TuiBindings.ViewNext.mod)) {
+                    if (self.app_model.model_view.focus_next()) |ov| {
                         if (ov.focused_ow) |o| try ctx.requestFocus(o.widget());
                     }
                     return ctx.consumeAndRedraw();
-                } else if (key.matches('e', .{ .shift = true }) or
-                    key.matches(vaxis.Key.tab, .{}))
+                } else if (key.matches(
+                    TuiBindings.OutputViewNext1.cp,
+                    TuiBindings.OutputViewNext1.mod,
+                ) or
+                    key.matches(
+                        TuiBindings.OutputViewNext2.cp,
+                        TuiBindings.OutputViewNext2.mod,
+                    ))
                 {
                     // Only switch outputs in the main mode
                     if (self.mode == .main) {
-                        const output_view = self.modelview.get_focused();
+                        const output_view = self.app_model.model_view.get_focused();
                         if (output_view) |ov| {
                             const output = ov.focus_next();
                             if (output) |o| {
@@ -216,13 +251,16 @@ const Model = struct {
                         }
                         return;
                     }
-                } else if (key.matches('s', .{})) {
-                    const output_view = self.modelview.get_focused();
+                } else if (key.matches(
+                    TuiBindings.MoveOutputViewLeft.cp,
+                    TuiBindings.MoveOutputViewLeft.mod,
+                )) {
+                    const output_view = self.app_model.model_view.get_focused();
                     if (output_view) |ov| {
                         const output = ov.focused_ow;
                         if (output) |o| {
-                            const from = try self.modelview.get_position(ov);
-                            self.modelview.move_output(o, from, from -| 1) catch |err|
+                            const from = try self.app_model.model_view.get_position(ov);
+                            self.app_model.model_view.move_output(o, from, from -| 1) catch |err|
                                 switch (err) {
                                     view.View.ViewErrors.InvalidArg => {
                                         return;
@@ -235,24 +273,30 @@ const Model = struct {
                             return ctx.consumeAndRedraw();
                         }
                     }
-                } else if (key.matches('s', .{ .shift = true })) {
-                    const output_view = self.modelview.get_focused();
+                } else if (key.matches(
+                    TuiBindings.SplitOutputViewLeft.cp,
+                    TuiBindings.SplitOutputViewLeft.mod,
+                )) {
+                    const output_view = self.app_model.model_view.get_focused();
                     if (output_view) |ov| {
                         const output = ov.focused_ow;
                         if (output) |o| {
-                            const from = try self.modelview.get_position(ov);
-                            try self.modelview.split_output(o, from, view.Direction.left);
+                            const from = try self.app_model.model_view.get_position(ov);
+                            try self.app_model.model_view.split_output(o, from, view.Direction.left);
                             try ctx.requestFocus(o.widget());
                             return ctx.consumeAndRedraw();
                         }
                     }
-                } else if (key.matches('d', .{})) {
-                    const output_view = self.modelview.get_focused();
+                } else if (key.matches(
+                    TuiBindings.MoveOutputViewRight.cp,
+                    TuiBindings.MoveOutputViewRight.mod,
+                )) {
+                    const output_view = self.app_model.model_view.get_focused();
                     if (output_view) |ov| {
                         const output = ov.focused_ow;
                         if (output) |o| {
-                            const from = try self.modelview.get_position(ov);
-                            self.modelview.move_output(o, from, from +| 1) catch |err|
+                            const from = try self.app_model.model_view.get_position(ov);
+                            self.app_model.model_view.move_output(o, from, from +| 1) catch |err|
                                 switch (err) {
                                     view.View.ViewErrors.InvalidArg => {
                                         return;
@@ -265,13 +309,13 @@ const Model = struct {
                             return ctx.consumeAndRedraw();
                         }
                     }
-                } else if (key.matches('d', .{ .shift = true })) {
-                    const output_view = self.modelview.get_focused();
+                } else if (key.matches(TuiBindings.SplitOutputViewRight.cp, TuiBindings.SplitOutputViewRight.mod)) {
+                    const output_view = self.app_model.model_view.get_focused();
                     if (output_view) |ov| {
                         const output = ov.focused_ow;
                         if (output) |o| {
-                            const from = try self.modelview.get_position(ov);
-                            try self.modelview.split_output(o, from, view.Direction.right);
+                            const from = try self.app_model.model_view.get_position(ov);
+                            try self.app_model.model_view.split_output(o, from, view.Direction.right);
                             try ctx.requestFocus(o.widget());
                             return ctx.consumeAndRedraw();
                         }
@@ -289,18 +333,41 @@ const Model = struct {
             .app => |appevent| {
                 const cmdevent = cmdevents.getCmdEvent(appevent);
                 if (cmdevent) |e| switch (e.*) {
+                    // Respond to commands from the cmd_widget we care about
                     .run_cmd => |cmd| {
-                        if (std.mem.eql(u8, cmd.cmd_str, QuitHandlerData.event_str)) {
+                        const cmd_name = cmd.get_cmd() orelse return;
+                        if (std.mem.eql(u8, cmd_name, QuitHandlerData.event_str)) {
                             // quit the app
                             keep_running.store(false, .seq_cst);
                             ctx.quit = true;
                             return;
-                        } else if (std.mem.eql(u8, cmd.cmd_str, QuitSaveHandlerData.event_str)) {
+                        } else if (std.mem.eql(u8, cmd_name, QuitSaveHandlerData.event_str)) {
                             // save then quit
                             try self.dumpAllOutputs();
                             keep_running.store(false, .seq_cst);
                             ctx.quit = true;
                             return;
+                        } else if (std.mem.eql(u8, cmd_name, MergeViewsData.event_str)) {
+                            // process merge command
+                            const args = cmd.get_args(self._alloc) catch return error.UnexpectedParseError;
+
+                            actions.mergeProcessBuffers(
+                                self._alloc,
+                                &self.app_model,
+                                args,
+                            ) catch |err| switch (err) {
+                                error.MergeCmdNotEnoughArgs => {},
+                                else => return err,
+                            };
+
+                            // TODO:
+                            // - match args to process views
+                            // - create a list of UUID of parent process views
+                            // - create name of merged view
+                            // - merge view1 p1 p2 p3
+
+                            // TESTING CODE
+                            // for now - just merge all views
                         }
                     },
                     else => {},
@@ -311,7 +378,7 @@ const Model = struct {
     }
 
     fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-        const self: *Model = @ptrCast(@alignCast(ptr));
+        const self: *TuiApp = @ptrCast(@alignCast(ptr));
         const max_size = ctx.max.size();
 
         var children: []vxfw.SubSurface = undefined;
@@ -321,7 +388,7 @@ const Model = struct {
                 children = try ctx.arena.alloc(vxfw.SubSurface, 1);
                 const output_child: vxfw.SubSurface = .{
                     .origin = .{ .row = 0, .col = 0 },
-                    .surface = try self.modelview.draw(ctx),
+                    .surface = try self.app_model.model_view.draw(ctx),
                 };
 
                 children[0] = output_child;
@@ -330,12 +397,12 @@ const Model = struct {
                 children = try ctx.arena.alloc(vxfw.SubSurface, 2);
                 const output_child: vxfw.SubSurface = .{
                     .origin = .{ .row = 0, .col = 0 },
-                    .surface = try self.modelview.draw(ctx),
+                    .surface = try self.app_model.model_view.draw(ctx),
                 };
 
                 const cmdwidget_child: vxfw.SubSurface = .{
                     .origin = .{ .row = 0, .col = 0 },
-                    .surface = try self.cmd.view.draw(ctx),
+                    .surface = try self.app_model.cmd.view.draw(ctx),
                 };
 
                 children[0] = output_child;
@@ -354,17 +421,17 @@ const Model = struct {
     }
 
     fn handleStartCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
-        const self: *Model = @ptrCast(@alignCast(listener));
+        const self: *TuiApp = @ptrCast(@alignCast(listener));
 
-        var handle = self.executor.run(args, .nonBlocking) catch {
+        var handle = self.app_model.executor.run(args, .nonBlocking) catch {
             return;
         };
         if (handle) |*h| h.deinit();
     }
 
-    fn dumpAllOutputs(self: *Model) !void {
+    fn dumpAllOutputs(self: *TuiApp) !void {
         // Dump all output buffers to disk
-        for (self.modelview.outputviews.items) |outputview| {
+        for (self.app_model.model_view.outputviews.items) |outputview| {
             for (outputview.outputs.items) |output| {
                 try actions.dumpOutputBuffer(
                     self._alloc,
@@ -389,8 +456,12 @@ const Model = struct {
         .event_str = "qw",
         .arg_description = null,
     };
+    const MergeViewsData = .{
+        .event_str = "merge",
+        .arg_description = "Merge multiple views together, lines ordered by time",
+    };
 
-    pub fn subscribeHandlersToCmd(self: *Model) !void {
+    pub fn subscribeHandlersToCmd(self: *TuiApp) !void {
         const hander_data = comptime .{
             &StartHandlerData,
         };
@@ -398,6 +469,7 @@ const Model = struct {
         const evented_handler_data = comptime .{
             &QuitHandlerData,
             &QuitSaveHandlerData,
+            &MergeViewsData,
         };
 
         inline for (hander_data) |data| {
@@ -407,7 +479,7 @@ const Model = struct {
                 .handle = .{ .regular_fn = data.handle },
                 .listener = self,
             };
-            const id = try self.cmd.addHandler(handler);
+            const id = try self.app_model.cmd.addHandler(handler);
             try self.handlers_ids.append(self._alloc, id);
         }
 
@@ -415,23 +487,23 @@ const Model = struct {
             const handler: Handler = .{
                 .event_str = data.event_str,
                 .arg_description = data.arg_description,
-                .handle = .{ .event_fn = Model.typeErasedEventHandler },
+                .handle = .{ .event_fn = TuiApp.typeErasedEventHandler },
                 .listener = self,
             };
-            const id = try self.cmd.addHandler(handler);
+            const id = try self.app_model.cmd.addHandler(handler);
             try self.handlers_ids.append(self._alloc, id);
         }
     }
 
-    pub fn unsubscribeHandlersFromCmd(self: *Model) void {
+    pub fn unsubscribeHandlersFromCmd(self: *TuiApp) void {
         for (self.handlers_ids.items) |id| {
-            self.cmd.removeHandler(id);
+            self.app_model.cmd.removeHandler(id);
         }
         self.handlers_ids.clearAndFree(self._alloc);
     }
 };
 
-var model: *Model = undefined;
+var model: *TuiApp = undefined;
 
 var keep_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var tui_signal = TUISignal{};
@@ -451,26 +523,24 @@ fn run_tui(alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner) !void {
 
     app.vx.refresh = true;
 
-    const model_view = try view.View.init(alloc);
-
     var arena = std.heap.ArenaAllocator.init(alloc);
     const model_alloc = arena.allocator();
 
-    model = try alloc.create(Model);
+    model = try alloc.create(TuiApp);
     model.* = .{
-        //.output_view = output_view,
-        .uiconfig = &config,
-        .modelview = model_view,
-        .process_buffers = .{
-            .m = .{},
-            .map = .{},
+        .app_model = .{
+            .model_view = try view.View.init(alloc),
+            .uiconfig = &config,
+            .buffers = try .init(alloc),
+            .executor = executor,
+            .cmd = try .init(alloc),
         },
-        .executor = executor,
-        .cmd = try .init(alloc),
+        .cmd_view = undefined,
         .arena = arena,
         ._alloc = model_alloc,
         .handlers_ids = try .initCapacity(model_alloc, 1),
     };
+    model.cmd_view = try .init(alloc, model.app_model.cmd);
     defer alloc.destroy(model);
     keep_running.store(true, .seq_cst);
 
@@ -478,35 +548,28 @@ fn run_tui(alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner) !void {
         // Set up output views and process buffers for debugging
         const output_view = try OutputView.init(alloc);
         const output_view2 = try OutputView.init(alloc);
-        try model_view.add_outputview(output_view, 0);
-        try model_view.add_outputview(output_view2, 1);
+        try model.app_model.model_view.add_outputview(output_view, 0);
+        try model.app_model.model_view.add_outputview(output_view2, 1);
 
-        const id1 = uuid.newV4();
-        const id2 = uuid.newV4();
-
-        const buf = try ProcessBuffer.init(alloc);
-        const buf2 = try ProcessBuffer.init(alloc);
-        try output_view.add_output(try OutputWidget.init(alloc, "default_output", id1, buf));
-        try output_view2.add_output(try OutputWidget.init(alloc, "default_output2", id2, buf2));
-
-        model.process_buffers.m.lock();
-        try model.process_buffers.map.put(alloc, id1, buf);
-        try model.process_buffers.map.put(alloc, id2, buf2);
-        model.process_buffers.m.unlock();
+        const b1 = try model.app_model.buffers.create_process_buffer(alloc);
+        const b2 = try model.app_model.buffers.create_process_buffer(alloc);
+        try output_view.add_output(try OutputWidget.init(
+            alloc,
+            "default_output",
+            b1.id,
+            b1.buffer,
+        ));
+        try output_view.add_output(try OutputWidget.init(
+            alloc,
+            "default_output2",
+            b2.id,
+            b2.buffer,
+        ));
     }
 
-    // this code here is a problem
     defer arena.deinit();
-    defer model.process_buffers.map.deinit(alloc);
-    defer {
-        model.process_buffers.m.lock();
-        var iter = model.process_buffers.map.iterator();
-        while (iter.next()) |i| {
-            i.value_ptr.*.deinit();
-        }
-        model.process_buffers.m.unlock();
-    }
-    defer model_view.deinit();
+    defer model.app_model.buffers.deinit(alloc);
+    defer model.app_model.model_view.deinit();
 
     try model.subscribeHandlersToCmd();
 
@@ -563,65 +626,59 @@ pub fn createProcessView(alloc: std.mem.Allocator, processname: []const u8) std.
     // FIX: terrible hack to avoid a race condition which actually hits on nix
     //std.time.sleep(10_000_000_000);
     //std.debug.print("creating output: {s}\n", .{processname});
-    const process_id = uuid.newV4();
-    if (keep_running.load(.seq_cst)) {
-        //const aa = model.arena.allocator();
 
-        // check that a process with the same name doesn't exist
-        const buf = try ProcessBuffer.init(alloc);
-        // TODO: this line is failing inside with a lock(). Probably need to put a
-        // mutex around it
-        model.process_buffers.m.lock();
-        try model.process_buffers.map.put(alloc, process_id, buf);
-        model.process_buffers.m.unlock();
-        errdefer {
-            model.process_buffers.m.lock();
-            const keyvalue = model.process_buffers.map.fetchRemove(process_id);
-            if (keyvalue) |kv| {
-                kv.value.deinit();
-            }
-            model.process_buffers.m.unlock();
-        }
+    // const id: uuid.UUID = undefined;
+    // if (keep_running.load(.seq_cst)) {
+    //     const buf = try model.app_model.buffers.create_process_buffer(alloc);
+    //     errdefer {
+    //         model.app_model.buffers.remove_buffer(buf.id);
+    //     }
 
-        const p_output = try OutputWidget.init(
-            alloc,
-            processname,
-            process_id,
-            buf,
-        );
-        errdefer p_output.deinit();
+    //     const p_output = try OutputWidget.init(
+    //         alloc,
+    //         processname,
+    //         buf.id,
+    //         buf.buffer.process,
+    //     );
+    //     errdefer p_output.deinit();
 
-        if (model.uiconfig) |config| {
-            try p_output.setupViaUiconfig(config);
-        }
+    //     id = buf.id;
 
-        // Add a reference to the cmd
-        try p_output.output.subscribeHandlersToCmd(model.cmd);
+    //     if (model.uiconfig) |config| {
+    //         try p_output.setupViaUiconfig(config);
+    //     }
 
-        // create an outputview if none exist
-        if (model.modelview.outputviews.items.len == 0) {
-            const output_view = try OutputView.init(alloc);
+    //     // Add a reference to the cmd
+    //     try p_output.output.subscribeHandlersToCmd(model.app_model.cmd);
 
-            const view_position = 0;
-            model.modelview
-                .add_outputview(output_view, view_position) catch |err| switch (err) {
-                error.OutOfMemory => |e| {
-                    // bubble up alloc errors
-                    return e;
-                },
-                error.InvalidArg, error.OutputNotFound => |e| {
-                    // we currently don't support returning other errors, so just panic!
-                    std.debug.panic("createProcessView critically failed.\n error: {any}", .{e});
-                },
-            };
-        }
+    //     // create an outputview if none exist
+    //     if (model.app_model.model_view.outputviews.items.len == 0) {
+    //         const output_view = try OutputView.init(alloc);
 
-        // we can assume there is at least one active view
-        try model.modelview.outputviews.items[0].add_output(p_output);
+    //         const view_position = 0;
+    //         model.app_model.model_view
+    //             .add_outputview(output_view, view_position) catch |err| switch (err) {
+    //             error.OutOfMemory => |e| {
+    //                 // bubble up alloc errors
+    //                 return e;
+    //             },
+    //             error.InvalidArg, error.OutputNotFound => |e| {
+    //                 // we currently don't support returning other errors, so just panic!
+    //                 std.debug.panic("createProcessView critically failed.\n error: {any}", .{e});
+    //             },
+    //         };
+    //     }
 
-        app.vx.setMouseMode(&app.tty.tty_writer.interface, true) catch {};
-    }
-    return process_id;
+    //     // we can assume there is at least one active view
+    //     try model.modelview.modelview.outputviews.items[0].add_output(p_output);
+
+    //     app.vx.setMouseMode(&app.tty.tty_writer.interface, true) catch {};
+    // }
+    // return id;
+
+    const id = try processviewmgr.create_process_view(alloc, &model.app_model, processname);
+    app.vx.setMouseMode(&app.tty.tty_writer.interface, true) catch {};
+    return id;
 }
 
 pub fn killProcessView(processname: []const u8) void {
@@ -637,13 +694,17 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
     _ = alloc;
 
     if (keep_running.load(.seq_cst)) {
-        model.process_buffers.m.lock();
-        const target_buffer = model.process_buffers.map.get(process_id);
+        model.app_model.buffers.process_buffers.m.lock();
 
+        const target_buffer = model.app_model
+            .buffers
+            .process_buffers
+            .map.get(process_id);
         if (target_buffer) |output| {
             try output.append(buffer);
         }
-        model.process_buffers.m.unlock();
+
+        model.app_model.buffers.process_buffers.m.unlock();
     }
 }
 
@@ -676,7 +737,27 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 // TODO: select a view group with the mouse
 // TODO: dump logs using the configuration name OR the task's label
 
+// merging buffers
+//  - kill a merged view
+//  - work out how to easily reference other views
+//  - maybe have a -all flag
+//  -
+
 // BUGS:
+
+// hide in list example is broken
+//  - hide build removes every line :(
+//  - same for keep line
+//  - FOUND OUT WHY - its because the sep is being treated as \r\n not \n
+//          but the render only uses \n
+
+// OOB:
+//  in self.line_to_row.callback(...)
+//  in outputwidget.getLineNumberViaRow(text_row)
+//  in getLinesIndexFromOffset(ofs)
+//  in linebuffer.getLines()
+
+// if I start 4 Print outputs I get an exception in handleCmd()...
 
 // ScrollBars now has a bug in handleCapture new_view_cl_start: u32 = @intFromFloat(@ceil(new_view_col_start_f))
 

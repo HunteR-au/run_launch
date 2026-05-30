@@ -1,4 +1,5 @@
 const std = @import("std");
+const utils = @import("utils");
 const vaxis = @import("vaxis");
 
 const vxfw = vaxis.vxfw;
@@ -59,6 +60,22 @@ pub const RunCmdEvt = struct {
     const name: []const u8 = "cmd";
 
     cmd_str: []u8,
+
+    pub fn get_cmd(self: RunCmdEvt) ?[]const u8 {
+        if (self.cmd_str.len == 0) return null;
+
+        for (self.cmd_str, 0..) |c, i| {
+            if (c == ' ') return self.cmd_str[0..i];
+        }
+
+        return self.cmd_str;
+    }
+
+    pub fn get_args(self: RunCmdEvt, alloc: std.mem.Allocator) ![]const []const u8 {
+        const cmd_name = self.get_cmd() orelse return error.NoCommand;
+        const arg_slice = self.cmd_str[cmd_name.len..self.cmd_str.len];
+        return try utils.parseArgsLineWithQuoteGroups(alloc, arg_slice);
+    }
 };
 
 pub const CmdBarBufferChange = struct {

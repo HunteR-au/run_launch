@@ -71,10 +71,17 @@ pub const LineBuffer = struct {
         return self.buf.items[0 .. self.newlines.items[self.newlines.items.len - 1] + 1];
     }
 
+    // getLine does not return the line seperator
     pub fn getLine(self: *LineBuffer, line_number: usize) ?[]const u8 {
         if (self.isEmpty()) return null;
         if (!self.isValidLineIndex(line_number)) return null;
         return self.buf.items[self.lineIndex(line_number) .. self.lineIndex(line_number + 1) - 1];
+    }
+
+    pub fn getLineWithSep(self: *LineBuffer, line_number: usize) ?[]const u8 {
+        if (self.isEmpty()) return null;
+        if (!self.isValidLineIndex(line_number)) return null;
+        return self.buf.items[self.lineIndex(line_number)..self.lineIndex(line_number + 1)];
     }
 
     pub fn getLineIndexFromOffset(self: *LineBuffer, offset: usize) ?usize {
@@ -196,6 +203,18 @@ pub const LineBuffer = struct {
         return true;
     }
 };
+
+test "buffer with unix newlines" {
+    const alloc = std.testing.allocator;
+    const input = "build.zig\nbuild.zig.zon\ncolor.json\ndata\nlinux_out.txt\nlogs.txt\nnotes.txt\nout.txt\nout2.txt\nout_linux.txt\nsrc\ntarget\ntest\ntools\nzig-out\n!!!BUFFER ENDED!!!\n";
+
+    var linebuffer = try LineBuffer.init(alloc);
+    defer linebuffer.deinit();
+
+    try linebuffer.append(input);
+    try std.testing.expectEqual(16, linebuffer.countLines());
+    try std.testing.expectEqualStrings("build.zig", linebuffer.getLine(0).?);
+}
 
 // REPROCESSING
 

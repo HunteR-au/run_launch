@@ -4,7 +4,22 @@ pub const Pipeline = @import("pipeline.zig");
 pub const Filter = @import("filter.zig");
 pub const Reviewer = @import("reviewer.zig");
 pub const LineBuffer = @import("linebuffer.zig").LineBuffer;
+pub const LineTimeStamps = @import("linetimestamps.zig").LineTimeStamps;
+pub const linesAndMeta = @import("linesandmeta.zig").LinesAndMeta;
 pub const MetaData = Pipeline.MetaData;
+
+const Buffer = @import("buffer/buffer.zig");
+const GraphHandle = Buffer.GraphHandle;
+const BufferGraph = Buffer.BufferGraph;
+
+const Graph = struct {
+    ptr: *BufferGraph,
+    handle: GraphHandle,
+
+    pub fn get(self: *Graph) ?*BufferGraph.Node {
+        return self.ptr.get(self.handle);
+    }
+};
 
 const IteratorsCommon = @import("iterators/iterator_common.zig");
 const Iterators = @import("iterators/generic_lineiterators.zig");
@@ -23,11 +38,13 @@ pub const ProcessBuffer = struct {
     };
     alloc: std.mem.Allocator,
     m: std.Thread.Mutex,
-    buffer: LineBuffer,
+    buffer: *LineBuffer,
+    line_timestamps: *LineTimeStamps,
     filtered_buffer: LineBuffer,
     lastNewLine: usize = 0,
     lines_processed: usize = 0,
     pipeline: Pipeline,
+    merge_graph: ?Graph = null,
 
     nonowned_iterators: std.ArrayList(IteratorsCommon.IteratorRecord),
 
@@ -46,10 +63,34 @@ pub const ProcessBuffer = struct {
 
     pub fn init(alloc: std.mem.Allocator) !*ProcessBuffer {
         const self = try alloc.create(ProcessBuffer);
+
         self.* = .{
             .alloc = alloc,
             .m = std.Thread.Mutex{},
-            .buffer = try .init(alloc),
+            .buffer = blk: {
+                const ptr: *LineBuffer = try alloc.create(LineBuffer);
+                ptr.* = try .init(alloc);
+                break :blk ptr;
+            },
+            .line_timestamps = try .init(alloc),
+            .filtered_buffer = try .init(alloc),
+            .nonowned_iterators = try .initCapacity(alloc, 100),
+            .pipeline = try .init(alloc),
+        };
+        return self;
+    }
+
+    /// The created ProcessBuffer will take ownership of everything inside meta
+    /// The contents sinde linesAndMeta also must be valid for contact ProcessBuffer expects.
+    /// That timestamps are ordered and there is a timestamp for every line in the buffer
+    pub fn initWithLines(alloc: std.mem.Allocator, meta: linesAndMeta) !*ProcessBuffer {
+        const self = try alloc.create(ProcessBuffer);
+
+        self.* = .{
+            .alloc = alloc,
+            .m = std.Thread.Mutex{},
+            .buffer = meta.linebuffer,
+            .line_timestamps = meta.linebuffer,
             .filtered_buffer = try .init(alloc),
             .nonowned_iterators = try .initCapacity(alloc, 100),
             .pipeline = try .init(alloc),
@@ -61,6 +102,7 @@ pub const ProcessBuffer = struct {
         self.nonowned_iterators.deinit(self.alloc);
         self.filtered_buffer.deinit();
         self.pipeline.deinit();
+        self.line_timestamps.deinit();
         self.alloc.destroy(self);
     }
 
@@ -84,7 +126,72 @@ pub const ProcessBuffer = struct {
         self.m.lock();
         defer self.m.unlock();
 
+        const lines = self.buffer.countLines();
+
         try self.buffer.append(buf);
+
+        const new_lines = self.buffer.countLines();
+
+        // if we have added new lines, update timestamps and children
+        if (lines < new_lines) {
+            // add timestamps for each new line
+            const timestamp = std.time.microTimestamp();
+            for (lines..new_lines) |_| {
+                try self.line_timestamps.append_timestamp(timestamp);
+            }
+
+            // append new lines to children
+            if (self.merge_graph) |graph| {
+                var graph_iter = graph.ptr.children(graph.handle);
+                if (graph_iter) |*it| {
+                    while (it.next()) |child_hdl| {
+                        const child_buffer = graph.ptr.getObject(child_hdl) orelse @panic("ProcessBuffer has a dead child handle!");
+                        try child_buffer.append_with_timestamps(
+                            self.buffer.getLinesStartingFrom(lines).?,
+                            self.line_timestamps.list.items[lines..new_lines],
+                        );
+                    }
+                }
+            }
+        }
+
+        try self.processPipeline();
+    }
+
+    /// assumes that times are ordered
+    pub fn append_with_timestamps(self: *ProcessBuffer, buf: []const u8, times: []const i64) std.mem.Allocator.Error!void {
+        self.m.lock();
+        defer self.m.unlock();
+
+        // check that adding times won't unorder our lines_timestamps array
+        if (self.line_timestamps.list.items.len > 0 and times.len > 0) {
+            if (self.line_timestamps.list.items[self.line_timestamps.list.items.len - 1] > times[0]) {
+                @panic("Adding these times will make this processbuffer has unordered timestamps");
+            }
+        }
+
+        const lines = self.buffer.countLines();
+
+        // appends lines and timestamps
+        try self.buffer.append(buf);
+        try self.line_timestamps.list.appendSlice(self.line_timestamps.alloc, times);
+
+        const new_lines = self.buffer.countLines();
+
+        // append new lines to children
+        if (self.merge_graph) |graph| {
+            var graph_ptr = graph.ptr.children(graph.handle);
+            if (graph_ptr) |*it| {
+                while (it.next()) |child_hdl| {
+                    const child_buffer = graph.ptr.getObject(child_hdl) orelse @panic("ProcessBuffer has a dead child handle!");
+                    try child_buffer.append_with_timestamps(
+                        self.buffer.getLinesStartingFrom(lines).?,
+                        self.line_timestamps.list.items[lines..new_lines],
+                    );
+                }
+            }
+        }
+
         try self.processPipeline();
     }
 

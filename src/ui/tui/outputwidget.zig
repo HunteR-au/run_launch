@@ -411,8 +411,6 @@ pub const OutputWidget = struct {
                 .filtered_buffer
                 .getLineIndexFromOffset(ofs);
 
-            std.debug.print("row={} ofs={} line={?}\n", .{ row, ofs, line_num });
-
             return line_num;
         }
 
