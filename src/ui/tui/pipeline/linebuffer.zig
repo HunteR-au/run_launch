@@ -15,7 +15,7 @@ pub const LineBuffer = struct {
     }
 
     pub fn fromOwnedSlice(alloc: std.mem.Allocator, buf: []u8) !LineBuffer {
-        var newlines_array: std.ArrayList(u8) = .initCapacity(alloc, 0);
+        var newlines_array: std.ArrayList(usize) = .initCapacity(alloc, 0);
         for (buf, 0..) |char, idx| {
             if (char == '\n') {
                 try newlines_array.append(alloc, idx);
@@ -33,6 +33,20 @@ pub const LineBuffer = struct {
     pub fn append(self: *LineBuffer, buf: []const u8) !void {
         try self.updateNewlines(buf);
         try self.buf.appendSlice(self.alloc, buf);
+
+        // assert that the last indexed newline is within the buffer length
+        if (@import("builtin").mode == .Debug) {
+            if (self.newlines.items.len == 0) return;
+            // self.checkInvariants("append()");
+            const end_of_last_line = self.newlines.items[self.newlines.items.len - 1] + 1;
+            //std.debug.assert(self.buf.items.len >= end_of_last_line);
+            if (!(self.buf.items.len >= end_of_last_line)) {
+                std.debug.panic(
+                    "LineBuffer invariant failed: buf.len={d}, last_nl={}, end_of_last_line={}\n",
+                    .{ self.buf.items.len, self.newlines.items[self.newlines.items.len - 1], end_of_last_line },
+                );
+            }
+        }
     }
 
     pub fn clearRetainingCapacity(self: *LineBuffer) void {
@@ -44,6 +58,21 @@ pub const LineBuffer = struct {
     // HELPER FUNCTIONS
     ///////////////////
 
+    pub fn checkInvariants(self: *LineBuffer, where: []const u8) void {
+        if (@import("builtin").mode == .Debug) {
+            for (self.newlines.items, 0..) |nl, i| {
+                if (nl >= self.buf.items.len) {
+                    std.debug.print(
+                        "INVARIANT FAIL at {s}: newlines[{d}] = {d}, buf.len = {d}, nl.len = {d}\n",
+                        .{ where, i, nl, self.buf.items.len, self.newlines.items.len },
+                    );
+                    @panic("LineBuffer invariant failed");
+                }
+            }
+        }
+    }
+
+    /// Return the number of bytes for lines
     pub fn count(self: *LineBuffer) usize {
         if (self.newlines.items.len > 0) {
             if (self.hasTail()) {
@@ -56,6 +85,7 @@ pub const LineBuffer = struct {
         }
     }
 
+    /// Return the number of bytes lines and tail
     pub fn countWithTail(self: *LineBuffer) usize {
         return self.buf.items.len;
     }
@@ -68,7 +98,11 @@ pub const LineBuffer = struct {
         if (self.isEmpty()) return null;
         if (self.countLines() == 0) return null;
 
-        return self.buf.items[0 .. self.newlines.items[self.newlines.items.len - 1] + 1];
+        const end_of_last_line = self.newlines.items[self.newlines.items.len - 1] + 1;
+        std.debug.assert(self.buf.items.len >= end_of_last_line);
+        //self.checkInvariants("getLines()");
+
+        return self.buf.items[0..end_of_last_line];
     }
 
     // getLine does not return the line seperator
@@ -214,6 +248,30 @@ test "buffer with unix newlines" {
     try linebuffer.append(input);
     try std.testing.expectEqual(16, linebuffer.countLines());
     try std.testing.expectEqualStrings("build.zig", linebuffer.getLine(0).?);
+}
+
+test "buffer with tail" {
+    const alloc = std.testing.allocator;
+    const input = "build.zig\nbuild.zig.zon\ncolor.json\ndata\nlinux_out.txt";
+
+    var linebuffer = try LineBuffer.init(alloc);
+    defer linebuffer.deinit();
+
+    try linebuffer.append(input);
+    try std.testing.expectEqual(4, linebuffer.countLines());
+    try std.testing.expectEqualStrings("build.zig", linebuffer.getLine(0).?);
+}
+
+test "buffer with no lines" {
+    const alloc = std.testing.allocator;
+    const input = "build.zigbuild.zig.zoncolor.jsondatalinux_out.txt";
+
+    var linebuffer = try LineBuffer.init(alloc);
+    defer linebuffer.deinit();
+
+    try linebuffer.append(input);
+    try std.testing.expectEqual(0, linebuffer.countLines());
+    try std.testing.expectEqual(null, linebuffer.getLine(0));
 }
 
 // REPROCESSING

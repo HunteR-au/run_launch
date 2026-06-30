@@ -10,7 +10,7 @@ pub fn mergeProcessBuffers(
     app_model: *AppModel,
     args: []const []const u8,
 ) !void {
-    if (args.len <= 2) {
+    if (args.len < 2) {
         return error.MergeCmdNotEnoughArgs;
     }
 
@@ -43,4 +43,22 @@ pub fn mergeProcessBuffers(
             return;
         }
     }
+
+    var buffer_keys = try std.ArrayList(UUID).initCapacity(alloc, 10);
+    defer buffer_keys.deinit(alloc);
+
+    for (args[1..args.len]) |arg| {
+        const output_widget =
+            processviewmgr.get_via_strid(app_model, arg) orelse return;
+        try buffer_keys.append(alloc, output_widget.output.nonowned_process_buffer.id.?);
+    }
+
+    try processviewmgr.create_virtual_process_view(
+        alloc,
+        app_model,
+        args[0],
+        buffer_keys.items,
+    );
+
+    return;
 }

@@ -11,8 +11,9 @@ const parseConfig = config_.parseConfig;
 const uiview = @import("ui/uiview.zig");
 const tui = @import("tui");
 const runner = @import("runner");
-
 const ui_debug = @import("debug_ui");
+
+const ztracy = @import("ztracy");
 
 const builtin = @import("builtin");
 const debug = (builtin.mode == std.builtin.OptimizeMode.Debug);
@@ -71,6 +72,9 @@ pub fn logFn(
 }
 
 pub fn main() !void {
+    const tracy_zone = ztracy.ZoneNC(@src(), "Compute Magic", 0x00_ff_00_00);
+    defer tracy_zone.End();
+
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
@@ -84,6 +88,7 @@ pub fn main() !void {
     }
 
     //const writer = std.io.getStdOut().writer();
+    // TODO: make this thread safe!!!
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
 

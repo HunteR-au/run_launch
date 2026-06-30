@@ -17,6 +17,21 @@ const uuid = utils.uuid;
 
 pub const ViewType = enum { process, virtual };
 
+const StrIdCounter = struct {
+    m: std.Thread.Mutex = .{},
+    counter: usize = 0,
+
+    pub fn new_id(self: *StrIdCounter) usize {
+        self.m.lock();
+        const id = self.counter;
+        self.counter = self.counter + 1;
+        self.m.unlock();
+        return id;
+    }
+};
+
+var counter = StrIdCounter{};
+
 pub fn create_process_view(
     alloc: std.mem.Allocator,
     app_model: *AppModel,
@@ -74,6 +89,8 @@ fn create_processview(
         buffer_tuple.id,
         buffer_tuple.buffer,
     );
+    p_output.strid = counter.new_id();
+
     errdefer p_output.deinit();
 
     // Set the UI config for the Output Widget
@@ -104,4 +121,26 @@ fn create_processview(
 
     // we can assume there is at least one active view
     try app_model.model_view.outputviews.items[0].add_output(p_output);
+}
+
+pub fn parse_strid(strid: []const u8) !usize {
+    if (strid.len <= 1) return error.InvalidStrId;
+    if (strid[0] != '~') return error.InvalidStrId;
+
+    // parse integer
+    return std.fmt.parseInt(usize, strid[1..strid.len], 10) catch error.InvalidStrId;
+}
+
+pub fn get_via_strid(app_model: *AppModel, strid: []const u8) ?*OutputWidget {
+    const id = parse_strid(strid) catch return null;
+
+    for (app_model.model_view.outputviews.items) |outputviews| {
+        for (outputviews.outputs.items) |*output_widget| {
+            if (output_widget.*.strid == id) {
+                return output_widget.*;
+            }
+        }
+    }
+
+    return null;
 }

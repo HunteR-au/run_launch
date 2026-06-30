@@ -1,12 +1,20 @@
 const std = @import("std");
+const utils = @import("utils");
 const builtin = @import("builtin");
 pub const Pipeline = @import("pipeline.zig");
 pub const Filter = @import("filter.zig");
 pub const Reviewer = @import("reviewer.zig");
 pub const LineBuffer = @import("linebuffer.zig").LineBuffer;
 pub const LineTimeStamps = @import("linetimestamps.zig").LineTimeStamps;
-pub const linesAndMeta = @import("linesandmeta.zig").LinesAndMeta;
+pub const linesAndMeta_ = @import("linesandmeta.zig");
 pub const MetaData = Pipeline.MetaData;
+
+const UUID = utils.uuid.UUID;
+
+const LinesAndMeta = linesAndMeta_.LinesAndMeta;
+const TimeStamp = linesAndMeta_.TimeStamp;
+const TimeStamps = linesAndMeta_.TimeStamps;
+const append_timestamp = linesAndMeta_.append_timestamp;
 
 const Buffer = @import("buffer/buffer.zig");
 const GraphHandle = Buffer.GraphHandle;
@@ -39,12 +47,16 @@ pub const ProcessBuffer = struct {
     alloc: std.mem.Allocator,
     m: std.Thread.Mutex,
     buffer: *LineBuffer,
-    line_timestamps: *LineTimeStamps,
+    line_timestamps: *TimeStamps,
     filtered_buffer: LineBuffer,
     lastNewLine: usize = 0,
     lines_processed: usize = 0,
     pipeline: Pipeline,
     merge_graph: ?Graph = null,
+
+    id: ?UUID = null,
+    // Used for matching against queries such as "~0"
+    strid: usize = 0,
 
     nonowned_iterators: std.ArrayList(IteratorsCommon.IteratorRecord),
 
@@ -72,7 +84,11 @@ pub const ProcessBuffer = struct {
                 ptr.* = try .init(alloc);
                 break :blk ptr;
             },
-            .line_timestamps = try .init(alloc),
+            .line_timestamps = blk: {
+                const ptr: *TimeStamps = try alloc.create(TimeStamps);
+                ptr.* = try .initCapacity(alloc, 0);
+                break :blk ptr;
+            },
             .filtered_buffer = try .init(alloc),
             .nonowned_iterators = try .initCapacity(alloc, 100),
             .pipeline = try .init(alloc),
@@ -83,14 +99,14 @@ pub const ProcessBuffer = struct {
     /// The created ProcessBuffer will take ownership of everything inside meta
     /// The contents sinde linesAndMeta also must be valid for contact ProcessBuffer expects.
     /// That timestamps are ordered and there is a timestamp for every line in the buffer
-    pub fn initWithLines(alloc: std.mem.Allocator, meta: linesAndMeta) !*ProcessBuffer {
+    pub fn initWithLines(alloc: std.mem.Allocator, meta: LinesAndMeta) !*ProcessBuffer {
         const self = try alloc.create(ProcessBuffer);
 
         self.* = .{
             .alloc = alloc,
             .m = std.Thread.Mutex{},
             .buffer = meta.linebuffer,
-            .line_timestamps = meta.linebuffer,
+            .line_timestamps = meta.timestamps,
             .filtered_buffer = try .init(alloc),
             .nonowned_iterators = try .initCapacity(alloc, 100),
             .pipeline = try .init(alloc),
@@ -102,7 +118,7 @@ pub const ProcessBuffer = struct {
         self.nonowned_iterators.deinit(self.alloc);
         self.filtered_buffer.deinit();
         self.pipeline.deinit();
-        self.line_timestamps.deinit();
+        self.line_timestamps.deinit(self.alloc);
         self.alloc.destroy(self);
     }
 
@@ -137,7 +153,11 @@ pub const ProcessBuffer = struct {
             // add timestamps for each new line
             const timestamp = std.time.microTimestamp();
             for (lines..new_lines) |_| {
-                try self.line_timestamps.append_timestamp(timestamp);
+                append_timestamp(self.alloc, self.line_timestamps, timestamp) catch |err|
+                    switch (err) {
+                        error.TimeStampOutOfOrder => @panic("Inserting timestamp will break ordering."),
+                        error.OutOfMemory => return error.OutOfMemory,
+                    };
             }
 
             // append new lines to children
@@ -148,7 +168,7 @@ pub const ProcessBuffer = struct {
                         const child_buffer = graph.ptr.getObject(child_hdl) orelse @panic("ProcessBuffer has a dead child handle!");
                         try child_buffer.append_with_timestamps(
                             self.buffer.getLinesStartingFrom(lines).?,
-                            self.line_timestamps.list.items[lines..new_lines],
+                            self.line_timestamps.items[lines..new_lines],
                         );
                     }
                 }
@@ -164,8 +184,8 @@ pub const ProcessBuffer = struct {
         defer self.m.unlock();
 
         // check that adding times won't unorder our lines_timestamps array
-        if (self.line_timestamps.list.items.len > 0 and times.len > 0) {
-            if (self.line_timestamps.list.items[self.line_timestamps.list.items.len - 1] > times[0]) {
+        if (self.line_timestamps.items.len > 0 and times.len > 0) {
+            if (self.line_timestamps.items[self.line_timestamps.items.len - 1] > times[0]) {
                 @panic("Adding these times will make this processbuffer has unordered timestamps");
             }
         }
@@ -174,7 +194,7 @@ pub const ProcessBuffer = struct {
 
         // appends lines and timestamps
         try self.buffer.append(buf);
-        try self.line_timestamps.list.appendSlice(self.line_timestamps.alloc, times);
+        try self.line_timestamps.appendSlice(self.alloc, times);
 
         const new_lines = self.buffer.countLines();
 
@@ -186,7 +206,7 @@ pub const ProcessBuffer = struct {
                     const child_buffer = graph.ptr.getObject(child_hdl) orelse @panic("ProcessBuffer has a dead child handle!");
                     try child_buffer.append_with_timestamps(
                         self.buffer.getLinesStartingFrom(lines).?,
-                        self.line_timestamps.list.items[lines..new_lines],
+                        self.line_timestamps.items[lines..new_lines],
                     );
                 }
             }
@@ -397,6 +417,18 @@ pub const ProcessBuffer = struct {
         self.m.lock();
         defer self.m.unlock();
         return self.filtered_buffer.newlines.items.len;
+    }
+
+    pub fn getFilteredLineIndexFromOffset(self: *ProcessBuffer, offset: usize) ?usize {
+        self.m.lock();
+        defer self.m.unlock();
+        return self.filtered_buffer.getLineIndexFromOffset(offset);
+    }
+
+    pub fn getFilteredIndexOfLine(self: *ProcessBuffer, idx: usize) ?usize {
+        self.m.lock();
+        defer self.m.unlock();
+        return self.filtered_buffer.getIndexOfLine(idx);
     }
 
     pub fn getLineFromOffset(self: *ProcessBuffer, offset: usize) usize {

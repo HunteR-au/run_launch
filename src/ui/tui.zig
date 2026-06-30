@@ -458,7 +458,7 @@ const TuiApp = struct {
     };
     const MergeViewsData = .{
         .event_str = "merge",
-        .arg_description = "Merge multiple views together, lines ordered by time",
+        .arg_description = "view_name { --all | { !|~m ... !|~m } }",
     };
 
     pub fn subscribeHandlersToCmd(self: *TuiApp) !void {
@@ -724,6 +724,7 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 //          - with features such as addding env or exec path
 //      - control running post tasks with UI still running
 
+// TODO: f1 to open up a view_picker screen (or generic ui selection screen)
 // TODO color title for selected outputview
 // TODO make tabs
 // TODO: report errors when processes die
@@ -731,17 +732,20 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 // TODO: get text selection, copy, paste working
 // TODO: create a command to run another process
 // TODO: be able to grow/shrink outputviews
+// TODO: add grid views instead of columns
 // TODO: be able to set on/off/hover line numbers
 //  -   set to show on hover (not done)
 //  -   show actual lines when filtering (not done)
 // TODO: select a view group with the mouse
 // TODO: dump logs using the configuration name OR the task's label
 
+// TODO: virtual buffers should receive filtered buffer rules (at time of FORK)
+
 // merging buffers
 //  - kill a merged view
 //  - work out how to easily reference other views
-//  - maybe have a -all flag
-//  -
+//      - I like how tmux does it - an int for each view
+//  - maybe have a -all flag (done)
 
 // BUGS:
 
@@ -751,13 +755,16 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
 //  - FOUND OUT WHY - its because the sep is being treated as \r\n not \n
 //          but the render only uses \n
 
-// OOB:
+// OOB - looks like a race condition:
+// TODO: fix all accesses to filtered_buffer and buffer that skip the mutex call!!
 //  in self.line_to_row.callback(...)
 //  in outputwidget.getLineNumberViaRow(text_row)
 //  in getLinesIndexFromOffset(ofs)
 //  in linebuffer.getLines()
 
-// if I start 4 Print outputs I get an exception in handleCmd()...
+// sounds like a corruption bug via a race condition
+//      - looks like I'm bypassing the mutex in a process buffer
+//      - also looks like its more likely to happen with a merge
 
 // ScrollBars now has a bug in handleCapture new_view_cl_start: u32 = @intFromFloat(@ceil(new_view_col_start_f))
 

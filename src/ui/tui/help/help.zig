@@ -88,5 +88,9 @@ pub fn getHelpString() []const u8 {
     \\
     \\      - toggle focused output lines on or off OR
     \\          set for all outputs
+    \\merge view_name { --all | { ~m ... ~n } }
+    \\
+    \\      - merge the text of multiple views together sorted via the 
+    \\          timestamp of each line into a new view called view_name
     ;
 }

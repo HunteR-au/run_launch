@@ -119,6 +119,22 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                 while (iter.next()) |line| : (iter_offset = iter.hard_iter.index) {
                     if (row >= container_size.height) break;
                     defer row += 1;
+
+                    //std.log.debug("DRAW row={d}", .{row});
+
+                    // Track the first buffer offset for this row
+                    var first_offset_for_row: ?usize = null;
+
+                    // if the line length is zero, we want to still call the callback
+                    if (first_offset_for_row == null and line.bytes.len == 0) {
+                        first_offset_for_row = iter_offset;
+                        if (self.cb_ptr != null) {
+                            if (self.cb_buffer_offset_at_row) |cb| {
+                                try cb(self.cb_ptr.?, row, first_offset_for_row.?);
+                            }
+                        }
+                    }
+
                     var col: u16 = switch (self.text_align) {
                         .left => 0,
                         .center => (container_size.width - line.width) / 2,
@@ -131,14 +147,24 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                         //char_iter_offset = char.offset;
                         char_iter_offset = char.start;
 
+                        // Capture the first offest for this row
+                        if (first_offset_for_row == null) {
+                            first_offset_for_row = iter_offset + char_iter_offset;
+                            if (self.cb_ptr != null) {
+                                if (self.cb_buffer_offset_at_row) |cb| {
+                                    try cb(self.cb_ptr.?, row, first_offset_for_row.?);
+                                }
+                            }
+                        }
+
                         if (std.mem.eql(u8, grapheme, "\t")) {
                             for (0..8) |i| {
                                 const style = self.style_cache.getStyle(iter_offset + char_iter_offset);
-                                if (col == 0 and self.cb_ptr != null) {
-                                    if (self.cb_buffer_offset_at_row) |cb| {
-                                        try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
-                                    }
-                                }
+                                // if (col == 0 and self.cb_ptr != null) {
+                                //     if (self.cb_buffer_offset_at_row) |cb| {
+                                //         try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
+                                //     }
+                                // }
 
                                 surface.writeCell(@intCast(col + i), row, .{
                                     .char = .{ .grapheme = " ", .width = 1 },
@@ -152,11 +178,11 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                         //byte_index = text_offset + char.offset;
                         const style = self.style_cache.getStyle(iter_offset + char_iter_offset);
 
-                        if (col == 0 and self.cb_ptr != null) {
-                            if (self.cb_buffer_offset_at_row) |cb| {
-                                try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
-                            }
-                        }
+                        // if (col == 0 and self.cb_ptr != null) {
+                        //     if (self.cb_buffer_offset_at_row) |cb| {
+                        //         try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
+                        //     }
+                        // }
 
                         //if (style) |_| {
                         //    std.debug.print("char {s} found style at: {d} + {d} = {d}\n", .{ grapheme, iter_offset, char_iter_offset, iter_offset + char_iter_offset });
@@ -174,10 +200,27 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                 var iter_offset: usize = 0;
                 while (line_iter.next()) |line| : (iter_offset = line_iter.index) {
                     if (row >= container_size.height) break;
-                    // \t is default 1 wide. We add 7x the count of tab characters to get the full width
-                    const line_width = ctx.stringWidth(line) + 7 * std.mem.count(u8, line, "\t");
                     defer row += 1;
+                    // \t is default 1 wide. We add 7x the count of tab characters to get the full width
+
+                    //std.log.debug("DRAW nosoft row={d}", .{row});
+
+                    const line_width = ctx.stringWidth(line) + 7 * std.mem.count(u8, line, "\t");
                     const resolved_line_width = @min(container_size.width, line_width);
+
+                    // Track the first buffer offset for this row
+                    var first_offset_for_row: ?usize = null;
+
+                    // if the line length is zero, we want to still call the callback
+                    if (first_offset_for_row == null and line.len == 0) {
+                        first_offset_for_row = iter_offset;
+                        if (self.cb_ptr != null) {
+                            if (self.cb_buffer_offset_at_row) |cb| {
+                                try cb(self.cb_ptr.?, row, first_offset_for_row.?);
+                            }
+                        }
+                    }
+
                     var col: u16 = switch (self.text_align) {
                         .left => 0,
                         .center => (container_size.width - resolved_line_width) / 2,
@@ -192,17 +235,27 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                         char_iter_offset = char.start;
                         const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
 
+                        // Capture the first offset for this row
+                        if (first_offset_for_row == null) {
+                            first_offset_for_row = iter_offset + char_iter_offset;
+                            if (self.cb_ptr != null) {
+                                if (self.cb_buffer_offset_at_row) |cb| {
+                                    try cb(self.cb_ptr.?, row, first_offset_for_row.?);
+                                }
+                            }
+                        }
+
                         if (col + grapheme_width >= container_size.width and
                             line_width > container_size.width and
                             self.overflow == .ellipsis)
                         {
                             const style = self.style_cache.getStyle(iter_offset + char_iter_offset);
 
-                            if (col == 0 and self.cb_ptr != null) {
-                                if (self.cb_buffer_offset_at_row) |cb| {
-                                    try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
-                                }
-                            }
+                            // if (col == 0 and self.cb_ptr != null) {
+                            //     if (self.cb_buffer_offset_at_row) |cb| {
+                            //         try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
+                            //     }
+                            // }
 
                             surface.writeCell(col, row, .{
                                 .char = .{ .grapheme = "…", .width = 1 },
@@ -212,11 +265,11 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                         } else {
                             const style = self.style_cache.getStyle(iter_offset + char_iter_offset);
 
-                            if (col == 0 and self.cb_ptr != null) {
-                                if (self.cb_buffer_offset_at_row) |cb| {
-                                    try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
-                                }
-                            }
+                            // if (col == 0 and self.cb_ptr != null) {
+                            //     if (self.cb_buffer_offset_at_row) |cb| {
+                            //         try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
+                            //     }
+                            // }
 
                             surface.writeCell(col, row, .{
                                 .char = .{ .grapheme = grapheme, .width = grapheme_width },

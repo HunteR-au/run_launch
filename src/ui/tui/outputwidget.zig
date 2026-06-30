@@ -35,6 +35,7 @@ pub const OutputWidget = struct {
     lines_widget: *LineNumbers,
     process_name: []const u8,
     id: UUID,
+    strid: usize = 0,
     temp: vxfw.Text = undefined,
     output: Output,
     window: Window,
@@ -379,6 +380,8 @@ pub const OutputWidget = struct {
     fn save_rendered_buffer_offset(ptr: *anyopaque, row: usize, offset: usize) std.mem.Allocator.Error!void {
         const self: *OutputWidget = @ptrCast(@alignCast(ptr));
 
+        //std.log.debug("CB row={d}\n", .{row});
+
         if (self.rendered_text_offset_highest_key == null) {
             self.rendered_text_offset_highest_key = row;
         } else if (self.rendered_text_offset_highest_key.? < row) {
@@ -408,8 +411,7 @@ pub const OutputWidget = struct {
             // convert the buffer offset to line number
             const line_num = self.output
                 .nonowned_process_buffer
-                .filtered_buffer
-                .getLineIndexFromOffset(ofs);
+                .getFilteredLineIndexFromOffset(ofs);
 
             return line_num;
         }
@@ -425,14 +427,9 @@ pub const OutputWidget = struct {
         }
 
         switch (line) {
-            // This function has some problems - .first will get the top of the window not
-            // the first rendered line
             .first => {
                 return self.rendered_text_offset_at_row_start.get(0) orelse
                     {
-                        // NOTE: I've obsered this being rendered where line 1 to 199 exists
-                        // in the map self.rendered_text_offset_at_row_start
-                        // but for somereason index 0 is missing... top_line was 1719
                         std.log.debug("top_line: {d}\n", .{self.window.last_draw.top_line});
                         var it = self.rendered_text_offset_at_row_start.iterator();
                         while (it.next()) |e| {
@@ -619,8 +616,7 @@ const Window = struct {
                 return self
                     .output
                     .nonowned_process_buffer
-                    .filtered_buffer
-                    .getIndexOfLine(i) orelse {
+                    .getFilteredIndexOfLine(i) orelse {
                     @panic("Windows starting offset is beyond the buffer length");
                 };
             },

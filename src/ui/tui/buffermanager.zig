@@ -13,6 +13,19 @@ const ProcessBuffersMap = struct {
     map: std.AutoHashMapUnmanaged(uuid.UUID, *ProcessBuffer),
 };
 
+const StrIdCounter = struct {
+    m: std.Thread.Mutex = .{},
+    counter: usize = 0,
+
+    pub fn new_id(self: *StrIdCounter) usize {
+        self.m.lock();
+        const id = self.counter;
+        self.counter = self.counter + 1;
+        self.m.unlock();
+        return id;
+    }
+};
+
 pub const PBufferAndId = struct {
     id: uuid.UUID,
     buffer: *ProcessBuffer,
@@ -24,6 +37,7 @@ pub const BufferMgr = struct {
     // as they don't have a writer loop from another thread
     virtual_buffers: std.AutoHashMapUnmanaged(uuid.UUID, *ProcessBuffer),
     buffer_graph: BufferGraph,
+    strid_counter: StrIdCounter = .{},
 
     pub fn init(alloc: std.mem.Allocator) !*BufferMgr {
         const self = try alloc.create(BufferMgr);
@@ -55,6 +69,9 @@ pub const BufferMgr = struct {
     pub fn create_process_buffer(self: *BufferMgr, alloc: std.mem.Allocator) !PBufferAndId {
         const id = uuid.newV4();
         const buffer = try ProcessBuffer.init(alloc);
+
+        buffer.strid = self.strid_counter.new_id();
+        buffer.id = id;
         buffer.merge_graph = .{
             .handle = try self.buffer_graph.createNode(buffer),
             .ptr = &self.buffer_graph,
@@ -101,7 +118,7 @@ pub const BufferMgr = struct {
         }
     }
 
-    pub fn get_buffer(self: *BufferMgr, id: uuid.UUID) ?*ProcessBuffer {
+    pub fn get_via_uuid(self: *BufferMgr, id: uuid.UUID) ?*ProcessBuffer {
         {
             // search through process first
             self.process_buffers.m.lock();
@@ -120,6 +137,42 @@ pub const BufferMgr = struct {
         return null;
     }
 
+    pub fn get_via_strid(self: *BufferMgr, strid: []const u8) ?*ProcessBuffer {
+        const id = BufferMgr.parse_strid(strid) catch return null;
+
+        // search through process buffers
+        {
+            // search through process first
+            self.process_buffers.m.lock();
+            defer self.process_buffers.m.unlock();
+
+            var iter = self.process_buffers.map.valueIterator();
+            while (iter.next()) |i| {
+                if (i.strid == id) {
+                    return i.*;
+                }
+            }
+        }
+
+        // search through virtual buffers
+        var iter = self.virtual_buffers.valueIterator();
+        while (iter.next()) |i| {
+            if (i.strid == id) {
+                return i.*;
+            }
+        }
+
+        return null;
+    }
+
+    pub fn parse_strid(strid: []const u8) !usize {
+        if (strid.len <= 1) return error.InvalidStrId;
+        if (strid[0] != '!') return error.InvalidStrId;
+
+        // parse integer
+        return std.fmt.parseInt(usize, strid[1..strid.len], 10) catch error.InvalidStrId;
+    }
+
     // TODO
     pub fn create_virtual_process_buffer(
         self: *BufferMgr,
@@ -131,13 +184,16 @@ pub const BufferMgr = struct {
         defer parent_buffers.deinit(alloc);
 
         for (parents) |id| {
-            const buf_ptr = self.get_buffer(id) orelse return error.InvalidBufferId;
+            const buf_ptr = self.get_via_uuid(id) orelse return error.InvalidBufferId;
             try parent_buffers.append(alloc, buf_ptr);
         }
 
         // create the virtual buffer
         const id = uuid.newV4();
         const new_buffer = try ProcessBuffer.init(alloc);
+
+        new_buffer.id = id;
+        new_buffer.strid = self.strid_counter.new_id();
         new_buffer.merge_graph = .{
             .handle = try self.buffer_graph.createNode(new_buffer),
             .ptr = &self.buffer_graph,

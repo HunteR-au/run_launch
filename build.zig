@@ -34,6 +34,25 @@ pub fn build(b: *std.Build) !void {
     const arena = arena_state.allocator();
     const embededArgs = try createArgsForGenEmbedFilesStruct(arena);
 
+    // ZTRACY ADDITIONS
+    const options = .{
+        .enable_ztracy = b.option(
+            bool,
+            "enable_ztracy",
+            "Enable Tracy profile markers",
+        ) orelse false,
+        .enable_fibers = b.option(
+            bool,
+            "enable_fibers",
+            "Enable Tracy fiber support",
+        ) orelse false,
+        .on_demand = b.option(
+            bool,
+            "on_demand",
+            "Build tracy with TRACY_ON_DEMAND",
+        ) orelse false,
+    };
+
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -59,6 +78,11 @@ pub fn build(b: *std.Build) !void {
     const regex_dep = b.dependency("regex", .{});
     const clap_dep = b.dependency("clap", .{});
     const yaml_dep = b.dependency("yaml", .{});
+    const ztracy_dep = b.dependency("ztracy", .{
+        .enable_ztracy = options.enable_ztracy,
+        .enable_fibers = options.enable_fibers,
+        .on_demand = options.on_demand,
+    });
 
     // Modules
     const utils = b.createModule(.{ .root_source_file = b.path("src/utils.zig") });
@@ -74,6 +98,7 @@ pub fn build(b: *std.Build) !void {
     const clap = clap_dep.module("clap");
     const webui = zig_webui_dep.module("webui");
     const yaml = yaml_dep.module("yaml");
+    const ztracy = ztracy_dep.module("root");
 
     // setup debug_ui
     debug_ui.addImport("utils", utils);
@@ -131,6 +156,9 @@ pub fn build(b: *std.Build) !void {
     exe_mod.addImport("runner", runner);
     exe_mod.addImport("tui", tui);
     exe_mod.addImport("config", config);
+    exe_mod.addImport("ztracy", ztracy);
+
+    exe_mod.linkLibrary(ztracy_dep.artifact("tracy"));
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default

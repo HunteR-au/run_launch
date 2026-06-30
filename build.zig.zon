@@ -49,6 +49,10 @@
             .url = "https://github.com/kubkon/zig-yaml/archive/refs/tags/0.2.0.tar.gz",
             .hash = "zig_yaml-0.2.0-C1161pmrAgC_rL9WzjvgNg7HnmyAMwHsG3Sre0F4haPI",
         },
+        .ztracy = .{
+            .url = "git+https://github.com/zig-gamedev/ztracy#d95d2a193b9f97944a17026c9a42b5d0f9a88c94",
+            .hash = "ztracy-0.14.0-dev-zHJSqzUHGQAmhJybhlwtl1QKevUBw4M5YKZqPfWx2y99",
+        },
     },
     .paths = .{
         "build.zig",

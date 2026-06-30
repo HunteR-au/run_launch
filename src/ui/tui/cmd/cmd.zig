@@ -68,30 +68,32 @@ pub const Cmd = struct {
     pub fn handleCmd(self: *const Cmd, buffer: []const u8, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         const index = findFirstChar(buffer, ' ');
 
+        // parse the key/args
+        var key: []const u8 = undefined;
+        var args: []const u8 = undefined;
         if (index) |idx| {
-            const key = buffer[0..idx];
-            const args = buffer[idx + 1 ..];
-            for (self.handlers.items) |*obj| {
-                const h = obj.handler;
-                if (std.mem.eql(u8, key, h.event_str)) {
-                    switch (h.handle) {
-                        .regular_fn => |func| try func(args, h.listener),
-                        .event_fn => |func| try func(h.listener, ctx, event),
-                    }
-                }
-            }
+            key = buffer[0..idx];
+            args = buffer[idx + 1 ..];
         } else {
-            // there must be no arguments
-            const key = buffer;
-            const args = "";
-            for (self.handlers.items) |*obj| {
-                const h = obj.handler;
-                if (std.mem.eql(u8, key, h.event_str)) {
-                    switch (h.handle) {
-                        .regular_fn => |func| try func(args, h.listener),
-                        .event_fn => |func| try func(h.listener, ctx, event),
-                    }
-                }
+            key = buffer;
+            args = "";
+        }
+
+        // find all matching handlers
+        var matches: std.ArrayList(HandlerRef) = try .initCapacity(self.alloc, 10);
+        defer matches.deinit(self.alloc);
+        for (self.handlers.items) |obj| {
+            if (std.mem.eql(u8, key, obj.handler.event_str)) {
+                try matches.append(self.alloc, obj);
+            }
+        }
+
+        // run matched handlers
+        for (matches.items) |*match| {
+            const h = match.handler;
+            switch (h.handle) {
+                .regular_fn => |func| try func(args, h.listener),
+                .event_fn => |func| try func(h.listener, ctx, event),
             }
         }
     }
