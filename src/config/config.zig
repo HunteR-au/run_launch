@@ -1,4 +1,7 @@
 const std = @import("std");
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
+
 const Yaml = @import("yaml").Yaml;
 const launch_ = @import("launch.zig");
 const task_ = @import("task.zig");
@@ -19,18 +22,18 @@ pub const Configuration = struct {
 const ConfigType = enum { Json, Yaml };
 
 fn getConfigType(filepath: []const u8) !ConfigType {
-    const ext = std.fs.path.extension(filepath);
+    const ext = std.Io.Dir.path.extension(filepath);
 
     if (std.mem.eql(u8, ext, ".yml") or std.mem.eql(u8, ext, ".yaml")) return .Yaml;
     if (std.mem.eql(u8, ext, ".json")) return .Json;
     return error.InvalidExtension;
 }
 
-pub fn parseConfig(alloc: std.mem.Allocator, filepath: []const u8) !Configuration {
+pub fn parseConfig(io: Io, alloc: Allocator, filepath: []const u8) !Configuration {
     const config_type = try getConfigType(filepath);
 
-    const max_bytes = 1024 * 1024;
-    const data = try std.fs.cwd().readFileAlloc(alloc, filepath, max_bytes);
+    const size_limit = Io.Limit.limited64(1024 * 1024);
+    const data = try std.Io.Dir.cwd().readFileAlloc(io, filepath, alloc, size_limit);
     std.log.debug("\n{s}\n", .{data});
     defer alloc.free(data);
 
@@ -49,8 +52,8 @@ pub fn parseConfig(alloc: std.mem.Allocator, filepath: []const u8) !Configuratio
             };
 
             return .{
-                .launch = try yamlconfig.parseLaunch(alloc, yaml),
-                .tasks = try yamlconfig.parseTasks(alloc, yaml),
+                .launch = try yamlconfig.parseLaunch(io, alloc, yaml),
+                .tasks = try yamlconfig.parseTasks(io, alloc, yaml),
             };
         },
         .Json => {
@@ -58,8 +61,8 @@ pub fn parseConfig(alloc: std.mem.Allocator, filepath: []const u8) !Configuratio
             defer parsed.deinit();
 
             return .{
-                .launch = try jsonconfig.parseLaunch(alloc, parsed.value),
-                .tasks = try jsonconfig.parseTasks(alloc, parsed.value),
+                .launch = try jsonconfig.parseLaunch(io, alloc, parsed.value),
+                .tasks = try jsonconfig.parseTasks(io, alloc, parsed.value),
             };
         },
     }

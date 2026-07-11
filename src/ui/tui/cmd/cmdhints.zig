@@ -43,12 +43,12 @@ const CommandString = struct {
 };
 
 pub const CommandHinter = struct {
-    command_map: std.StringArrayHashMap(?[]const u8),
+    command_map: std.array_hash_map.String(?[]const u8),
     alloc: std.mem.Allocator,
 
     pub fn init(alloc: std.mem.Allocator) !CommandHinter {
         return .{
-            .command_map = .init(alloc),
+            .command_map = .empty,
             .alloc = alloc,
         };
     }
@@ -59,7 +59,7 @@ pub const CommandHinter = struct {
             self.alloc.free(entry.key_ptr.*);
             if (entry.value_ptr.*) |p| self.alloc.free(p);
         }
-        self.command_map.deinit();
+        self.command_map.deinit(self.alloc);
     }
 
     fn parseCommand(input: []const u8) CommandString {
@@ -77,6 +77,7 @@ pub const CommandHinter = struct {
 
     pub fn addCommandInfo(self: *CommandHinter, cmd_info: CommandHintInfo) !void {
         try self.command_map.put(
+            self.alloc,
             try self.alloc.dupe(u8, cmd_info.commandName),
             if (cmd_info.argumentDescription) |str| try self.alloc.dupe(u8, str) else null,
         );

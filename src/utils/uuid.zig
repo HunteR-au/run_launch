@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const crypto = std.crypto;
 const fmt = std.fmt;
 const testing = std.testing;
@@ -8,10 +9,10 @@ pub const Error = error{InvalidUUID};
 pub const UUID = struct {
     bytes: [16]u8,
 
-    pub fn init() UUID {
+    pub fn init(io: Io) UUID {
         var uuid = UUID{ .bytes = undefined };
 
-        crypto.random.bytes(&uuid.bytes);
+        io.random(&uuid.bytes);
         // Version 4
         uuid.bytes[6] = (uuid.bytes[6] & 0x0f) | 0x40;
         // Variant 1
@@ -117,8 +118,8 @@ pub const UUID = struct {
 pub const zero: UUID = .{ .bytes = .{0} ** 16 };
 
 // Convenience function to return a new v4 UUID.
-pub fn newV4() UUID {
-    return UUID.init();
+pub fn newV4(io: Io) UUID {
+    return UUID.init(io);
 }
 
 test "parse and format" {
@@ -150,7 +151,9 @@ test "invalid UUID" {
 }
 
 test "check to_string works" {
-    const uuid1 = UUID.init();
+    const io = std.testing.io;
+
+    const uuid1 = UUID.init(io);
 
     var string1: [36]u8 = undefined;
     var string2: [36]u8 = undefined;

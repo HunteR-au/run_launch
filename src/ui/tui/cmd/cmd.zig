@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const utils = @import("utils");
 const Output = @import("../outputwidget.zig").Output;
 const CmdWidget = @import("../cmd//cmdwidget.zig").CmdWidget;
@@ -21,7 +22,7 @@ const HandlerRef = struct {
 };
 
 pub const HandleEventFn = fn (ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void;
-pub const HandleRawFn = fn (args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void;
+pub const HandleRawFn = fn (io: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void;
 pub const HandleId = usize;
 
 pub const HandleFn = union(enum) {
@@ -65,7 +66,7 @@ pub const Cmd = struct {
         self.alloc.destroy(self);
     }
 
-    pub fn handleCmd(self: *const Cmd, buffer: []const u8, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+    pub fn handleCmd(self: *const Cmd, io: Io, buffer: []const u8, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         const index = findFirstChar(buffer, ' ');
 
         // parse the key/args
@@ -92,7 +93,7 @@ pub const Cmd = struct {
         for (matches.items) |*match| {
             const h = match.handler;
             switch (h.handle) {
-                .regular_fn => |func| try func(args, h.listener),
+                .regular_fn => |func| try func(io, args, h.listener),
                 .event_fn => |func| try func(h.listener, ctx, event),
             }
         }

@@ -1,4 +1,6 @@
 const std = @import("std");
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
 const utils = @import("utils");
 const AppModel = @import("../AppModel.zig");
 const processviewmgr = @import("../processviewmgr.zig");
@@ -6,7 +8,8 @@ const processviewmgr = @import("../processviewmgr.zig");
 const UUID = utils.uuid.UUID;
 
 pub fn mergeProcessBuffers(
-    alloc: std.mem.Allocator,
+    io: Io,
+    alloc: Allocator,
     app_model: *AppModel,
     args: []const []const u8,
 ) !void {
@@ -21,8 +24,8 @@ pub fn mergeProcessBuffers(
             defer process_buffer_keys.deinit(alloc);
 
             {
-                app_model.buffers.process_buffers.m.lock();
-                defer app_model.buffers.process_buffers.m.unlock();
+                app_model.buffers.process_buffers.m.lockUncancelable(io);
+                defer app_model.buffers.process_buffers.m.unlock(io);
 
                 // get all non-virtual processs buffer keys
                 var map_iter = app_model.buffers
@@ -34,6 +37,7 @@ pub fn mergeProcessBuffers(
             }
 
             try processviewmgr.create_virtual_process_view(
+                io,
                 alloc,
                 app_model,
                 args[0],
@@ -54,6 +58,7 @@ pub fn mergeProcessBuffers(
     }
 
     try processviewmgr.create_virtual_process_view(
+        io,
         alloc,
         app_model,
         args[0],

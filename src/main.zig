@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const clap = @import("clap");
 
 const utils = @import("utils");
@@ -25,20 +26,20 @@ const RunLaunchErrors = error{
     NoConfigWithName,
 };
 
-var g_log_file: ?std.fs.File = null;
-var g_log_mutex = std.Thread.Mutex{};
+var g_log_file: ?std.Io.File = null;
+var g_log_mutex: std.Io.Mutex = .init;
 var g_log_buffer: [4096]u8 = undefined;
-var g_log_writer: std.fs.File.Writer = undefined;
+var g_log_writer: std.Io.File.Writer = undefined;
 
-pub fn initLogger(path: []const u8) !void {
-    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+pub fn initLogger(io: Io, path: []const u8) !void {
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
     g_log_file = file;
-    g_log_writer = g_log_file.?.writer(&g_log_buffer);
+    g_log_writer = g_log_file.?.writer(io, &g_log_buffer);
 }
 
 pub fn deinitLogger() void {
     if (g_log_file) |file| {
-        file.close();
+        file.close(debug_log_io);
         g_log_file = null;
     }
 }
@@ -47,6 +48,8 @@ pub const std_options: std.Options = .{
     .logFn = logFn,
 };
 
+var debug_log_io: Io = undefined;
+
 pub fn logFn(
     comptime level: std.log.Level,
     comptime scope: @TypeOf(.EnumLiteral),
@@ -54,8 +57,8 @@ pub fn logFn(
     args: anytype,
 ) void {
     if (g_log_file) |_| {
-        g_log_mutex.lock();
-        defer g_log_mutex.unlock();
+        g_log_mutex.lockUncancelable(debug_log_io);
+        defer g_log_mutex.unlock(debug_log_io);
 
         var writer = &g_log_writer.interface;
         writer.print("[{s}] [{s}] " ++ format ++ "\n", .{
@@ -71,28 +74,33 @@ pub fn logFn(
     }
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+    debug_log_io = io;
+    _ = init.minimal.environ;
+
     const tracy_zone = ztracy.ZoneNC(@src(), "Compute Magic", 0x00_ff_00_00);
     defer tracy_zone.End();
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     var stderr_buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
     _ = &stderr_writer.interface;
 
     if (debug) {
-        try initLogger("logs.txt");
+        try initLogger(io, "logs.txt");
     }
 
     //const writer = std.io.getStdOut().writer();
     // TODO: make this thread safe!!!
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
+    // var gpa = std.heap.DebugAllocator(.{}){};
+    // defer _ = gpa.deinit();
 
-    const allocator = gpa.allocator();
+    const alloc = gpa;
 
     const params = comptime clap.parseParamsComptime(
         \\-h, --help                    Display this help and exit
@@ -104,9 +112,9 @@ pub fn main() !void {
     );
 
     var diag = clap.Diagnostic{};
-    var res = clap.parse(clap.Help, &params, clap.parsers.default, .{
+    var res = clap.parse(clap.Help, &params, clap.parsers.default, init.minimal.args, .{
         .diagnostic = &diag,
-        .allocator = allocator,
+        .allocator = alloc,
     }) catch |err| {
         diag.report(stdout, err) catch {};
         return err;
@@ -141,9 +149,9 @@ pub fn main() !void {
     //defer launchdata.deinit(allocator);
 
     // parse configuration
-    const config = try parseConfig(allocator, launchPath);
+    const config = try parseConfig(io, alloc, launchPath);
     var executor = try runner.ConfiguredRunner.init(
-        allocator,
+        alloc,
         config.launch,
         config.tasks,
         .{
@@ -151,12 +159,15 @@ pub fn main() !void {
             .pushBytes = &tui.pushLogging,
         },
     );
-    defer executor.deinit();
+    defer executor.deinit(io);
+
+    var tui_env_map = try init.environ_map.clone(alloc);
+    defer tui_env_map.deinit();
 
     if (res.args.@"web-ui" != 0) {
-        try uiview.setupWebUI(allocator);
+        //try uiview.setupWebUI(alloc);
     } else {
-        try tui.start_tui(allocator, executor);
+        try tui.start_tui(io, alloc, executor, &tui_env_map);
     }
 
     std.log.debug("first positional arg: {s}\n", .{res.positionals[0].?});
@@ -177,26 +188,26 @@ pub fn main() !void {
     } else {
         if (@import("builtin").mode == .Debug) {
             //std.Thread.sleep(1000000);
-            try ui_debug.start_debuginfo(allocator, tui.createProcessView, tui.pushLogging);
+            try ui_debug.start_debuginfo(io, alloc, tui.createProcessView, tui.pushLogging);
         }
         // Currently waiting will cause the pipes to be killed before being drained properly
-        pre_handle = try executor.runPreTasks(taskNameToRun, .nonBlocking);
-        run_handle = try executor.run(taskNameToRun, .nonBlocking);
+        pre_handle = try executor.runPreTasks(io, taskNameToRun, .nonBlocking);
+        run_handle = try executor.run(io, taskNameToRun, .nonBlocking);
 
         //_ = try runner.run(allocator, taskNameToRun, executor.config, tasks, tui.createProcessView, tui.pushLogging);
     }
 
     if (res.args.@"web-ui" != 0) {
-        uiview.closeWebUI();
+        //uiview.closeWebUI();
     } else {
-        tui.waitForTUIClose();
+        try tui.waitForTUIClose(io);
 
         if (@import("builtin").mode == .Debug) {
             ui_debug.stop_debuginfo();
         }
 
-        try executor.killAll();
-        post_handle = try executor.runPostTasks(taskNameToRun, .blocking);
+        try executor.killAll(io);
+        post_handle = try executor.runPostTasks(io, taskNameToRun, .blocking);
         //tui.stop_tui();
     }
 

@@ -1,4 +1,6 @@
 const std = @import("std");
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
 const Regex = @import("regex").Regex;
 const processbuffer = @import("processbuffer.zig");
 const helpers = @import("../helpers.zig");
@@ -33,18 +35,18 @@ const RegexIterator = helpers.RegexIterator;
 // deHighlight...
 // output.save(iter)
 
-pub fn startSearchFrom(alloc: std.mem.Allocator, process_buffer: *ProcessBuffer, regex: *Regex, line_num: usize) !ProcessBufferSearchIterator {
+pub fn startSearchFrom(io: Io, alloc: Allocator, process_buffer: *ProcessBuffer, regex: *Regex, line_num: usize) !ProcessBufferSearchIterator {
     var iter = ProcessBufferSearchIterator.init(
         alloc,
         regex,
-        .{ .lineIterator = try ProcessBuffer.LineIterator.init(alloc, process_buffer) },
+        .{ .lineIterator = try ProcessBuffer.LineIterator.init(io, alloc, process_buffer) },
     );
-    try iter.line_iter.lineIterator.setLine(line_num);
+    try iter.line_iter.lineIterator.setLine(io, line_num);
     return iter;
 }
 
 pub const ProcessBufferSearchIterator = struct {
-    alloc: std.mem.Allocator,
+    alloc: Allocator,
     regex: *Regex,
     line_iter: ProcessBuffer.IteratorPtr,
     line_offset: usize = 0,
@@ -58,7 +60,7 @@ pub const ProcessBufferSearchIterator = struct {
     };
 
     pub fn init(
-        alloc: std.mem.Allocator,
+        alloc: Allocator,
         re: *Regex,
         line_iter: ProcessBuffer.IteratorPtr,
     ) ProcessBufferSearchIterator {
@@ -69,7 +71,7 @@ pub const ProcessBufferSearchIterator = struct {
         };
     }
 
-    pub fn deinit(self: *ProcessBufferSearchIterator) void {
+    pub fn deinit(self: *ProcessBufferSearchIterator, io: Io) void {
         if (self.cached_iter) |*iter| {
             iter.deinit();
         }
@@ -80,15 +82,15 @@ pub const ProcessBufferSearchIterator = struct {
 
         switch (self.line_iter) {
             .lineIterator => |i| {
-                i.deinit();
+                i.deinit(io);
             },
             .reverseLineIterator => |i| {
-                i.deinit();
+                i.deinit(io);
             },
         }
     }
 
-    pub fn next(self: *ProcessBufferSearchIterator) !?Result {
+    pub fn next(self: *ProcessBufferSearchIterator, io: Io) !?Result {
         while (true) {
             if (self.cached_iter) |*cached_iter| {
                 if (cached_iter.next()) |match| {
@@ -107,7 +109,7 @@ pub const ProcessBufferSearchIterator = struct {
 
             switch (self.line_iter) {
                 .lineIterator => |p| {
-                    if (try p.next(self.alloc)) |result| {
+                    if (try p.next(io, self.alloc)) |result| {
                         self.cached_line = result.line;
                         self.cached_iter = try CachedRegexMatchIterator.init(self.alloc, self.regex, self.cached_line.?, .start);
                         self.line_offset = result.buffer_offset;
@@ -119,7 +121,7 @@ pub const ProcessBufferSearchIterator = struct {
                 },
                 .reverseLineIterator => |p| {
                     // TODO: this one is a bit more complicated - we need to cache all matches in the line
-                    if (try p.next(self.alloc)) |result| {
+                    if (try p.next(io, self.alloc)) |result| {
                         // cache the results
                         self.cached_line = result.line;
                         self.cached_iter = try CachedRegexMatchIterator.init(self.alloc, self.regex, self.cached_line.?, .end);
@@ -134,7 +136,7 @@ pub const ProcessBufferSearchIterator = struct {
         }
     }
 
-    pub fn prev(self: *ProcessBufferSearchIterator) !?Result {
+    pub fn prev(self: *ProcessBufferSearchIterator, io: Io) !?Result {
         while (true) {
             if (self.cached_iter) |*cached_iter| {
                 if (cached_iter.prev()) |match| {
@@ -153,7 +155,7 @@ pub const ProcessBufferSearchIterator = struct {
 
             switch (self.line_iter) {
                 .lineIterator => |p| {
-                    if (try p.prev(self.alloc)) |result| {
+                    if (try p.prev(io, self.alloc)) |result| {
                         // cache the results
                         self.cached_line = result.line;
                         self.cached_iter = try CachedRegexMatchIterator.init(self.alloc, self.regex, self.cached_line.?, .end);
@@ -165,7 +167,7 @@ pub const ProcessBufferSearchIterator = struct {
                     }
                 },
                 .reverseLineIterator => |p| {
-                    if (try p.prev(self.alloc)) |result| {
+                    if (try p.prev(io, self.alloc)) |result| {
                         self.cached_line = result.line;
                         self.cached_iter = try CachedRegexMatchIterator.init(self.alloc, self.regex, self.cached_line.?, .start);
                         self.line_offset = result.buffer_offset;
@@ -195,11 +197,11 @@ const CachedRegexMatchIterator = struct {
 
     pub const StartPosition = enum { start, end };
 
-    alloc: std.mem.Allocator,
+    alloc: Allocator,
     matches: []Match,
     index: Index = Index{ .start = {} },
 
-    pub fn init(alloc: std.mem.Allocator, regex: *Regex, input: []const u8, starting_position: StartPosition) !CachedRegexMatchIterator {
+    pub fn init(alloc: Allocator, regex: *Regex, input: []const u8, starting_position: StartPosition) !CachedRegexMatchIterator {
         var match_list: std.ArrayListUnmanaged(Match) = .empty;
         var iter = RegexIterator{ .regex = regex, .input = input };
 
@@ -258,6 +260,7 @@ const CachedRegexMatchIterator = struct {
 const testing = std.testing;
 test "Reverse direction of ProcessBufferSearchIterator within line" {
     const alloc = testing.allocator_instance.allocator();
+    const io = testing.io;
 
     const prefixes = comptime [_][]const u8{
         "",
@@ -290,7 +293,7 @@ test "Reverse direction of ProcessBufferSearchIterator within line" {
     };
 
     const match_str = "string";
-    const process_buffer = try ProcessBuffer.init(alloc);
+    const process_buffer = try ProcessBuffer.init(io, alloc);
     defer process_buffer.deinit();
 
     try process_buffer.append(input);
@@ -334,6 +337,7 @@ test "Reverse direction of ProcessBufferSearchIterator within line" {
 
 test "Reverse direction of ProcessBufferSearchIterator over lines" {
     const alloc = testing.allocator_instance.allocator();
+    const io = testing.io;
 
     const prefixes = comptime [_][]const u8{
         "Line 1 with ",
@@ -367,7 +371,7 @@ test "Reverse direction of ProcessBufferSearchIterator over lines" {
     };
 
     const match_str = "string";
-    const process_buffer = try ProcessBuffer.init(alloc);
+    const process_buffer = try ProcessBuffer.init(io, alloc);
     defer process_buffer.deinit();
 
     try process_buffer.append(input);

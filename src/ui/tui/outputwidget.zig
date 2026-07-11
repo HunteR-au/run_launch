@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const builtin = @import("builtin");
 const utils = @import("utils");
 const debug_ui = @import("debug_ui");
@@ -87,10 +88,10 @@ pub const OutputWidget = struct {
         return output_widget;
     }
 
-    pub fn deinit(self: *OutputWidget) void {
+    pub fn deinit(self: *OutputWidget, io: Io) void {
         self.alloc.free(self.process_name);
         self.lines_widget.deinit();
-        self.output.deinit();
+        self.output.deinit(io);
         self.alloc.destroy(self);
     }
 
@@ -164,7 +165,7 @@ pub const OutputWidget = struct {
                     ctx.consumeAndRedraw();
                 }
                 if (key.matches(vaxis.Key.escape, .{})) {
-                    try self.output.removeSearch();
+                    try self.output.removeSearch(ctx.io);
                     ctx.consumeAndRedraw();
                 }
                 if (key.matches(vaxis.Key.down, .{}) or
@@ -179,11 +180,11 @@ pub const OutputWidget = struct {
                     ctx.consumeAndRedraw();
                 }
                 if (key.matches('n', .{})) {
-                    self.output.searchNext();
+                    self.output.searchNext(ctx.io);
                     ctx.consumeAndRedraw();
                 }
                 if (key.matches('n', .{ .ctrl = true })) {
-                    self.output.searchPrev();
+                    self.output.searchPrev(ctx.io);
                     ctx.consumeAndRedraw();
                 }
                 if (key.matches(vaxis.Key.page_up, .{ .ctrl = true }) or

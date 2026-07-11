@@ -3,6 +3,8 @@
 // including a raw stdout/stderr read/write loop OR a list of parent process_buffers
 
 const std = @import("std");
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
 const AppModel = @import("AppModel.zig");
 const OutputWidget = @import("outputwidget.zig").OutputWidget;
 const OutputView = @import("outputview.zig").OutputView;
@@ -18,14 +20,14 @@ const uuid = utils.uuid;
 pub const ViewType = enum { process, virtual };
 
 const StrIdCounter = struct {
-    m: std.Thread.Mutex = .{},
+    m: std.Io.Mutex = .init,
     counter: usize = 0,
 
-    pub fn new_id(self: *StrIdCounter) usize {
-        self.m.lock();
+    pub fn new_id(self: *StrIdCounter, io: Io) usize {
+        self.m.lockUncancelable(io);
         const id = self.counter;
         self.counter = self.counter + 1;
-        self.m.unlock();
+        self.m.unlock(io);
         return id;
     }
 };
@@ -33,19 +35,21 @@ const StrIdCounter = struct {
 var counter = StrIdCounter{};
 
 pub fn create_process_view(
-    alloc: std.mem.Allocator,
+    io: Io,
+    alloc: Allocator,
     app_model: *AppModel,
     processname: []const u8,
 ) !uuid.UUID {
     // Create the ProcesssBuffer
     const buffer_tuple = try app_model
         .buffers
-        .create_process_buffer(alloc);
+        .create_process_buffer(io, alloc);
     errdefer {
-        app_model.buffers.remove_buffer(buffer_tuple.id);
+        app_model.buffers.remove_buffer(io, buffer_tuple.id);
     }
 
     try create_processview(
+        io,
         alloc,
         app_model,
         processname,
@@ -57,19 +61,21 @@ pub fn create_process_view(
 // TODO: we should have errdefers for removing processviews
 
 pub fn create_virtual_process_view(
-    alloc: std.mem.Allocator,
+    io: Io,
+    alloc: Allocator,
     app_model: *AppModel,
     view_name: []const u8,
     parents: []uuid.UUID,
 ) !void {
     const buffer_tuple = try app_model
         .buffers
-        .create_virtual_process_buffer(alloc, parents);
+        .create_virtual_process_buffer(io, alloc, parents);
     errdefer {
-        app_model.buffers.remove_buffer(buffer_tuple.id);
+        app_model.buffers.remove_buffer(io, buffer_tuple.id);
     }
 
     try create_processview(
+        io,
         alloc,
         app_model,
         view_name,
@@ -78,7 +84,8 @@ pub fn create_virtual_process_view(
 }
 
 fn create_processview(
-    alloc: std.mem.Allocator,
+    io: Io,
+    alloc: Allocator,
     app_model: *AppModel,
     name: []const u8,
     buffer_tuple: PBufferAndId,
@@ -89,9 +96,9 @@ fn create_processview(
         buffer_tuple.id,
         buffer_tuple.buffer,
     );
-    p_output.strid = counter.new_id();
+    p_output.strid = counter.new_id(io);
 
-    errdefer p_output.deinit();
+    errdefer p_output.deinit(io);
 
     // Set the UI config for the Output Widget
     if (app_model.uiconfig) |config| {

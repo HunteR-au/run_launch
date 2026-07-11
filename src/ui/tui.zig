@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const builtin = @import("builtin");
 const utils = @import("utils");
 pub const vaxis = @import("vaxis");
@@ -29,15 +30,15 @@ pub const BufferMgr = buffermgr.BufferMgr;
 const uuid = utils.uuid;
 
 const ProcessBuffersMap = struct {
-    m: std.Thread.Mutex,
+    m: std.Io.Mutex,
     map: std.AutoHashMapUnmanaged(uuid.UUID, *ProcessBuffer),
 };
 
 const ModelState = enum { main, cmdview, jsonview };
 
 pub const TUISignal = struct {
-    mutex: std.Thread.Mutex = .{},
-    cond: std.Thread.Condition = .{},
+    mutex: std.Io.Mutex = .init,
+    cond: std.Io.Condition = .init,
     isClosing: bool = false,
 };
 
@@ -95,9 +96,9 @@ const TuiApp = struct {
         return self.handleCapture(ctx, event);
     }
 
-    fn show_help(self: *TuiApp, alloc: std.mem.Allocator) !void {
-        const id = try createProcessView(alloc, "help");
-        try pushLogging(alloc, id, help.getHelpString());
+    fn show_help(self: *TuiApp, io: Io, alloc: std.mem.Allocator) !void {
+        const id = try createProcessView(io, alloc, "help");
+        try pushLogging(io, alloc, id, help.getHelpString());
         self.help_id = id;
     }
 
@@ -125,7 +126,7 @@ const TuiApp = struct {
                         const does_help_exist = self.help_id != null;
 
                         if (!does_help_exist) {
-                            try self.show_help(self.arena.allocator());
+                            try self.show_help(ctx.io, self.arena.allocator());
                         }
 
                         // find the outputview that contain's help
@@ -260,7 +261,7 @@ const TuiApp = struct {
                         const output = ov.focused_ow;
                         if (output) |o| {
                             const from = try self.app_model.model_view.get_position(ov);
-                            self.app_model.model_view.move_output(o, from, from -| 1) catch |err|
+                            self.app_model.model_view.move_output(ctx.io, o, from, from -| 1) catch |err|
                                 switch (err) {
                                     view.View.ViewErrors.InvalidArg => {
                                         return;
@@ -282,7 +283,7 @@ const TuiApp = struct {
                         const output = ov.focused_ow;
                         if (output) |o| {
                             const from = try self.app_model.model_view.get_position(ov);
-                            try self.app_model.model_view.split_output(o, from, view.Direction.left);
+                            try self.app_model.model_view.split_output(ctx.io, o, from, view.Direction.left);
                             try ctx.requestFocus(o.widget());
                             return ctx.consumeAndRedraw();
                         }
@@ -296,7 +297,7 @@ const TuiApp = struct {
                         const output = ov.focused_ow;
                         if (output) |o| {
                             const from = try self.app_model.model_view.get_position(ov);
-                            self.app_model.model_view.move_output(o, from, from +| 1) catch |err|
+                            self.app_model.model_view.move_output(ctx.io, o, from, from +| 1) catch |err|
                                 switch (err) {
                                     view.View.ViewErrors.InvalidArg => {
                                         return;
@@ -315,7 +316,7 @@ const TuiApp = struct {
                         const output = ov.focused_ow;
                         if (output) |o| {
                             const from = try self.app_model.model_view.get_position(ov);
-                            try self.app_model.model_view.split_output(o, from, view.Direction.right);
+                            try self.app_model.model_view.split_output(ctx.io, o, from, view.Direction.right);
                             try ctx.requestFocus(o.widget());
                             return ctx.consumeAndRedraw();
                         }
@@ -343,7 +344,7 @@ const TuiApp = struct {
                             return;
                         } else if (std.mem.eql(u8, cmd_name, QuitSaveHandlerData.event_str)) {
                             // save then quit
-                            try self.dumpAllOutputs();
+                            try self.dumpAllOutputs(ctx.io);
                             keep_running.store(false, .seq_cst);
                             ctx.quit = true;
                             return;
@@ -352,6 +353,7 @@ const TuiApp = struct {
                             const args = cmd.get_args(self._alloc) catch return error.UnexpectedParseError;
 
                             actions.mergeProcessBuffers(
+                                ctx.io,
                                 self._alloc,
                                 &self.app_model,
                                 args,
@@ -420,20 +422,21 @@ const TuiApp = struct {
         };
     }
 
-    fn handleStartCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    fn handleStartCmd(io: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
         const self: *TuiApp = @ptrCast(@alignCast(listener));
 
-        var handle = self.app_model.executor.run(args, .nonBlocking) catch {
+        var handle = self.app_model.executor.run(io, args, .nonBlocking) catch {
             return;
         };
         if (handle) |*h| h.deinit();
     }
 
-    fn dumpAllOutputs(self: *TuiApp) !void {
+    fn dumpAllOutputs(self: *TuiApp, io: Io) !void {
         // Dump all output buffers to disk
         for (self.app_model.model_view.outputviews.items) |outputview| {
             for (outputview.outputs.items) |output| {
                 try actions.dumpOutputBuffer(
+                    io,
                     self._alloc,
                     try output.output.nonowned_process_buffer.copyUnfilteredBuffer(self._alloc),
                     output.id,
@@ -509,12 +512,13 @@ var keep_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var tui_signal = TUISignal{};
 var thread: ?std.Thread = null;
 var app: vxfw.App = undefined;
-fn run_tui(alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner) !void {
+fn run_tui(io: Io, alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner, env_map: *std.process.Environ.Map) !void {
     // parse the ui config
-    var config = try uiconfig.parseConfigs(alloc);
+    var config = try uiconfig.parseConfigs(io, alloc);
     defer config.deinit();
 
-    app = try vxfw.App.init(alloc);
+    var buffer: [1024]u8 = undefined;
+    app = try vxfw.App.init(io, alloc, env_map, &buffer);
     defer app.deinit();
 
     if (builtin.target.os.tag == .windows) {
@@ -551,8 +555,8 @@ fn run_tui(alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner) !void {
         try model.app_model.model_view.add_outputview(output_view, 0);
         try model.app_model.model_view.add_outputview(output_view2, 1);
 
-        const b1 = try model.app_model.buffers.create_process_buffer(alloc);
-        const b2 = try model.app_model.buffers.create_process_buffer(alloc);
+        const b1 = try model.app_model.buffers.create_process_buffer(io, alloc);
+        const b2 = try model.app_model.buffers.create_process_buffer(io, alloc);
         try output_view.add_output(try OutputWidget.init(
             alloc,
             "default_output",
@@ -568,8 +572,8 @@ fn run_tui(alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner) !void {
     }
 
     defer arena.deinit();
-    defer model.app_model.buffers.deinit(alloc);
-    defer model.app_model.model_view.deinit();
+    defer model.app_model.buffers.deinit(io, alloc);
+    defer model.app_model.model_view.deinit(io);
 
     try model.subscribeHandlersToCmd();
 
@@ -578,20 +582,22 @@ fn run_tui(alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner) !void {
 
     model.unsubscribeHandlersFromCmd();
     keep_running.store(false, .seq_cst);
-    setTUIClose();
+    setTUIClose(io);
 }
 
-pub fn start_tui(alloc: std.mem.Allocator, executor: *ConfiguredRunner) !void {
+pub fn start_tui(io: Io, alloc: std.mem.Allocator, executor: *ConfiguredRunner, env_map: *std.process.Environ.Map) !void {
     thread = try std.Thread.spawn(
         .{ .allocator = alloc },
         run_tui,
-        .{ alloc, executor },
+        .{ io, alloc, executor, env_map },
     );
 
     // wait till the tui app has started
-    var timer = try std.time.Timer.start();
+    const start = std.Io.Timestamp.now(io, std.Io.Clock.real);
     while (!keep_running.load(.seq_cst)) {
-        if (timer.read() > 10_000_000_000) {
+        const now = std.Io.Timestamp.now(io, std.Io.Clock.real);
+        const duration = std.Io.Timestamp.durationTo(start, now);
+        if (duration.toSeconds() > 10) {
             return;
         }
     }
@@ -606,23 +612,24 @@ pub fn stop_tui() void {
     }
 }
 
-pub fn setTUIClose() void {
-    tui_signal.mutex.lock();
+pub fn setTUIClose(io: Io) void {
+    tui_signal.mutex.lockUncancelable(io);
+    defer tui_signal.mutex.unlock(io);
+
     tui_signal.isClosing = true;
-    tui_signal.cond.signal();
-    tui_signal.mutex.unlock();
+    tui_signal.cond.signal(io);
 }
 
-pub fn waitForTUIClose() void {
-    tui_signal.mutex.lock();
-    defer tui_signal.mutex.unlock();
+pub fn waitForTUIClose(io: Io) !void {
+    tui_signal.mutex.lockUncancelable(io);
+    defer tui_signal.mutex.unlock(io);
 
     while (!tui_signal.isClosing) {
-        tui_signal.cond.wait(&tui_signal.mutex);
+        try tui_signal.cond.wait(io, &tui_signal.mutex);
     }
 }
 
-pub fn createProcessView(alloc: std.mem.Allocator, processname: []const u8) std.mem.Allocator.Error!uuid.UUID {
+pub fn createProcessView(io: Io, alloc: std.mem.Allocator, processname: []const u8) std.mem.Allocator.Error!uuid.UUID {
     // FIX: terrible hack to avoid a race condition which actually hits on nix
     //std.time.sleep(10_000_000_000);
     //std.debug.print("creating output: {s}\n", .{processname});
@@ -676,7 +683,7 @@ pub fn createProcessView(alloc: std.mem.Allocator, processname: []const u8) std.
     // }
     // return id;
 
-    const id = try processviewmgr.create_process_view(alloc, &model.app_model, processname);
+    const id = try processviewmgr.create_process_view(io, alloc, &model.app_model, processname);
     app.vx.setMouseMode(&app.tty.tty_writer.interface, true) catch {};
     return id;
 }
@@ -690,11 +697,12 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
     _ = jsonStr;
 }
 
-pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []const u8) std.mem.Allocator.Error!void {
+pub fn pushLogging(io: Io, alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []const u8) std.mem.Allocator.Error!void {
     _ = alloc;
 
     if (keep_running.load(.seq_cst)) {
-        model.app_model.buffers.process_buffers.m.lock();
+        model.app_model.buffers.process_buffers.m.lockUncancelable(io);
+        defer model.app_model.buffers.process_buffers.m.unlock(io);
 
         const target_buffer = model.app_model
             .buffers
@@ -703,8 +711,6 @@ pub fn pushLogging(alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []co
         if (target_buffer) |output| {
             try output.append(buffer);
         }
-
-        model.app_model.buffers.process_buffers.m.unlock();
     }
 }
 

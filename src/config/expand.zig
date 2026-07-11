@@ -1,4 +1,17 @@
 const std = @import("std");
+const Io = std.Io;
+
+var environ: ?std.process.Environ.Map = null;
+
+pub fn init_expand(env: std.process.Environ, alloc: std.mem.Allocator) void {
+    environ = env.createMap(alloc);
+}
+
+pub fn deinit_expand() void {
+    if (environ) |e| {
+        e.deinit();
+    }
+}
 
 pub const ExpandTokens = enum {
     workspaceFolder,
@@ -23,10 +36,10 @@ pub const ExpandErrors = error{
     TokenExpectedEnvVar,
     UnsupportedExpansionToken,
     NoExpansionFound,
-} || std.mem.Allocator.Error || std.fs.Dir.RealPathError;
+} || std.mem.Allocator.Error || std.Io.Dir.RealPathFileAllocError;
 
 // TODO: we should update this to ignore case!
-fn expansion_replace(alloc: std.mem.Allocator, input: []const u8, begin_idx: usize, end_idx: usize) ExpandErrors![]u8 {
+fn expansion_replace(io: Io, alloc: std.mem.Allocator, input: []const u8, begin_idx: usize, end_idx: usize) ExpandErrors![]u8 {
     const token = input[begin_idx..end_idx];
     std.log.debug("Token: {s}\n", .{token});
 
@@ -36,7 +49,7 @@ fn expansion_replace(alloc: std.mem.Allocator, input: []const u8, begin_idx: usi
     const env_prefix = "env:";
     if (token.len > env_prefix.len) {
         const actual_token = token[env_prefix.len..token.len];
-        if (std.process.getEnvVarOwned(alloc, actual_token)) |value| {
+        if (environ.?.get(actual_token)) |value| {
             defer alloc.free(value);
             try list.appendSlice(alloc, input[0 .. begin_idx - 2]);
             try list.appendSlice(alloc, value);
@@ -45,7 +58,7 @@ fn expansion_replace(alloc: std.mem.Allocator, input: []const u8, begin_idx: usi
             std.log.debug("result: {s}\n", .{value});
             std.log.debug("result: {s}\n", .{input[end_idx..input.len]});
             return list.toOwnedSlice(alloc);
-        } else |_| {}
+        }
     }
 
     const case = std.meta.stringToEnum(ExpandTokens, token) orelse {
@@ -63,19 +76,17 @@ fn expansion_replace(alloc: std.mem.Allocator, input: []const u8, begin_idx: usi
         .file,
         => {
             // search environment vars
-            const value = std.process.getEnvVarOwned(alloc, token) catch {
-                // TODO create uiconfig diagnostics instead of returning an error
-                return ExpandErrors.TokenExpectedEnvVar;
-            };
-            defer alloc.free(value);
+            const value = environ.?.get(token) orelse return ExpandErrors.TokenExpectedEnvVar;
+
             try list.appendSlice(alloc, input[0 .. begin_idx - 2]);
             try list.appendSlice(alloc, value);
             try list.appendSlice(alloc, input[end_idx + 1 .. input.len]);
             return list.toOwnedSlice(alloc);
         },
         .cwd => {
-            const value = try std.fs.cwd().realpathAlloc(alloc, ".");
+            const value = try std.Io.Dir.realPathFileAbsoluteAlloc(io, ".", alloc);
             defer alloc.free(value);
+
             try list.appendSlice(alloc, input[0 .. begin_idx - 2]);
             try list.appendSlice(alloc, value);
             try list.appendSlice(alloc, input[end_idx + 1 .. input.len]);
@@ -90,7 +101,7 @@ fn expansion_replace(alloc: std.mem.Allocator, input: []const u8, begin_idx: usi
     }
 }
 
-pub fn expand_string(alloc: std.mem.Allocator, str: []const u8) ExpandErrors![]u8 {
+pub fn expand_string(io: Io, alloc: std.mem.Allocator, str: []const u8) ExpandErrors![]u8 {
     var start: usize = 0;
     while (start < str.len) {
         const needle = "${";
@@ -104,7 +115,7 @@ pub fn expand_string(alloc: std.mem.Allocator, str: []const u8) ExpandErrors![]u
                     std.log.debug("index of end = {d}\n", .{idx});
                     // we found a match
                     // TODO: we should continue to look for more expansion strs
-                    return try expansion_replace(alloc, str, abs_idx, idx);
+                    return try expansion_replace(io, alloc, str, abs_idx, idx);
                 }
             }
             start = abs_idx + 1;

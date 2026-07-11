@@ -1,4 +1,6 @@
 const std = @import("std");
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
 const utils = @import("utils");
 const builtin = @import("builtin");
 pub const Pipeline = @import("pipeline.zig");
@@ -44,8 +46,9 @@ pub const ProcessBuffer = struct {
     const Error = error{
         InvalidArguments,
     };
-    alloc: std.mem.Allocator,
-    m: std.Thread.Mutex,
+    alloc: Allocator,
+    io: Io,
+    m: std.Io.Mutex,
     buffer: *LineBuffer,
     line_timestamps: *TimeStamps,
     filtered_buffer: LineBuffer,
@@ -73,12 +76,13 @@ pub const ProcessBuffer = struct {
     pub const IteratorPtr = IteratorTypes.IteratorPtr;
     pub const IteratorKind = IteratorTypes.IteratorKind;
 
-    pub fn init(alloc: std.mem.Allocator) !*ProcessBuffer {
+    pub fn init(io: Io, alloc: Allocator) !*ProcessBuffer {
         const self = try alloc.create(ProcessBuffer);
 
         self.* = .{
             .alloc = alloc,
-            .m = std.Thread.Mutex{},
+            .io = io,
+            .m = .init,
             .buffer = blk: {
                 const ptr: *LineBuffer = try alloc.create(LineBuffer);
                 ptr.* = try .init(alloc);
@@ -99,12 +103,12 @@ pub const ProcessBuffer = struct {
     /// The created ProcessBuffer will take ownership of everything inside meta
     /// The contents sinde linesAndMeta also must be valid for contact ProcessBuffer expects.
     /// That timestamps are ordered and there is a timestamp for every line in the buffer
-    pub fn initWithLines(alloc: std.mem.Allocator, meta: LinesAndMeta) !*ProcessBuffer {
+    pub fn initWithLines(alloc: Allocator, meta: LinesAndMeta) !*ProcessBuffer {
         const self = try alloc.create(ProcessBuffer);
 
         self.* = .{
             .alloc = alloc,
-            .m = std.Thread.Mutex{},
+            .m = .init,
             .buffer = meta.linebuffer,
             .line_timestamps = meta.timestamps,
             .filtered_buffer = try .init(alloc),
@@ -138,9 +142,9 @@ pub const ProcessBuffer = struct {
         self.nonowned_iterators.clearAndFree(self.alloc);
     }
 
-    pub fn append(self: *ProcessBuffer, buf: []const u8) std.mem.Allocator.Error!void {
-        self.m.lock();
-        defer self.m.unlock();
+    pub fn append(self: *ProcessBuffer, buf: []const u8) Allocator.Error!void {
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
 
         const lines = self.buffer.countLines();
 
@@ -151,9 +155,10 @@ pub const ProcessBuffer = struct {
         // if we have added new lines, update timestamps and children
         if (lines < new_lines) {
             // add timestamps for each new line
-            const timestamp = std.time.microTimestamp();
+            //const timestamp = std.time.microTimestamp();
+            const micro_timestamp = std.Io.Timestamp.now(self.io, std.Io.Clock.real).toMicroseconds();
             for (lines..new_lines) |_| {
-                append_timestamp(self.alloc, self.line_timestamps, timestamp) catch |err|
+                append_timestamp(self.alloc, self.line_timestamps, micro_timestamp) catch |err|
                     switch (err) {
                         error.TimeStampOutOfOrder => @panic("Inserting timestamp will break ordering."),
                         error.OutOfMemory => return error.OutOfMemory,
@@ -179,9 +184,9 @@ pub const ProcessBuffer = struct {
     }
 
     /// assumes that times are ordered
-    pub fn append_with_timestamps(self: *ProcessBuffer, buf: []const u8, times: []const i64) std.mem.Allocator.Error!void {
-        self.m.lock();
-        defer self.m.unlock();
+    pub fn append_with_timestamps(self: *ProcessBuffer, buf: []const u8, times: []const i64) Allocator.Error!void {
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
 
         // check that adding times won't unorder our lines_timestamps array
         if (self.line_timestamps.items.len > 0 and times.len > 0) {
@@ -216,11 +221,11 @@ pub const ProcessBuffer = struct {
     }
 
     fn update_newline_indexs(
-        alloc: std.mem.Allocator,
+        alloc: Allocator,
         newline_cache: *std.ArrayList(usize),
         buf: []const u8,
         offset: usize,
-    ) std.mem.Allocator.Error!void {
+    ) Allocator.Error!void {
         for (buf, 0..) |c, i| {
             if (c == '\n') {
                 try newline_cache.append(alloc, i + offset);
@@ -233,6 +238,7 @@ pub const ProcessBuffer = struct {
         const current_lines = self.buffer.countLines();
         if (self.lines_processed < current_lines) {
             const new_filtered_lines: []u8 = try self.pipeline.runPipeline(
+                self.io,
                 self.alloc,
                 self.buffer.getLinesStartingFrom(self.lines_processed).?,
                 MetaData{ .bufferOffset = self.filtered_buffer.count() },
@@ -260,22 +266,22 @@ pub const ProcessBuffer = struct {
     }
 
     pub fn addFilter(self: *ProcessBuffer, filter: Filter) !void {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
 
         std.log.debug("ProcessBuffer:addFilter()", .{});
 
-        try self.pipeline.appendFilter(filter);
+        try self.pipeline.appendFilter(self.io, filter);
         try self.reprocessPipeline();
     }
 
     pub fn removeFilter(self: *ProcessBuffer, id: Filter.HandleId) void {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
 
         std.log.debug("ProcessBuffer:removeFilter()", .{});
 
-        const filter = self.pipeline.removeFilter(id);
+        const filter = self.pipeline.removeFilter(self.io, id);
         if (filter) |f| f.deinit();
 
         // re-run the buffer through the pipeline
@@ -283,19 +289,19 @@ pub const ProcessBuffer = struct {
     }
 
     pub fn addReviewer(self: *ProcessBuffer, reviewer: Reviewer) !void {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
 
         std.log.debug("ProcessBuffer:addReviewer()", .{});
 
-        try self.pipeline.appendReviewer(reviewer);
+        try self.pipeline.appendReviewer(self.io, reviewer);
 
         try self.reprocessPipeline();
     }
 
     pub fn removeReviewer(self: *ProcessBuffer, id: Reviewer.HandleId) !void {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
 
         std.log.debug("ProcessBuffer:removeReviewer()", .{});
 
@@ -306,8 +312,8 @@ pub const ProcessBuffer = struct {
     }
 
     pub fn removeAllFilters(self: *ProcessBuffer) !void {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
 
         // get all pipeline ids
         var id_array = try std.ArrayList(Filter.HandleId).initCapacity(self.alloc, self.pipeline.filters.items.len);
@@ -315,7 +321,7 @@ pub const ProcessBuffer = struct {
             try id_array.append(self.alloc, f.id);
         }
         for (id_array.items) |id| {
-            var f = self.pipeline.removeFilter(id);
+            var f = self.pipeline.removeFilter(self.io, id);
             if (f != null) f.?.deinit();
         }
         id_array.deinit(self.alloc);
@@ -323,8 +329,8 @@ pub const ProcessBuffer = struct {
     }
 
     pub fn removeAllReviewers(self: *ProcessBuffer) !void {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
 
         // get all pipeline ids
         var id_array = try std.ArrayList(Reviewer.HandleId).initCapacity(self.alloc, self.pipeline.reviewers.items.len);
@@ -332,7 +338,7 @@ pub const ProcessBuffer = struct {
             try id_array.append(self.alloc, r.id);
         }
         for (id_array.items) |id| {
-            var r = self.pipeline.removeReviewer(id);
+            var r = self.pipeline.removeReviewer(self.io, id);
             if (r != null) r.?.deinit();
         }
         id_array.deinit(self.alloc);
@@ -340,8 +346,8 @@ pub const ProcessBuffer = struct {
     }
 
     pub fn resetPipeline(self: *ProcessBuffer) !void {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
 
         self.pipeline.deinit();
         self.pipeline = try Pipeline.init(self.alloc);
@@ -350,32 +356,32 @@ pub const ProcessBuffer = struct {
 
     pub fn copyFilteredBuffer(
         self: *ProcessBuffer,
-        alloc: std.mem.Allocator,
-    ) std.mem.Allocator.Error![]u8 {
-        self.m.lock();
-        defer self.m.unlock();
+        alloc: Allocator,
+    ) Allocator.Error![]u8 {
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
 
         return try alloc.dupe(u8, self.filtered_buffer.buf.items);
     }
 
     pub fn copyUnfilteredBuffer(
         self: *ProcessBuffer,
-        alloc: std.mem.Allocator,
-    ) std.mem.Allocator.Error![]u8 {
-        self.m.lock();
-        defer self.m.unlock();
+        alloc: Allocator,
+    ) Allocator.Error![]u8 {
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
 
         return try alloc.dupe(u8, self.buffer.buf.items);
     }
 
     pub fn copyRange(
         self: *ProcessBuffer,
-        alloc: std.mem.Allocator,
+        alloc: Allocator,
         offset: usize,
         len: usize,
     ) ![]u8 {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
 
         if (offset + len > self.filtered_buffer.buf.items.len) {
             std.log.debug("buffer length: {d}, offset: {d}, to_idx: {d}\n", .{
@@ -390,12 +396,12 @@ pub const ProcessBuffer = struct {
 
     pub fn copyUnfilteredRange(
         self: *ProcessBuffer,
-        alloc: std.mem.Allocator,
+        alloc: Allocator,
         offset: usize,
         len: usize,
     ) ![]u8 {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
 
         if (offset + len > self.buffer.buf.items.len) {
             return Error.InvalidArguments;
@@ -406,34 +412,34 @@ pub const ProcessBuffer = struct {
     pub fn getFilteredBufferLength(
         self: *ProcessBuffer,
     ) usize {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
         return self.filtered_buffer.count();
     }
 
     pub fn getNumFilteredNewlines(
         self: *ProcessBuffer,
     ) usize {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
         return self.filtered_buffer.newlines.items.len;
     }
 
     pub fn getFilteredLineIndexFromOffset(self: *ProcessBuffer, offset: usize) ?usize {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
         return self.filtered_buffer.getLineIndexFromOffset(offset);
     }
 
     pub fn getFilteredIndexOfLine(self: *ProcessBuffer, idx: usize) ?usize {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
         return self.filtered_buffer.getIndexOfLine(idx);
     }
 
     pub fn getLineFromOffset(self: *ProcessBuffer, offset: usize) usize {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
         self.filtered_buffer.getLineIndexFromOffset(offset).?;
     }
 
@@ -451,8 +457,8 @@ pub const ProcessBuffer = struct {
 
     // set the offset of the first character of the line
     pub fn getOffsetFromLine(self: *ProcessBuffer, line_num: usize) !usize {
-        self.m.lock();
-        defer self.m.unlock();
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
         const offset = self.filtered_buffer.getIndexOfLine(line_num);
         // This line isn't considering tails
         return if (offset) |ofs| ofs else error.OutOfBounds;
@@ -460,7 +466,7 @@ pub const ProcessBuffer = struct {
 
     pub fn createLineIterator(
         self: *ProcessBuffer,
-        alloc: std.mem.Allocator,
+        alloc: Allocator,
         kind: IteratorKind,
     ) !LineIterator {
         switch (kind) {
@@ -473,6 +479,7 @@ pub const ProcessBuffer = struct {
 const testing = std.testing;
 test "Line iterator" {
     const alloc = testing.allocator_instance.allocator();
+    const io = testing.io;
     const input =
         \\Line 1
         \\Line 2
@@ -482,7 +489,7 @@ test "Line iterator" {
         \\Line 6
     ;
 
-    const process_buffer = try ProcessBuffer.init(alloc);
+    const process_buffer = try ProcessBuffer.init(io, alloc);
     defer process_buffer.deinit();
 
     try process_buffer.append(input);

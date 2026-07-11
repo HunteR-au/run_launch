@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const vaxis = @import("vaxis");
 const Cmd = @import("cmd.zig");
 const CmdWidget = @import("cmdwidget.zig").CmdWidget;
@@ -33,9 +34,9 @@ pub const CmdBarWidget = struct {
         //if (self.history_view) |v| v.deinit(self.alloc);
     }
 
-    pub fn runCmd(self: *CmdBarWidget, cmdstr: []u8, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+    pub fn runCmd(self: *CmdBarWidget, io: Io, cmdstr: []u8, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         // run old style cmds
-        try self.cmd.handleCmd(cmdstr, ctx, event);
+        try self.cmd.handleCmd(io, cmdstr, ctx, event);
         self.textBox.clearAndFree();
     }
 
@@ -153,6 +154,7 @@ pub const CmdBarWidget = struct {
                         self.textBox.buf.buffer[0..real_length],
                     );
                     try self.runCmd(
+                        ctx.io,
                         cmdstr,
                         ctx,
                         cmdevents.makeEvent(&cmdevents.CmdEvent{ .run_cmd = .{

@@ -1,4 +1,6 @@
 const std = @import("std");
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
 const vaxis = @import("vaxis");
 //const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -13,15 +15,15 @@ pub const BufferWriter = struct {
     pub const Error = error{OutOfMemory};
     pub const Writer = std.io.GenericWriter(@This(), Error, write);
 
-    allocator: std.mem.Allocator,
-    m: std.Thread.Mutex,
+    allocator: Allocator,
+    m: std.Io.Mutex,
     buffer: *MultiStyleText,
     //gd: *const vaxis.grapheme.GraphemeData,
     unicode: *const Unicode,
 
-    pub fn write(self: @This(), bytes: []const u8) Error!usize {
-        self.m.lock();
-        defer self.m.unlock();
+    pub fn write(self: @This(), io: Io, bytes: []const u8) Error!usize {
+        self.m.lockUncancelable(io);
+        defer self.m.unlock(io);
 
         try self.buffer.append(self.allocator, .{
             .bytes = bytes,
@@ -50,7 +52,7 @@ pub const MultiStyleText = struct {
 
     pub const Error = error{OutOfMemory};
 
-    m: std.Thread.Mutex = .{},
+    m: std.Io.Mutex = .init,
     grapheme: std.MultiArrayList(vaxis.Graphemes.Grapheme) = .{},
     content: std.ArrayListUnmanaged(u8) = .{},
     style_list: StyleList = StyleList.empty,
@@ -66,7 +68,7 @@ pub const MultiStyleText = struct {
     overflow: enum { ellipsis, clip } = .ellipsis,
     width_basis: enum { parent, longest_line } = .longest_line,
 
-    pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *@This(), alloc: Allocator) void {
         self.style_list.deinit(alloc);
         self.style_map.deinit(alloc);
         self.grapheme.deinit(alloc);
@@ -75,24 +77,24 @@ pub const MultiStyleText = struct {
     }
 
     // Clears all buffers
-    pub fn clear(self: *@This(), alloc: std.mem.Allocator) Error!void {
+    pub fn clear(self: *@This(), alloc: Allocator) Error!void {
         self.deinit(alloc);
         self.* = .{};
     }
 
     // Replace the content of buffers, all previous buffer data is lost
-    pub fn update(self: *@This(), alloc: std.mem.Allocator, content: Content) Error!void {
-        self.m.lock();
-        defer self.m.unlock();
+    pub fn update(self: *@This(), io: Io, alloc: Allocator, content: Content) Error!void {
+        self.m.lockUncancelable(io);
+        defer self.m.unlock(io);
 
         self.clear(alloc);
         errdefer self.clear(alloc);
         try self.append(alloc, content);
     }
 
-    pub fn append(self: *@This(), alloc: std.mem.Allocator, content: Content) Error!void {
-        self.m.lock();
-        defer self.m.unlock();
+    pub fn append(self: *@This(), io: Io, alloc: Allocator, content: Content) Error!void {
+        self.m.lockUncancelable(io);
+        defer self.m.unlock(io);
 
         var cols: usize = self.last_cols;
         // TODO: fix
@@ -120,18 +122,18 @@ pub const MultiStyleText = struct {
     }
 
     // Clears all styling data.
-    pub fn clearStyle(self: *@This(), allocator: std.mem.Allocator) void {
-        self.m.lock();
-        defer self.m.unlock();
+    pub fn clearStyle(self: *@This(), io: Io, allocator: Allocator) void {
+        self.m.lockUncancelable(io);
+        defer self.m.unlock(io);
 
         self.style_list.deinit(allocator);
         self.style_map.deinit(allocator);
     }
 
     /// Update style for range of the buffer contents.
-    pub fn updateStyle(self: *@This(), allocator: std.mem.Allocator, style: Style) Error!void {
-        self.m.lock();
-        defer self.m.unlock();
+    pub fn updateStyle(self: *@This(), io: Io, allocator: Allocator, style: Style) Error!void {
+        self.m.lockUncancelable(io);
+        defer self.m.unlock(io);
 
         const style_index = blk: {
             for (self.style_list.items, 0..) |s, i| {
@@ -151,16 +153,16 @@ pub const MultiStyleText = struct {
         return self.content.items;
     }
 
-    pub fn copyText(self: *@This(), alloc: std.mem.Allocator) ![]u8 {
-        self.m.lock();
-        defer self.m.unlock();
+    pub fn copyText(self: *@This(), io: Io, alloc: Allocator) ![]u8 {
+        self.m.lockUncancelable(io);
+        defer self.m.unlock(io);
 
         return try alloc.dupe(u8, self.content.items);
     }
 
     pub fn writer(
         self: *@This(),
-        alloc: std.mem.Allocator,
+        alloc: Allocator,
         //gd: *const vaxis.Graphemes,
         unicode: *const Unicode,
     ) BufferWriter.Writer {
@@ -192,7 +194,7 @@ pub const MultiStyleText = struct {
         return style;
     }
 
-    pub fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    pub fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
         const self: *MultiStyleText = @ptrCast(@alignCast(ptr));
         // if max.height or max.width is null, that means we are expected to take up as much room as needed
         if (ctx.max.width != null and ctx.max.width == 0) {

@@ -1,9 +1,11 @@
 const std = @import("std");
+const Io = std.Io;
 const utils_ = @import("utils");
 
 const uuid = utils_.uuid;
 
 pub fn dumpOutputBuffer(
+    io: Io,
     alloc: std.mem.Allocator,
     buffer: []const u8,
     output_guid: uuid.UUID,
@@ -23,13 +25,14 @@ pub fn dumpOutputBuffer(
         alloc.free(temp_str);
     }
 
-    const file = try std.fs.cwd().createFile(
+    const file = try std.Io.Dir.cwd().createFile(
+        io,
         file_name,
         .{ .truncate = true },
     );
-    defer file.close();
+    defer file.close(io);
 
-    var w = file.writer(&writer_buf);
+    var w = file.writer(io, &writer_buf);
     var writer = &w.interface;
 
     try writer.writeAll(buffer);

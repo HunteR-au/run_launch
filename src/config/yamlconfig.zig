@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const Yaml = @import("yaml").Yaml;
 const utils = @import("utils");
 
@@ -10,7 +11,7 @@ const Task = @import("task.zig").Task;
 const Tasks = @import("task.zig").Tasks;
 const expand = @import("expand.zig");
 
-pub fn parseLaunch(alloc: std.mem.Allocator, yaml: Yaml) !Launch {
+pub fn parseLaunch(io: Io, alloc: std.mem.Allocator, yaml: Yaml) !Launch {
     var launch: Launch = try .init(alloc);
     errdefer launch.deinit(alloc);
 
@@ -33,7 +34,7 @@ pub fn parseLaunch(alloc: std.mem.Allocator, yaml: Yaml) !Launch {
 
             for (config_list, 0..) |config, i| {
                 // parse each config map
-                configs[i] = parseConfiguration(alloc, config) catch {
+                configs[i] = parseConfiguration(io, alloc, config) catch {
                     return error.ParseFailure;
                 };
             }
@@ -60,7 +61,7 @@ pub fn parseLaunch(alloc: std.mem.Allocator, yaml: Yaml) !Launch {
             for (compound_list) |*c| c.* = .{};
 
             for (list, 0..) |list_entry, i| switch (list_entry) {
-                .map => compound_list[i] = try parseCompound(alloc, list_entry),
+                .map => compound_list[i] = try parseCompound(io, alloc, list_entry),
                 else => return error.FieldInvalidType,
             };
             launch.compounds = compound_list;
@@ -74,7 +75,7 @@ pub fn parseLaunch(alloc: std.mem.Allocator, yaml: Yaml) !Launch {
     return launch;
 }
 
-pub fn parseTasks(alloc: std.mem.Allocator, yaml: Yaml) !?Tasks {
+pub fn parseTasks(io: Io, alloc: std.mem.Allocator, yaml: Yaml) !?Tasks {
     var tasks: Tasks = .init();
     errdefer tasks.deinit(alloc);
 
@@ -96,7 +97,7 @@ pub fn parseTasks(alloc: std.mem.Allocator, yaml: Yaml) !?Tasks {
             for (task_array) |*task| task.* = .{};
 
             for (list, 0..) |task, i| switch (task) {
-                .map => task_array[i] = try parseTask(alloc, task),
+                .map => task_array[i] = try parseTask(io, alloc, task),
                 else => return error.FieldInvalidType,
             };
 
@@ -113,7 +114,7 @@ pub fn parseTasks(alloc: std.mem.Allocator, yaml: Yaml) !?Tasks {
     return tasks;
 }
 
-fn parseTask(alloc: std.mem.Allocator, value: Yaml.Value) !Task {
+fn parseTask(io: Io, alloc: std.mem.Allocator, value: Yaml.Value) !Task {
     std.debug.assert(value == .map);
 
     var task: Task = .{};
@@ -123,7 +124,7 @@ fn parseTask(alloc: std.mem.Allocator, value: Yaml.Value) !Task {
 
     // required field
     if (map.get("label")) |label| switch (label) {
-        .scalar => |s| task.label = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| task.label = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     } else {
         return error.MissingRequiredField;
@@ -131,7 +132,7 @@ fn parseTask(alloc: std.mem.Allocator, value: Yaml.Value) !Task {
 
     // required field
     if (map.get("type")) |type_value| switch (type_value) {
-        .scalar => |s| task.type = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| task.type = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     } else {
         return error.MissingRequiredField;
@@ -139,19 +140,19 @@ fn parseTask(alloc: std.mem.Allocator, value: Yaml.Value) !Task {
 
     // required field
     if (map.get("command")) |command| switch (command) {
-        .scalar => |s| task.command = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| task.command = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     } else {
         return error.MissingRequiredField;
     }
 
     if (map.get("group")) |group| switch (group) {
-        .scalar => |s| task.group = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| task.group = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("problemMatcher")) |problemMatcher| switch (problemMatcher) {
-        .scalar => |s| task.problemMatcher = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| task.problemMatcher = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
@@ -167,7 +168,7 @@ fn parseTask(alloc: std.mem.Allocator, value: Yaml.Value) !Task {
             for (arg_strs) |*s| s.* = &.{};
 
             for (list, 0..) |item, i| switch (item) {
-                .scalar => |s| arg_strs[i] = try copyAndAttemptExpand(alloc, s),
+                .scalar => |s| arg_strs[i] = try copyAndAttemptExpand(io, alloc, s),
                 else => return error.FieldInvalidType,
             };
 
@@ -179,7 +180,7 @@ fn parseTask(alloc: std.mem.Allocator, value: Yaml.Value) !Task {
     return task;
 }
 
-fn parseCompound(alloc: std.mem.Allocator, value: Yaml.Value) !Compound {
+fn parseCompound(io: Io, alloc: std.mem.Allocator, value: Yaml.Value) !Compound {
     std.debug.assert(value == .map);
 
     var compound: Compound = .{};
@@ -198,19 +199,19 @@ fn parseCompound(alloc: std.mem.Allocator, value: Yaml.Value) !Compound {
     const map = value.asMap().?;
 
     if (map.get("name")) |name| switch (name) {
-        .scalar => |s| compound.name = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| compound.name = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     } else {
         return Compound.CompoundParsingErrors.NoNameField;
     }
 
     if (map.get("preLaunchTask")) |pre_task| switch (pre_task) {
-        .scalar => |s| compound.preLaunchTask = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| compound.preLaunchTask = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("postDebugTask")) |pre_task| switch (pre_task) {
-        .scalar => |s| compound.postDebugTask = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| compound.postDebugTask = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
@@ -229,7 +230,7 @@ fn parseCompound(alloc: std.mem.Allocator, value: Yaml.Value) !Compound {
 
             for (list, 0..) |entry, i| switch (entry) {
                 .scalar => |s| {
-                    compound.configurations.?[i] = try copyAndAttemptExpand(alloc, s);
+                    compound.configurations.?[i] = try copyAndAttemptExpand(io, alloc, s);
                 },
                 else => return error.FieldInvalidType,
             };
@@ -240,7 +241,7 @@ fn parseCompound(alloc: std.mem.Allocator, value: Yaml.Value) !Compound {
     return compound;
 }
 
-fn parseConfiguration(alloc: std.mem.Allocator, value: Yaml.Value) !Configuration {
+fn parseConfiguration(io: Io, alloc: std.mem.Allocator, value: Yaml.Value) !Configuration {
     std.debug.assert(value == .map);
 
     var config: Configuration = .{};
@@ -249,7 +250,7 @@ fn parseConfiguration(alloc: std.mem.Allocator, value: Yaml.Value) !Configuratio
 
     // required field
     if (map.get("name")) |name| switch (name) {
-        .scalar => |s| config.name = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| config.name = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     } else {
         return error.MissingRequiredField;
@@ -257,54 +258,54 @@ fn parseConfiguration(alloc: std.mem.Allocator, value: Yaml.Value) !Configuratio
 
     // required field
     if (map.get("type")) |type_value| switch (type_value) {
-        .scalar => |s| config.type = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| config.type = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     } else {
         return error.MissingRequiredField;
     }
 
     if (map.get("request")) |request| switch (request) {
-        .scalar => |s| config.request = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| config.request = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("consoleTitle")) |consoleTitle| switch (consoleTitle) {
-        .scalar => |s| config.consoleTitle = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| config.consoleTitle = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("module")) |module| switch (module) {
-        .scalar => |s| config.module = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| config.module = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("program")) |program| switch (program) {
-        .scalar => |s| config.program = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| config.program = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("console")) |console| switch (console) {
-        .scalar => |s| config.console = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| config.console = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("stopOnEntry")) |stopOnEntry| switch (stopOnEntry) {
-        .scalar => |s| config.stopOnEntry = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| config.stopOnEntry = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("preLaunchTask")) |preLaunchTask| switch (preLaunchTask) {
-        .scalar => |s| config.preLaunchTask = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| config.preLaunchTask = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("postDebugTask")) |postDebugTask| switch (postDebugTask) {
-        .scalar => |s| config.postDebugTask = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| config.postDebugTask = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("envFile")) |envFile| switch (envFile) {
-        .scalar => |s| config.envFile = try copyAndAttemptExpand(alloc, s),
+        .scalar => |s| config.envFile = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
@@ -321,7 +322,7 @@ fn parseConfiguration(alloc: std.mem.Allocator, value: Yaml.Value) !Configuratio
     if (map.get("connect")) |connect| switch (connect) {
         .map => |m| {
             if (m.get("host")) |host| switch (host) {
-                .scalar => |s| config.connect.host = try copyAndAttemptExpand(alloc, s),
+                .scalar => |s| config.connect.host = try copyAndAttemptExpand(io, alloc, s),
                 else => return error.FieldInvalidType,
             };
             //const port = connect_map.get("port");
@@ -392,8 +393,8 @@ fn parseConfigEnv(alloc: std.mem.Allocator, value: Yaml.Value) ![]const utils.En
     return envs;
 }
 
-fn copyAndAttemptExpand(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
-    return expand.expand_string(alloc, input) catch |err| switch (err) {
+fn copyAndAttemptExpand(io: Io, alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+    return expand.expand_string(io, alloc, input) catch |err| switch (err) {
         expand.ExpandErrors.NoExpansionFound => {
             return try alloc.dupe(u8, input);
         },

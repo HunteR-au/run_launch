@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const debugpy = @import("pydebug.zig");
 const native = @import("native.zig");
 const utils = @import("utils");
@@ -18,7 +19,7 @@ pub const RunnerContext = struct {
 };
 
 pub const UiFunctions = struct {
-    pub const NotifyNewProcessFn = fn (std.mem.Allocator, []const u8) std.mem.Allocator.Error!uuid.UUID;
+    pub const NotifyNewProcessFn = fn (Io, std.mem.Allocator, []const u8) std.mem.Allocator.Error!uuid.UUID;
     pub const PushBytesFn = utils.PushFnProto;
 
     notifyNewProcess: *const NotifyNewProcessFn,
@@ -30,7 +31,7 @@ pub const WorkHandle = struct {
     children: std.ArrayList(*std.process.Child),
     results: ?std.ArrayList(std.process.Child.Term) = null,
 
-    pub fn wait(self: *WorkHandle) !void {
+    pub fn wait(self: *WorkHandle, io: Io) !void {
         if (self.results != null) {
             self.results.?.deinit(self._alloc);
             self.results = null;
@@ -38,7 +39,7 @@ pub const WorkHandle = struct {
         self.results = try .initCapacity(self._alloc, self.children.items.len);
 
         for (self.children.items) |child| {
-            const term = try child.wait();
+            const term = try child.wait(io);
             self.results.?.appendAssumeCapacity(term);
         }
     }
@@ -55,7 +56,7 @@ pub const ConfiguredRunner = struct {
     _ui_funcs: UiFunctions,
     config: Launch,
     tasks: ?Tasks = null,
-    m: std.Thread.Mutex = std.Thread.Mutex{},
+    m: std.Io.Mutex = .init,
 
     const ExecType = enum { blocking, nonBlocking };
 
@@ -81,9 +82,9 @@ pub const ConfiguredRunner = struct {
         return runner;
     }
 
-    pub fn deinit(self: *ConfiguredRunner) void {
-        self.m.lock();
-        defer self.m.unlock();
+    pub fn deinit(self: *ConfiguredRunner, io: Io) void {
+        self.m.lockUncancelable(io);
+        defer self.m.unlock(io);
 
         self._context.children.deinit(self._alloc);
         self._context.threads.deinit(self._alloc);
@@ -97,9 +98,9 @@ pub const ConfiguredRunner = struct {
         self._alloc.destroy(self);
     }
 
-    pub fn run(self: *ConfiguredRunner, name: []const u8, exec_type: ExecType) !?WorkHandle {
-        self.m.lock();
-        defer self.m.unlock();
+    pub fn run(self: *ConfiguredRunner, io: Io, name: []const u8, exec_type: ExecType) !?WorkHandle {
+        self.m.lockUncancelable(io);
+        defer self.m.unlock(io);
 
         const match = self.config.find_by_name(name) orelse {
             return error.NoConfigWithName;
@@ -113,6 +114,7 @@ pub const ConfiguredRunner = struct {
                 };
 
                 const child = try runRunnerTypeNonBlocking(
+                    io,
                     self._alloc,
                     runner_type,
                     config,
@@ -129,7 +131,7 @@ pub const ConfiguredRunner = struct {
                 try handle.children.append(handle._alloc, &self._context.children.items[0]);
 
                 switch (exec_type) {
-                    .blocking => try handle.wait(),
+                    .blocking => try handle.wait(io),
                     .nonBlocking => {},
                 }
 
@@ -147,6 +149,7 @@ pub const ConfiguredRunner = struct {
                             return error.InvalidChoice;
                         };
                         const child = try runRunnerTypeNonBlocking(
+                            io,
                             self._alloc,
                             runner_type,
                             config,
@@ -164,7 +167,7 @@ pub const ConfiguredRunner = struct {
                 }
 
                 switch (exec_type) {
-                    .blocking => try handle.wait(),
+                    .blocking => try handle.wait(io),
                     .nonBlocking => {},
                 }
                 return handle;
@@ -172,9 +175,9 @@ pub const ConfiguredRunner = struct {
         }
     }
 
-    pub fn runPreTasks(self: *ConfiguredRunner, name: []const u8, exec_type: ExecType) !?WorkHandle {
-        self.m.lock();
-        defer self.m.unlock();
+    pub fn runPreTasks(self: *ConfiguredRunner, io: Io, name: []const u8, exec_type: ExecType) !?WorkHandle {
+        self.m.lockUncancelable(io);
+        defer self.m.unlock(io);
         const match = self.config.find_by_name(name) orelse {
             return error.NoConfigWithName;
         };
@@ -185,6 +188,7 @@ pub const ConfiguredRunner = struct {
             .config => |config| {
                 // TODO - change this to be non-blocking
                 child = try runPreLaunchTask(
+                    io,
                     self._alloc,
                     *const LaunchConfiguration,
                     config,
@@ -196,6 +200,7 @@ pub const ConfiguredRunner = struct {
             .compound => |compound| {
                 // TODO - change this to be non-blocking
                 child = try runPreLaunchTask(
+                    io,
                     self._alloc,
                     *const Compound,
                     compound,
@@ -218,16 +223,16 @@ pub const ConfiguredRunner = struct {
         }
 
         switch (exec_type) {
-            .blocking => try handle.wait(),
+            .blocking => try handle.wait(io),
             .nonBlocking => {},
         }
 
         return handle;
     }
 
-    pub fn runPostTasks(self: *ConfiguredRunner, name: []const u8, exec_type: ExecType) !?WorkHandle {
-        self.m.lock();
-        defer self.m.unlock();
+    pub fn runPostTasks(self: *ConfiguredRunner, io: Io, name: []const u8, exec_type: ExecType) !?WorkHandle {
+        self.m.lockUncancelable(io);
+        defer self.m.unlock(io);
 
         const match = self.config.find_by_name(name) orelse {
             return error.NoConfigWithName;
@@ -239,6 +244,7 @@ pub const ConfiguredRunner = struct {
             .config => |config| {
                 // TODO - change this to be non-blocking
                 child = try runPostLaunchTask(
+                    io,
                     self._alloc,
                     *const LaunchConfiguration,
                     config,
@@ -249,6 +255,7 @@ pub const ConfiguredRunner = struct {
             .compound => |compound| {
                 // TODO - change this to be non-blocking
                 child = try runPostLaunchTask(
+                    io,
                     self._alloc,
                     *const Compound,
                     compound,
@@ -270,24 +277,19 @@ pub const ConfiguredRunner = struct {
         }
 
         switch (exec_type) {
-            .blocking => try handle.wait(),
+            .blocking => try handle.wait(io),
             .nonBlocking => {},
         }
 
         return handle;
     }
 
-    pub fn killAll(self: *ConfiguredRunner) !void {
-        self.m.lock();
-        defer self.m.unlock();
+    pub fn killAll(self: *ConfiguredRunner, io: Io) !void {
+        self.m.lockUncancelable(io);
+        defer self.m.unlock(io);
 
         for (self._context.children.items) |*child| {
-            _ = child.kill() catch |err| switch (err) {
-                error.AlreadyTerminated => {},
-                else => {
-                    return err;
-                },
-            };
+            _ = child.kill(io);
         }
     }
 };
@@ -300,6 +302,7 @@ const RunnerType = enum {
 };
 
 pub fn run(
+    io: Io,
     alloc: std.mem.Allocator,
     name: []const u8,
     launchconfig: Launch,
@@ -349,7 +352,7 @@ pub fn run(
                     const runnertype = std.meta.stringToEnum(RunnerType, config.type.?) orelse {
                         return error.InvalidChoice;
                     };
-                    const child = try runRunnerTypeNonBlocking(alloc, runnertype, config, &runnerif, createviewprocessfn, pushfn);
+                    const child = try runRunnerTypeNonBlocking(io, alloc, runnertype, config, &runnerif, createviewprocessfn, pushfn);
                     try runnerif.children.append(alloc, child);
                 }
             }
@@ -357,7 +360,7 @@ pub fn run(
             // wait for each child process
             //try writer.print("Waiting for each process to finish...\n", .{});
             for (runnerif.children.items) |*child| {
-                _ = try child.wait();
+                _ = try child.wait(io);
             }
 
             _ = try runPostLaunchTask(alloc, *const Compound, compound, tasks, pushfn);
@@ -369,6 +372,7 @@ pub fn run(
 }
 
 fn runPreLaunchTask(
+    io: Io,
     alloc: std.mem.Allocator,
     T: type,
     launchdata: T,
@@ -377,12 +381,13 @@ fn runPreLaunchTask(
     pushfn: *const UiFunctions.PushBytesFn,
 ) !?std.process.Child {
     if (launchdata.preLaunchTask != null) {
-        return try findRunTask(alloc, launchdata.preLaunchTask.?, tasks, createviewprocessfn, pushfn);
+        return try findRunTask(io, alloc, launchdata.preLaunchTask.?, tasks, createviewprocessfn, pushfn);
     }
     return null;
 }
 
 fn runPostLaunchTask(
+    io: Io,
     alloc: std.mem.Allocator,
     T: type,
     launchdata: T,
@@ -390,12 +395,13 @@ fn runPostLaunchTask(
     pushfn: *const UiFunctions.PushBytesFn,
 ) !?std.process.Child {
     if (launchdata.postDebugTask != null) {
-        return try findRunTask(alloc, launchdata.postDebugTask.?, tasks, null, pushfn);
+        return try findRunTask(io, alloc, launchdata.postDebugTask.?, tasks, null, pushfn);
     }
     return null;
 }
 
 fn findRunTask(
+    io: Io,
     alloc: std.mem.Allocator,
     taskname: []const u8,
     tasks: ?Tasks,
@@ -406,17 +412,18 @@ fn findRunTask(
         if (tasks.?.find_by_label(taskname)) |task| {
             var id: uuid.UUID = undefined;
             if (createviewprocessfn) |create_fn| {
-                id = try create_fn(alloc, taskname);
+                id = try create_fn(io, alloc, taskname);
             } else {
-                id = uuid.newV4();
+                id = uuid.newV4(io);
             }
-            return try task.run_task(alloc, id, pushfn);
+            return try task.run_task(io, alloc, id, pushfn);
         }
     }
     return null;
 }
 
 fn runRunnerType(
+    io: Io,
     alloc: std.mem.Allocator,
     runtype: RunnerType,
     config: *const LaunchConfiguration,
@@ -427,21 +434,22 @@ fn runRunnerType(
     switch (runtype) {
         .debugpy => {
             // work out if we need to run a module or script...
-            try debugpy.run(alloc, pushfn, config, runnerif, createviewprocessfn);
+            try debugpy.run(io, alloc, pushfn, config, runnerif, createviewprocessfn);
         },
         .python => {
-            try debugpy.run(alloc, pushfn, config, runnerif, createviewprocessfn);
+            try debugpy.run(io, alloc, pushfn, config, runnerif, createviewprocessfn);
         },
         .cppdbg => {
-            try native.run(alloc, pushfn, config, runnerif, createviewprocessfn);
+            try native.run(io, alloc, pushfn, config, runnerif, createviewprocessfn);
         },
         .cppvsdbg => {
-            try native.run(alloc, pushfn, config, runnerif, createviewprocessfn);
+            try native.run(io, alloc, pushfn, config, runnerif, createviewprocessfn);
         },
     }
 }
 
 fn runRunnerTypeNonBlocking(
+    io: Io,
     alloc: std.mem.Allocator,
     runtype: RunnerType,
     config: *const LaunchConfiguration,
@@ -452,16 +460,16 @@ fn runRunnerTypeNonBlocking(
     switch (runtype) {
         .debugpy => {
             // work out if we need to run a module or script...
-            return debugpy.runNonBlocking(alloc, pushfn, config, runnerif, createviewprocessfn);
+            return debugpy.runNonBlocking(io, alloc, pushfn, config, runnerif, createviewprocessfn);
         },
         .python => {
-            return debugpy.runNonBlocking(alloc, pushfn, config, runnerif, createviewprocessfn);
+            return debugpy.runNonBlocking(io, alloc, pushfn, config, runnerif, createviewprocessfn);
         },
         .cppdbg => {
-            return native.runNonBlocking(alloc, pushfn, config, runnerif, createviewprocessfn);
+            return native.runNonBlocking(io, alloc, pushfn, config, runnerif, createviewprocessfn);
         },
         .cppvsdbg => {
-            return native.runNonBlocking(alloc, pushfn, config, runnerif, createviewprocessfn);
+            return native.runNonBlocking(io, alloc, pushfn, config, runnerif, createviewprocessfn);
         },
     }
 }

@@ -1,4 +1,6 @@
 const std = @import("std");
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 
 pub const uuid = @import("utils/uuid.zig");
@@ -9,7 +11,7 @@ pub const EnvTuple = struct {
     val: []u8,
 };
 
-pub fn parse_config_args(allocator: std.mem.Allocator, args_object: std.json.Array) ![]const []const u8 {
+pub fn parse_config_args(allocator: Allocator, args_object: std.json.Array) ![]const []const u8 {
     var args = try allocator.alloc([]u8, args_object.items.len);
     errdefer allocator.free(args);
 
@@ -26,7 +28,7 @@ pub fn parse_config_args(allocator: std.mem.Allocator, args_object: std.json.Arr
     return args;
 }
 
-pub fn parse_config_env(allocator: std.mem.Allocator, env_object: std.json.ObjectMap) ![]const EnvTuple {
+pub fn parse_config_env(allocator: Allocator, env_object: std.json.ObjectMap) ![]const EnvTuple {
     var envs = try allocator.alloc(EnvTuple, env_object.count());
     errdefer allocator.free(envs);
 
@@ -69,7 +71,7 @@ pub fn parseTripleInt(input: []const u8) ![3]u32 {
     return parts;
 }
 
-pub fn parseArgsLineWithQuoteGroups(alloc: std.mem.Allocator, input: []const u8) ![]const []const u8 {
+pub fn parseArgsLineWithQuoteGroups(alloc: Allocator, input: []const u8) ![]const []const u8 {
     var list = try std.ArrayList([]const u8).initCapacity(alloc, 10);
     var i: usize = 0;
 
@@ -112,25 +114,25 @@ pub fn parseArgsLineWithQuoteGroups(alloc: std.mem.Allocator, input: []const u8)
     return list.toOwnedSlice(alloc);
 }
 
-pub fn create_env_map(alloc: std.mem.Allocator, envtuples: []const EnvTuple) !std.process.EnvMap {
-    var env_map = try std.process.getEnvMap(alloc);
-    errdefer env_map.deinit();
+pub fn create_env_map(alloc: Allocator, envtuples: []const EnvTuple) !std.process.Environ.Map {
+    var map = std.process.Environ.Map.init(alloc);
+    errdefer map.deinit();
 
     for (envtuples) |*env| {
-        try env_map.put(env.key, env.val);
+        try map.put(env.key, env.val);
     }
-    return env_map;
+    return map;
 }
 
-pub fn parse_dotenv_file(alloc: std.mem.Allocator, filepath: []const u8) ![]EnvTuple {
+pub fn parse_dotenv_file(io: Io, alloc: Allocator, filepath: []const u8) ![]EnvTuple {
     var filebuf: []u8 = undefined;
 
-    if (std.fs.path.isAbsolute(filepath)) {
-        var file = try std.fs.openFileAbsolute(filepath, .{ .mode = .read_only });
+    if (std.Io.Dir.path.isAbsolute(filepath)) {
+        var file = try std.Io.Dir.openFileAbsolute(io, filepath, .{ .mode = .read_only });
         defer file.close();
         filebuf = try file.readToEndAlloc(alloc, std.math.maxInt(usize));
     } else {
-        var file = try std.fs.cwd().openFile(filepath, .{ .mode = .read_only });
+        var file = try std.Io.Dir.cwd().openFile(filepath, .{ .mode = .read_only });
         defer file.close();
         filebuf = try file.readToEndAlloc(alloc, std.math.maxInt(usize));
     }
@@ -139,10 +141,10 @@ pub fn parse_dotenv_file(alloc: std.mem.Allocator, filepath: []const u8) ![]EnvT
     var split_iter = undefined;
     switch (builtin.target.os.tag) {
         .windows => {
-            split_iter = std.mem.splitScalar(u8, filebuf, std.fs.path.set_windows);
+            split_iter = std.mem.splitScalar(u8, filebuf, std.Io.Dir.path.sep_windows);
         },
         else => {
-            split_iter = std.mem.splitScalar(u8, filebuf, std.fs.path.sep_posix);
+            split_iter = std.mem.splitScalar(u8, filebuf, std.Io.Dir.path.sep_posix);
         },
     }
 
@@ -166,61 +168,137 @@ pub fn parse_dotenv_file(alloc: std.mem.Allocator, filepath: []const u8) ![]EnvT
     return tuples;
 }
 
-pub const PushFnProto = fn (std.mem.Allocator, uuid.UUID, []const u8) std.mem.Allocator.Error!void;
+pub const PushFnProto = fn (std.Io, Allocator, uuid.UUID, []const u8) Allocator.Error!void;
 
 pub fn pullpushLoop(
-    alloc: std.mem.Allocator,
+    io: Io,
+    alloc: Allocator,
     pushfn: *const PushFnProto,
     childproc: std.process.Child,
     processid: uuid.UUID,
 ) !void {
     const chunk_size: usize = 1024;
 
-    std.debug.assert(childproc.stdout_behavior == .Pipe);
-    std.debug.assert(childproc.stderr_behavior == .Pipe);
+    //std.debug.assert(childproc.stdout_behavior == .Pipe);
+    //std.debug.assert(childproc.stderr_behavior == .Pipe);
 
-    const outbuffer: []u8 = try alloc.alloc(u8, chunk_size);
-    const errbuffer: []u8 = try alloc.alloc(u8, chunk_size);
-
-    defer alloc.free(outbuffer);
-    defer alloc.free(errbuffer);
+    const stdout_buf: []u8 = try alloc.alloc(u8, chunk_size);
+    const stderr_buf: []u8 = try alloc.alloc(u8, chunk_size);
+    defer alloc.free(stdout_buf);
+    defer alloc.free(stderr_buf);
 
     const stdout_reader = childproc.stdout.?;
     const stderr_reader = childproc.stderr.?;
 
-    var poller = std.Io.poll(alloc, enum { stdout, stderr }, .{
-        .stdout = stdout_reader,
-        .stderr = stderr_reader,
-    });
-    defer poller.deinit();
+    //var batch = std.Io.Batch.init(alloc);
+    const stdout_read: std.Io.Operation.FileReadStreaming = .{
+        .file = stdout_reader,
+        .data = &[_][]u8{stdout_buf},
+    };
 
+    const stderr_read: std.Io.Operation.FileReadStreaming = .{
+        .file = stderr_reader,
+        .data = &[_][]u8{stderr_buf},
+    };
+
+    const READ_OP_STDOUT: u32 = 0;
+    const READ_OP_STDERR: u32 = 1;
+
+    // var poller = std.Io.poll(alloc, enum { stdout, stderr }, .{
+    //     .stdout = stdout_reader,
+    //     .stderr = stderr_reader,
+    // });
+    // defer poller.deinit();
+    var storage: [2]std.Io.Operation.Storage = undefined;
+    var batch = std.Io.Batch.init(storage[0..]);
+
+    batch.addAt(READ_OP_STDOUT, .{ .file_read_streaming = stdout_read });
+    batch.addAt(READ_OP_STDERR, .{ .file_read_streaming = stderr_read });
+    var is_alive: bool = true;
     while (true) {
-        const keep_polling = poller.pollTimeout(100_000_000) catch {
-            try pushfn(alloc, processid, "!!!BUFFER ENDED!!! stream ended with error\n");
-            return;
+        batch.awaitConcurrent(
+            io,
+            .{ .duration = .{ .raw = .fromMilliseconds(10), .clock = .real } },
+        ) catch |e| switch (e) {
+            error.ConcurrencyUnavailable => {
+                @panic("This functions requires concurrency.");
+            },
+            error.Canceled => {
+                // probably can ignore any buffers pending read
+                try pushfn(io, alloc, processid, "!!!BUFFER ENDED!!!\n");
+                break;
+            },
+            error.Timeout => {
+                // TODO - I'm not sure if I need to reset operations
+                continue;
+            },
         };
-        if (!keep_polling) break;
 
-        const stdout_buf = try poller.toOwnedSlice(.stdout);
-        defer alloc.free(stdout_buf);
-        if (stdout_buf.len > 0) {
-            try pushfn(alloc, processid, stdout_buf);
+        is_alive = false;
+        while (batch.next()) |completion| {
+            const result = completion.result.file_read_streaming;
+            const n: usize = result catch |err| switch (err) {
+                error.EndOfStream => {
+                    // EOF for this stream, don't resubmit operation
+                    continue;
+                },
+                error.WouldBlock => {
+                    // nothing available atm
+                    continue;
+                },
+                else => {
+                    // can't handle these errors
+                    try pushfn(io, alloc, processid, "!!!STREAM ERROR!!!\n");
+                    break;
+                },
+            };
+
+            if (completion.index == READ_OP_STDOUT) {
+                if (n > 0) {
+                    is_alive = true;
+                    try pushfn(io, alloc, processid, stdout_buf[0..n]);
+                }
+                batch.addAt(READ_OP_STDOUT, .{ .file_read_streaming = stdout_read });
+            } else if (completion.index == READ_OP_STDERR) {
+                if (n > 0) {
+                    is_alive = true;
+                    try pushfn(io, alloc, processid, stderr_buf[0..n]);
+                }
+                batch.addAt(READ_OP_STDERR, .{ .file_read_streaming = stderr_read });
+            }
         }
 
-        const stderr_buf = try poller.toOwnedSlice(.stderr);
-        defer alloc.free(stderr_buf);
-        if (stderr_buf.len > 0) {
-            try pushfn(alloc, processid, stderr_buf);
+        if (!is_alive) {
+            try pushfn(io, alloc, processid, "!!!BUFFER ENDED!!!\n");
+            break;
         }
+
+        // const keep_polling = poller.pollTimeout() catch {
+        //     try pushfn(alloc, processid, "!!!BUFFER ENDED!!! stream ended with error\n");
+        //     return;
+        // };
+        // if (!keep_polling) break;
+
+        // const stdout_buf = try poller.toOwnedSlice(.stdout);
+        // defer alloc.free(stdout_buf);
+        // if (stdout_buf.len > 0) {
+        //     try pushfn(alloc, processid, stdout_buf);
+        // }
+
+        // const stderr_buf = try poller.toOwnedSlice(.stderr);
+        // defer alloc.free(stderr_buf);
+        // if (stderr_buf.len > 0) {
+        //     try pushfn(alloc, processid, stderr_buf);
+        // }
     }
 
-    try pushfn(alloc, processid, "!!!BUFFER ENDED!!!\n");
+    //try pushfn(alloc, processid, "!!!BUFFER ENDED!!!\n");
 }
 
 // AI impl
 
 //pub fn pullpushLoop(
-//    alloc: std.mem.Allocator,
+//    alloc: Allocator,
 //    pushfn: PushFnProto,
 //    childproc: std.process.Child,
 //    processname: []const u8,
@@ -242,7 +320,7 @@ pub fn pullpushLoop(
 //    defer poller.deinit();
 //
 //    while (true) {
-//        const polled = poller.pollTimeout(100_000_000) catch |err| {
+//        const polled = poller.pollTimeout() catch |err| {
 //            switch (err) {
 //                error.NotOpenForReading => break, // pipes closed → exit loop
 //                else => return err,              // propagate other errors
@@ -270,7 +348,7 @@ pub fn cloneHashMap(
     comptime V: type,
     comptime Context: type,
     comptime LoadPercentage: comptime_float,
-    alloc: std.mem.Allocator,
+    alloc: Allocator,
     source: *std.HashMap(K, V, Context, LoadPercentage),
 ) !std.HashMap(K, V, Context, LoadPercentage) {
     var target = std.HashMap(K, V, Context, LoadPercentage).init(alloc);
@@ -283,14 +361,14 @@ pub fn cloneHashMap(
     return target;
 }
 
-pub fn get_home_path(alloc: std.mem.Allocator) ?[]const u8 {
+pub fn get_home_path(alloc: Allocator) ?[]const u8 {
     return std.process.getEnvVarOwned(alloc, "HOME") catch {
         return null;
     };
 }
 
 pub fn makeWindowsSafeFilename(
-    alloc: std.mem.Allocator,
+    alloc: Allocator,
     input: []const u8,
 ) ![]u8 {
     // Forbidden characters on Windows

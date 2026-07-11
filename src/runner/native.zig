@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const utils = @import("utils");
 const runner = @import("runner.zig");
 const launch_ = @import("config");
@@ -7,6 +8,7 @@ const Launch = launch_.Launch;
 const LaunchConfiguration = launch_.LaunchConfiguration;
 
 pub fn run(
+    io: Io,
     alloc: std.mem.Allocator,
     pushfn: *const utils.PushFnProto,
     config: *const LaunchConfiguration,
@@ -23,14 +25,16 @@ pub fn run(
         }
     }
 
+    const envmap_ptr: ?*std.process.Environ.Map = if (envmap) |*p| &p else null;
+
     if (config.program) |*program| {
         if (config.args) |*args| {
             const id = try createprocessview(alloc, program.*);
-            return try run_native(alloc, pushfn, id, program.*, args.*, envmap);
+            return try run_native(io, alloc, pushfn, id, program.*, args.*, envmap_ptr);
         } else {
             const empty: []const []const u8 = &[_][]const u8{};
             const id = try createprocessview(alloc, program.*);
-            return try run_native(alloc, pushfn, id, program.*, empty, envmap);
+            return try run_native(io, alloc, pushfn, id, program.*, empty, envmap_ptr);
         }
     } else {
         return error.MissingConfigurationFields;
@@ -38,15 +42,18 @@ pub fn run(
 }
 
 pub fn runNonBlocking(
+    io: Io,
     alloc: std.mem.Allocator,
     pushfn: *const utils.PushFnProto,
     config: *const LaunchConfiguration,
     _: *runner.RunnerContext,
     createprocessview: *const runner.UiFunctions.NotifyNewProcessFn,
 ) !std.process.Child {
-    var envmap: ?std.process.EnvMap = null;
+    var envmap: ?std.process.Environ.Map = null;
+    var envmap_ptr: ?*std.process.Environ.Map = null;
     if (config.env) |envs| {
         envmap = try utils.create_env_map(alloc, envs);
+        envmap_ptr = &envmap.?;
     }
     defer {
         if (envmap) |*p| {
@@ -56,12 +63,12 @@ pub fn runNonBlocking(
 
     if (config.program) |*program| {
         if (config.args) |*args| {
-            const id = try createprocessview(alloc, program.*);
-            return try run_native_nowait(alloc, pushfn, id, program.*, args.*, envmap);
+            const id = try createprocessview(io, alloc, program.*);
+            return try run_native_nowait(io, alloc, pushfn, id, program.*, args.*, envmap_ptr);
         } else {
             const empty: []const []const u8 = &[_][]const u8{};
-            const id = try createprocessview(alloc, program.*);
-            return try run_native_nowait(alloc, pushfn, id, program.*, empty, envmap);
+            const id = try createprocessview(io, alloc, program.*);
+            return try run_native_nowait(io, alloc, pushfn, id, program.*, empty, envmap_ptr);
         }
     } else {
         return error.MissingConfigurationFields;
@@ -69,12 +76,13 @@ pub fn runNonBlocking(
 }
 
 fn run_native_nowait(
+    io: Io,
     allocator: std.mem.Allocator,
     pushfn: *const utils.PushFnProto,
     id: utils.uuid.UUID,
     program: []const u8,
     args: []const []const u8,
-    envs: ?std.process.EnvMap,
+    envs: ?*std.process.Environ.Map,
 ) !std.process.Child {
     const num_prefix_args = 1;
     var argv: [][]const u8 = try allocator.alloc([]const u8, args.len + num_prefix_args);
@@ -84,28 +92,37 @@ fn run_native_nowait(
         argv[i] = arg;
     }
 
-    var child = std.process.Child.init(argv, allocator);
-    child.stdout_behavior = std.process.Child.StdIo.Pipe;
-    child.stderr_behavior = std.process.Child.StdIo.Pipe;
-    child.stdin_behavior = .Ignore;
-    if (envs) |*e| {
-        child.env_map = e;
-    }
+    const child = try std.process.spawn(io, .{
+        .argv = argv,
+        .environ_map = envs,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .stdin = .ignore,
+    });
 
-    try child.spawn();
+    // var child = std.process.Child.init(argv, allocator);
+    // child.stdout_behavior = std.process.Child.StdIo.Pipe;
+    // child.stderr_behavior = std.process.Child.StdIo.Pipe;
+    // child.stdin_behavior = .Ignore;
+    // if (envs) |*e| {
+    //     child.env_map = e;
+    // }
+
+    // try child.spawn();
     //std.debug.print("Spawning child process: {d}\n", .{child.id});
 
-    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, id });
+    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ io, allocator, pushfn, child, id });
     return child;
 }
 
 fn run_native(
+    io: Io,
     allocator: std.mem.Allocator,
     pushfn: *const utils.PushFnProto,
     id: utils.uuid.UUID,
     program: []const u8,
     args: []const []const u8,
-    envs: ?std.process.EnvMap,
+    envs: ?*std.process.Environ.Map,
 ) !void {
     const num_prefix_args = 1;
     var argv: [][]const u8 = try allocator.alloc([]const u8, args.len + num_prefix_args);
@@ -115,19 +132,27 @@ fn run_native(
         argv[i] = arg;
     }
 
-    var child = std.process.Child.init(argv, allocator);
-    child.stdout_behavior = std.process.Child.StdIo.Pipe;
-    child.stderr_behavior = std.process.Child.StdIo.Pipe;
-    child.stdin_behavior = .Ignore;
-    if (envs) |*e| {
-        child.env_map = e;
-    }
-    child.spawn() catch |e| {
-        //std.debug.print("Spawning module {any} failed.\n", .{e});
-        return e;
-    };
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .environ_map = envs,
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .stdin = .ignore,
+    });
 
-    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, id });
+    // var child = std.process.Child.init(argv, allocator);
+    // child.stdout_behavior = std.process.Child.StdIo.Pipe;
+    // child.stderr_behavior = std.process.Child.StdIo.Pipe;
+    // child.stdin_behavior = .Ignore;
+    // if (envs) |*e| {
+    //     child.env_map = e;
+    // }
+    // child.spawn() catch |e| {
+    //     //std.debug.print("Spawning module {any} failed.\n", .{e});
+    //     return e;
+    // };
+
+    _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ io, allocator, pushfn, child, id });
 
     _ = child.wait() catch |e| {
         //std.debug.print("Waiting for child {any} failed.\n", .{e});

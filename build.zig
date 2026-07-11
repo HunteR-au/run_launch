@@ -1,19 +1,23 @@
 const std = @import("std");
+const Io = std.Io;
 
-pub fn createArgsForGenEmbedFilesStruct(alloc: std.mem.Allocator) !std.ArrayList([]u8) {
+pub fn createArgsForGenEmbedFilesStruct(io: Io, alloc: std.mem.Allocator) !std.ArrayList([]u8) {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
     var argsArray = try std.ArrayList([]u8).initCapacity(alloc, 10);
 
-    var dir = try std.fs.cwd().openDir("src/ui", .{ .iterate = true });
+    const cwd = std.Io.Dir.cwd;
+    var dir = try cwd().openDir(io, "src/ui", .{ .iterate = true });
+    defer dir.close(io);
+
     var walker = try dir.walk(arena);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         // we need to save the path and append with a space to the args
-        if (entry.kind == std.fs.Dir.Entry.Kind.file) {
+        if (entry.kind == std.Io.File.Kind.file) {
             const size = std.mem.replacementSize(u8, entry.path, "\\", "/");
             const replacedArg = try alloc.alloc(u8, size);
 
@@ -29,10 +33,11 @@ pub fn createArgsForGenEmbedFilesStruct(alloc: std.mem.Allocator) !std.ArrayList
 // declaratively construct a build graph that will be executed by an external
 // runner.
 pub fn build(b: *std.Build) !void {
+    const io = b.graph.io;
     var arena_state = std.heap.ArenaAllocator.init(b.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const embededArgs = try createArgsForGenEmbedFilesStruct(arena);
+    const embededArgs = try createArgsForGenEmbedFilesStruct(io, arena);
 
     // ZTRACY ADDITIONS
     const options = .{
@@ -69,12 +74,12 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    const zig_webui_dep = b.dependency("zig_webui", .{
-        .target = target,
-        .optimize = optimize,
-        .enable_tls = false, // whether enable tls support
-        .is_static = true, // whether static link
-    });
+    // const zig_webui_dep = b.dependency("zig_webui", .{
+    //     .target = target,
+    //     .optimize = optimize,
+    //     .enable_tls = false, // whether enable tls support
+    //     .is_static = true, // whether static link
+    // });
     const regex_dep = b.dependency("regex", .{});
     const clap_dep = b.dependency("clap", .{});
     const yaml_dep = b.dependency("yaml", .{});
@@ -96,7 +101,7 @@ pub fn build(b: *std.Build) !void {
     const vaxis = vaxis_dep.module("vaxis");
     const regex = regex_dep.module("regex");
     const clap = clap_dep.module("clap");
-    const webui = zig_webui_dep.module("webui");
+    //const webui = zig_webui_dep.module("webui");
     const yaml = yaml_dep.module("yaml");
     const ztracy = ztracy_dep.module("root");
 
@@ -151,7 +156,7 @@ pub fn build(b: *std.Build) !void {
     exe_mod.addImport("utils", utils);
     exe_mod.addImport("uiconfig", uiconfig);
     exe_mod.addImport("clap", clap);
-    exe_mod.addImport("webui", webui);
+    //exe_mod.addImport("webui", webui);
     exe_mod.addImport("debug_ui", debug_ui);
     exe_mod.addImport("runner", runner);
     exe_mod.addImport("tui", tui);

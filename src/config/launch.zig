@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const utils = @import("utils");
 const expand = @import("expand.zig");
 
@@ -60,8 +61,8 @@ pub const Configuration = struct {
     }
 };
 
-fn copyAndAttemptExpand(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
-    return expand.expand_string(alloc, input) catch |err| switch (err) {
+fn copyAndAttemptExpand(io: Io, alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+    return expand.expand_string(io, alloc, input) catch |err| switch (err) {
         expand.ExpandErrors.NoExpansionFound => {
             return try alloc.dupe(u8, input);
         },
@@ -78,17 +79,17 @@ pub const Compound = struct {
 
     pub const CompoundParsingErrors = error{ NoNameField, NoConfigurationsField };
 
-    pub fn init(allocator: std.mem.Allocator, compoundNode: std.json.Value) !Compound {
+    pub fn init(io: Io, allocator: std.mem.Allocator, compoundNode: std.json.Value) !Compound {
         var self = Compound{};
         const nameobj = compoundNode.object.get("name") orelse {
             return CompoundParsingErrors.NoNameField;
         };
-        self.name = try copyAndAttemptExpand(allocator, nameobj.string);
+        self.name = try copyAndAttemptExpand(io, allocator, nameobj.string);
         errdefer allocator.free(self.name.?);
 
         const prelaunchtaskObj = compoundNode.object.get("preLaunchTask");
         if (prelaunchtaskObj) |obj| {
-            self.preLaunchTask = try copyAndAttemptExpand(allocator, obj.string);
+            self.preLaunchTask = try copyAndAttemptExpand(io, allocator, obj.string);
             errdefer allocator.free(self.preLaunchTask.?);
         } else self.preLaunchTask = null;
 
@@ -103,7 +104,7 @@ pub const Compound = struct {
         self.configurations = try allocator.alloc([]const u8, configurationsObj.array.items.len);
         errdefer allocator.free(self.configurations.?);
         for (configurationsObj.array.items, 0..) |obj, i| {
-            self.configurations.?[i] = try copyAndAttemptExpand(allocator, obj.string);
+            self.configurations.?[i] = try copyAndAttemptExpand(io, allocator, obj.string);
             errdefer allocator.free(self.configurations.?[i]);
         }
         return self;
@@ -229,14 +230,14 @@ pub const Launch = struct {
 //                 item.object.get("request").?.string,
 //             };
 //             inline for (fields, 0..) |fieldname, j| {
-//                 @field(allocated_configs[i], fieldname) = try copyAndAttemptExpand(allocator, strings[j]);
+//                 @field(allocated_configs[i], fieldname) = try copyAndAttemptExpand(io, allocator, strings[j]);
 //                 errdefer if (@field(allocated_configs[i], fieldname)) |x| allocator.free(x);
 //             }
 
 //             const optionalfields = comptime .{ "program", "module", "preLaunchTask", "postDebugTask", "consoleTitle", "console", "envFile" };
 //             inline for (optionalfields) |fieldname| {
 //                 if (item.object.get(fieldname)) |value| {
-//                     @field(allocated_configs[i], fieldname) = try copyAndAttemptExpand(allocator, value.string);
+//                     @field(allocated_configs[i], fieldname) = try copyAndAttemptExpand(io, allocator, value.string);
 //                 }
 //                 errdefer {
 //                     if (@field(allocated_configs[i], fieldname)) |p| allocator.free(p);

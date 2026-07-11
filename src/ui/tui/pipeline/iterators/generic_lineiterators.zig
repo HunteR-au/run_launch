@@ -1,11 +1,13 @@
 const std = @import("std");
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
 
 const common = @import("iterator_common.zig");
 
-fn commonPeek(self: anytype, alloc: std.mem.Allocator) !?IteratorResult_ {
+fn commonPeek(self: anytype, io: Io, alloc: Allocator) !?IteratorResult_ {
     if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
-    self.buffer.m.lock();
-    defer self.buffer.m.unlock();
+    self.buffer.m.lockUncancelable(io);
+    defer self.buffer.m.unlock(io);
     const result = self._peek() orelse return null;
     return .{
         .line = try alloc.dupe(u8, result.line),
@@ -13,10 +15,10 @@ fn commonPeek(self: anytype, alloc: std.mem.Allocator) !?IteratorResult_ {
     };
 }
 
-fn commonReset(self: anytype, index: IteratorIndex_) void {
+fn commonReset(self: anytype, io: Io, index: IteratorIndex_) void {
     if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
-    self.buffer.m.lock();
-    defer self.buffer.m.unlock();
+    self.buffer.m.lockUncancelable(io);
+    defer self.buffer.m.unlock(io);
     self.line_index = index;
 }
 
@@ -32,11 +34,12 @@ fn commonInit(
     comptime T: type,
     comptime iterator_array_fieldname: []const u8,
     direction: common.IteratorKind,
-    alloc: std.mem.Allocator,
+    io: Io,
+    alloc: Allocator,
     pBuffer: anytype,
 ) !*T {
-    pBuffer.m.lock();
-    defer pBuffer.m.unlock();
+    pBuffer.m.lockUncancelable(io);
+    defer pBuffer.m.unlock(io);
 
     //const inital_index: IteratorIndex = if (T == @This())
     //    pBuffer.filtered_newlines.len + 1
@@ -72,14 +75,15 @@ fn commonDeinit(
     comptime T: type,
     comptime iterator_array_fieldname: []const u8,
     self: *T,
+    io: Io,
     comptime kind: common.IteratorKind,
 ) void {
     if (self._invalid.load(.seq_cst)) {
         // we can't touch buffer if invalid
         self.alloc.destroy(self);
     } else {
-        self.buffer.m.lock();
-        defer self.buffer.m.unlock();
+        self.buffer.m.lockUncancelable(io);
+        defer self.buffer.m.unlock(io);
 
         var buf_backing = @field(self.buffer, iterator_array_fieldname);
 
@@ -102,10 +106,10 @@ fn commonDeinit(
     }
 }
 
-fn commonNext(comptime T: type, comptime direction: common.IteratorKind, self: *T, alloc: std.mem.Allocator) !?IteratorResult_ {
+fn commonNext(comptime T: type, comptime direction: common.IteratorKind, self: *T, io: Io, alloc: Allocator) !?IteratorResult_ {
     if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
-    self.buffer.m.lock();
-    defer self.buffer.m.unlock();
+    self.buffer.m.lockUncancelable(io);
+    defer self.buffer.m.unlock(io);
 
     if (direction == .lineIterator) {
         const next_index: IteratorIndex_ = switch (self.line_index) {
@@ -140,10 +144,10 @@ fn commonNext(comptime T: type, comptime direction: common.IteratorKind, self: *
     };
 }
 
-fn commonPrev(comptime T: type, comptime direction: common.IteratorKind, self: *T, alloc: std.mem.Allocator) !?IteratorResult_ {
+fn commonPrev(comptime T: type, comptime direction: common.IteratorKind, self: *T, io: Io, alloc: Allocator) !?IteratorResult_ {
     if (self._invalid.load(.seq_cst)) return error.IteratorInvalid;
-    self.buffer.m.lock();
-    defer self.buffer.m.unlock();
+    self.buffer.m.lockUncancelable(io);
+    defer self.buffer.m.unlock(io);
 
     if (direction == .lineIterator) {
         const next_index: IteratorIndex_ = switch (self.line_index) {
@@ -224,40 +228,42 @@ pub fn LineIteratorsClass(
         };
 
         pub const LineIterator = struct {
-            alloc: std.mem.Allocator,
+            alloc: Allocator,
             buffer: *T,
             line_index: IteratorIndex,
             _invalid: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-            pub fn init(alloc: std.mem.Allocator, pProcessBuffer: *T) !*@This() {
+            pub fn init(io: Io, alloc: Allocator, pProcessBuffer: *T) !*@This() {
                 return commonInit(
                     @This(),
                     ownership_array_fieldname,
                     .lineIterator,
+                    io,
                     alloc,
                     pProcessBuffer,
                 );
             }
 
-            pub fn deinit(self: *@This()) void {
+            pub fn deinit(self: *@This(), io: Io) void {
                 commonDeinit(
                     @This(),
                     ownership_array_fieldname,
                     self,
+                    io,
                     .lineIterator,
                 );
             }
 
-            pub fn next(self: *@This(), alloc: std.mem.Allocator) !?IteratorResult {
-                return commonNext(@This(), .lineIterator, self, alloc);
+            pub fn next(self: *@This(), io: Io, alloc: Allocator) !?IteratorResult {
+                return commonNext(@This(), .lineIterator, self, io, alloc);
             }
 
-            pub fn prev(self: *@This(), alloc: std.mem.Allocator) !?IteratorResult {
-                return try commonPrev(@This(), .lineIterator, self, alloc);
+            pub fn prev(self: *@This(), io: Io, alloc: Allocator) !?IteratorResult {
+                return try commonPrev(@This(), .lineIterator, self, io, alloc);
             }
 
-            pub fn peek(self: *@This(), alloc: std.mem.Allocator) !?IteratorResult {
-                return commonPeek(self, alloc);
+            pub fn peek(self: *@This(), io: Io, alloc: Allocator) !?IteratorResult {
+                return commonPeek(self, io, alloc);
             }
 
             pub fn _checkBounds(self: *@This(), line_index: usize) bool {
@@ -281,11 +287,11 @@ pub fn LineIteratorsClass(
                 };
             }
 
-            pub fn setLine(self: *@This(), line_num: usize) !void {
+            pub fn setLine(self: *@This(), io: Io, line_num: usize) !void {
                 var buf_backing = @field(self.buffer, linebuffer_fieldname);
 
-                self.buffer.m.lock();
-                defer self.buffer.m.unlock();
+                self.buffer.m.lockUncancelable(io);
+                defer self.buffer.m.unlock(io);
                 // validate that the line number is within bounds
                 if (line_num >= buf_backing.countLines()) return error.OutOfRange;
                 self.line_index = .{ .index = line_num };
@@ -301,40 +307,42 @@ pub fn LineIteratorsClass(
         };
 
         pub const ReverseLineIterator = struct {
-            alloc: std.mem.Allocator,
+            alloc: Allocator,
             buffer: *T,
             line_index: IteratorIndex_,
             _invalid: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-            pub fn init(alloc: std.mem.Allocator, pProcessBuffer: *T) !*@This() {
+            pub fn init(io: Io, alloc: Allocator, pProcessBuffer: *T) !*@This() {
                 return commonInit(
                     @This(),
                     ownership_array_fieldname,
                     .lineIterator,
+                    io,
                     alloc,
                     pProcessBuffer,
                 );
             }
 
-            pub fn deinit(self: *@This()) void {
+            pub fn deinit(self: *@This(), io: Io) void {
                 commonDeinit(
                     @This(),
                     ownership_array_fieldname,
                     self,
+                    io,
                     .lineIterator,
                 );
             }
 
-            pub fn next(self: *@This(), alloc: std.mem.Allocator) !?IteratorResult {
-                return commonNext(@This(), .lineIterator, self, alloc);
+            pub fn next(self: *@This(), io: Io, alloc: Allocator) !?IteratorResult {
+                return commonNext(@This(), .lineIterator, self, io, alloc);
             }
 
-            pub fn prev(self: *@This(), alloc: std.mem.Allocator) !?IteratorResult {
-                return try commonPrev(@This(), .lineIterator, self, alloc);
+            pub fn prev(self: *@This(), io: Io, alloc: Allocator) !?IteratorResult {
+                return try commonPrev(@This(), .lineIterator, self, io, alloc);
             }
 
-            pub fn peek(self: *@This(), alloc: std.mem.Allocator) !?IteratorResult {
-                return commonPeek(self, alloc);
+            pub fn peek(self: *@This(), io: Io, alloc: Allocator) !?IteratorResult {
+                return commonPeek(self, io, alloc);
             }
 
             fn _checkBounds(self: *@This(), line_index: usize) bool {
@@ -360,11 +368,11 @@ pub fn LineIteratorsClass(
                 commonReset(self, 0);
             }
 
-            pub fn setLine(self: *@This(), line_num: usize) !void {
+            pub fn setLine(self: *@This(), io: Io, line_num: usize) !void {
                 const buf_backing = @field(self.buffer, linebuffer_fieldname);
 
-                self.buffer.m.lock();
-                defer self.buffer.m.unlock();
+                self.buffer.m.lockUncancelable(io);
+                defer self.buffer.m.unlock(io);
                 const internal_index = line_num + 1;
                 // validate that the line number is within bounds
                 if (internal_index >= buf_backing.countLines()) return error.OutOfRange;

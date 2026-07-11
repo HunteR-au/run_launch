@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const builtin = @import("builtin");
 const utils = @import("utils");
 const helpers = @import("helpers.zig");
@@ -40,7 +41,7 @@ const SearchInfo = struct {
     result_cache: ?ResultCache = null,
     highlight_style: vaxis.Style = .{ .bg = .{ .rgb = .{ 255, 255, 255 } } },
 
-    pub fn deinit(self: *SearchInfo, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *SearchInfo, io: Io, alloc: std.mem.Allocator) void {
         if (self.result_cache) |cache| {
             alloc.free(cache.result.str);
             if (cache.cached_style) |style_slice| {
@@ -49,7 +50,7 @@ const SearchInfo = struct {
         }
         self.regex.deinit();
         alloc.destroy(self.regex);
-        self.iterator.deinit();
+        self.iterator.deinit(io);
     }
 
     pub fn setCache(
@@ -196,26 +197,26 @@ pub fn init(alloc: std.mem.Allocator, process_buf: *ProcessBuffer) !Output {
     };
 }
 
-pub fn deinit(self: *Output) void {
+pub fn deinit(self: *Output, io: Io) void {
     if (self.cmd_ref != null) {
         self.unsubscribeHandlersFromCmd();
     }
     self.handlers_ids.deinit(self._alloc);
     for (self.filter_ids.items) |fId| {
-        var filter = self.nonowned_process_buffer.pipeline.removeFilter(fId);
+        var filter = self.nonowned_process_buffer.pipeline.removeFilter(io, fId);
         if (filter) |*f| {
             f.deinit();
         }
     }
     self.filter_ids.deinit(self._alloc);
     for (self.reviewer_ids.items) |rId| {
-        var reviewer = self.nonowned_process_buffer.pipeline.removeReviewer(rId);
+        var reviewer = self.nonowned_process_buffer.pipeline.removeReviewer(io, rId);
         if (reviewer) |*r| {
             r.deinit();
         }
     }
     if (self.search_info) |*info| {
-        info.deinit(self.widget_ref.?.alloc);
+        info.deinit(io, self.widget_ref.?.alloc);
     }
     self.reviewer_ids.deinit(self._alloc);
     self.style_map.deinit();
@@ -223,7 +224,7 @@ pub fn deinit(self: *Output) void {
     self.arena.deinit();
 }
 
-fn handleFoldCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleFoldCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
 
     if (!self.is_focused) return;
@@ -258,7 +259,7 @@ fn handleFoldCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error
     try self.nonowned_process_buffer.addFilter(filter);
 }
 
-fn handlePruneCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handlePruneCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
 
     if (!self.is_focused) return;
@@ -293,7 +294,7 @@ fn handlePruneCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Erro
     try self.nonowned_process_buffer.addFilter(filter);
 }
 
-fn handleReplaceCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleReplaceCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
     const alloc = self.arena.allocator();
 
@@ -343,7 +344,7 @@ fn handleReplaceCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Er
     try self.nonowned_process_buffer.addFilter(filter);
 }
 
-fn handleUnfoldCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleUnfoldCmd(_: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
 
     if (!self.is_focused) return;
@@ -356,7 +357,7 @@ fn handleUnfoldCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!
     self.filter_ids.clearAndFree(self._alloc);
 }
 
-fn handleUnreplaceCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleUnreplaceCmd(_: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
 
     if (!self.is_focused) return;
@@ -369,7 +370,7 @@ fn handleUnreplaceCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Err
     self.filter_ids.clearAndFree(self._alloc);
 }
 
-fn handleFindCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleFindCmd(io: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
     const alloc = self.arena.allocator();
 
@@ -390,22 +391,22 @@ fn handleFindCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error
     //    error.LineNotRendered => return,
     //};
 
-    self.searchStr(arguments[0], start_from_line) catch return;
+    self.searchStr(io, arguments[0], start_from_line) catch return;
 }
 
-fn handleFindNextCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleFindNextCmd(io: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
     if (!self.is_focused) return;
-    self.searchNext();
+    self.searchNext(io);
 }
 
-fn handleFindPrevCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleFindPrevCmd(io: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
     if (!self.is_focused) return;
-    self.searchPrev();
+    self.searchPrev(io);
 }
 
-fn handleJumpCmd(arg: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleJumpCmd(_: Io, arg: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
     if (!self.is_focused) return;
 
@@ -413,14 +414,14 @@ fn handleJumpCmd(arg: []const u8, listener: *anyopaque) std.mem.Allocator.Error!
     self.jumpToLine(line_num);
 }
 
-fn handleInfoCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleInfoCmd(_: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
     if (!self.is_focused) return;
 
     self.debuginfo();
 }
 
-fn handleUncolorCmd(_: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleUncolorCmd(_: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
     if (!self.is_focused) return;
     self.clearStyle();
@@ -676,7 +677,7 @@ pub fn setupViaUiconfig(
     try self.nonowned_process_buffer.addReviewer(reviewer);
 }
 
-fn handleShowLinesCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleShowLinesCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
     const alloc = self.arena.allocator();
 
@@ -712,7 +713,7 @@ fn handleShowLinesCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.
     return;
 }
 
-fn handleDumpCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleDumpCmd(io: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
     const alloc = self.arena.allocator();
 
@@ -746,6 +747,7 @@ fn handleDumpCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error
 
     // dump to disk
     actions.dumpOutputBuffer(
+        io,
         alloc,
         buffer.?,
         self.widget_ref.?.id,
@@ -755,7 +757,7 @@ fn handleDumpCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error
     };
 }
 
-fn handleColorCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleColorCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
     const alloc = self.arena.allocator();
 
@@ -803,7 +805,7 @@ fn handleColorCmd(args: []const u8, listener: *anyopaque) std.mem.Allocator.Erro
     try self.nonowned_process_buffer.addReviewer(reviewer);
 }
 
-pub fn removeSearch(self: *Output) !void {
+pub fn removeSearch(self: *Output, io: Io) !void {
     const alloc = self.widget_ref.?.alloc;
 
     // unhighlight previous match
@@ -818,17 +820,17 @@ pub fn removeSearch(self: *Output) !void {
         }
 
         // remove the search info
-        sinfo.deinit(alloc);
+        sinfo.deinit(io, alloc);
         self.search_info = null;
     }
 }
 
 // TODO: handle errors properly
-pub fn searchStr(self: *Output, search_str: []const u8, start_search_line: usize) !void {
+pub fn searchStr(self: *Output, io: Io, search_str: []const u8, start_search_line: usize) !void {
     var alloc = self.widget_ref.?.alloc;
 
     // unhighlight and remove previous match
-    try self.removeSearch();
+    try self.removeSearch(io);
 
     // create regex
     var re = try alloc.create(Regex);
@@ -848,13 +850,14 @@ pub fn searchStr(self: *Output, search_str: []const u8, start_search_line: usize
         if (start_searching_line == 0 and secondAttempt == false) secondAttempt = true;
 
         var search_iter = search.startSearchFrom(
+            io,
             alloc,
             self.nonowned_process_buffer,
             re,
             start_searching_line,
         ) catch return;
 
-        const match = try search_iter.next();
+        const match = try search_iter.next(io);
 
         if (match) |*m| {
             // jump to the line containing the start of the match
@@ -865,7 +868,7 @@ pub fn searchStr(self: *Output, search_str: []const u8, start_search_line: usize
             // free previous search_info and save new one
             if (self.search_info) |*info| {
                 info.clearCache(alloc);
-                info.deinit(alloc);
+                info.deinit(io, alloc);
             }
 
             // cache the new search info
@@ -884,7 +887,7 @@ pub fn searchStr(self: *Output, search_str: []const u8, start_search_line: usize
 
         if (secondAttempt) {
             // We failed to find a match
-            search_iter.deinit();
+            search_iter.deinit(io);
             re.deinit();
             alloc.destroy(re);
             break;
@@ -893,9 +896,9 @@ pub fn searchStr(self: *Output, search_str: []const u8, start_search_line: usize
 }
 
 // TODO: handle errors properly
-pub fn searchNext(self: *Output) void {
+pub fn searchNext(self: *Output, io: Io) void {
     if (self.search_info) |*sinfo| {
-        if (sinfo.iterator.next() catch return) |*match| {
+        if (sinfo.iterator.next(io) catch return) |*match| {
             // jump to the line containing the start of the match
             self.widget_ref.?.jump_output_to_line(
                 self.nonowned_process_buffer.filtered_buffer.getLineIndexFromOffset(match.lowerBound).?,
@@ -919,15 +922,15 @@ pub fn searchNext(self: *Output) void {
             self.updateStyle(&self.search_info.?.highlight_style, match.lowerBound, match.upperBound) catch return;
         } else {
             // the iterator got to the end, attempt to back off to the last match
-            _ = sinfo.iterator.prev() catch {};
+            _ = sinfo.iterator.prev(io) catch {};
         }
     }
 }
 
 // TODO: handle errors properly
-pub fn searchPrev(self: *Output) void {
+pub fn searchPrev(self: *Output, io: Io) void {
     if (self.search_info) |*sinfo| {
-        if (sinfo.iterator.prev() catch return) |*match| {
+        if (sinfo.iterator.prev(io) catch return) |*match| {
             // jump to the line container the  start of the match
             self.widget_ref.?.jump_output_to_line(
                 self.nonowned_process_buffer.filtered_buffer.getLineIndexFromOffset(match.lowerBound).?,
@@ -951,7 +954,7 @@ pub fn searchPrev(self: *Output) void {
             self.updateStyle(&self.search_info.?.highlight_style, match.lowerBound, match.upperBound) catch return;
         } else {
             // the iterator got to the start, attempt to back off to the first match
-            _ = sinfo.iterator.next() catch {};
+            _ = sinfo.iterator.next(io) catch {};
         }
     }
 }
@@ -1074,8 +1077,9 @@ fn copyUnfiltedBuffer(self: *const Output, alloc: std.mem.Allocator) std.mem.All
 test "folding text" {
     const testing = std.testing;
     const alloc = testing.allocator;
+    const io = testing.io;
 
-    var process_buffer = try ProcessBuffer.init(alloc);
+    var process_buffer = try ProcessBuffer.init(io, alloc);
     var output = try Output.init(alloc, process_buffer);
     defer process_buffer.deinit();
     defer output.deinit();
@@ -1146,8 +1150,9 @@ test "folding text" {
 test "coloring text" {
     const testing = std.testing;
     const alloc = testing.allocator;
+    const io = testing.io;
 
-    var process_buffer = try ProcessBuffer.init(alloc);
+    var process_buffer = try ProcessBuffer.init(io, alloc);
     var output = try Output.init(alloc, process_buffer);
     defer process_buffer.deinit();
     defer output.deinit();

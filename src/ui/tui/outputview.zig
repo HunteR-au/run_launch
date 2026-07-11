@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 pub const vaxis = @import("vaxis");
 //pub const mutiStyleText = @import("tui/multistyletext.zig");
 pub const outputmod = @import("outputwidget.zig");
@@ -34,10 +35,10 @@ pub const OutputView = struct {
         return p;
     }
 
-    pub fn deinit(self: *OutputView) void {
+    pub fn deinit(self: *OutputView, io: Io) void {
         // free any outputs that this outputview owns
         for (self.outputs.items) |o| {
-            o.deinit();
+            o.deinit(io);
         }
         self.outputs.deinit(self.alloc);
         self.alloc.destroy(self);

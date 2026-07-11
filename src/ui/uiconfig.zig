@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const builtin = @import("builtin");
 const utils = @import("utils");
 
@@ -196,14 +197,16 @@ pub const UiConfig = struct {
 
 // Parse configs
 pub fn parseConfigs(
+    io: Io,
     alloc: std.mem.Allocator,
 ) !UiConfig {
     var uiconfig = try UiConfig.init(alloc);
     const max_bytes = 1024 * 1024;
 
-    const userConfig: ?std.fs.File = blk2: switch (builtin.target.os.tag) {
+    const userConfig: ?std.Io.File = blk2: switch (builtin.target.os.tag) {
         .windows => {
-            const file = std.fs.openFileAbsolute(
+            const file = std.Io.Dir.openFileAbsolute(
+                io,
                 "\\%userprofile%\\.debugUi.json",
                 .{ .mode = .read_only },
             ) catch {
@@ -220,7 +223,8 @@ pub fn parseConfigs(
             if (home_path) |prefix| {
                 const path = try std.fmt.allocPrint(alloc, "{s}/.debugUi.json", .{prefix});
                 defer alloc.free(path);
-                const file = std.fs.openFileAbsolute(
+                const file = std.Io.Dir.openFileAbsolute(
+                    io,
                     path,
                     .{ .mode = .read_only },
                 ) catch {
@@ -232,7 +236,8 @@ pub fn parseConfigs(
     };
 
     if (userConfig) |file| {
-        const userConfigData = try file.readToEndAlloc(alloc, max_bytes);
+        var file_reader = file.reader(io, &.{});
+        const userConfigData = try file_reader.interface.allocRemaining(alloc, .limited(max_bytes));
         defer alloc.free(userConfigData);
 
         // parse userConfigData
@@ -247,10 +252,11 @@ pub fn parseConfigs(
     }
 
     const localConfigBytes: ?[]u8 = blk1: {
-        const bytes = std.fs.cwd().readFileAlloc(
-            alloc,
+        const bytes = std.Io.Dir.cwd().readFileAlloc(
+            io,
             ".debugUi.json",
-            max_bytes,
+            alloc,
+            .limited(max_bytes),
         ) catch {
             break :blk1 null;
         };

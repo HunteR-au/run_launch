@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const utils = @import("utils");
 const expand = @import("expand.zig");
 
@@ -34,15 +35,15 @@ pub const Task = struct {
         }
     }
 
-    pub fn run_task(self: *const Task, allocator: std.mem.Allocator, id: uuid.UUID, pushfn: *const utils.PushFnProto) !std.process.Child {
+    pub fn run_task(self: *const Task, io: Io, alloc: std.mem.Allocator, id: uuid.UUID, pushfn: *const utils.PushFnProto) !std.process.Child {
         var argv: [][]const u8 = undefined;
         if (self.args != null) {
-            argv = try allocator.alloc([]const u8, self.args.?.len + 1);
+            argv = try alloc.alloc([]const u8, self.args.?.len + 1);
         } else {
-            argv = try allocator.alloc([]const u8, 1);
+            argv = try alloc.alloc([]const u8, 1);
         }
 
-        defer allocator.free(argv);
+        defer alloc.free(argv);
         argv[0] = self.command.?;
         if (self.args) |args| {
             for (args, 1..) |arg, i| {
@@ -50,18 +51,24 @@ pub const Task = struct {
             }
         }
 
-        var child = std.process.Child.init(argv, allocator);
+        const child = try std.process.spawn(io, .{
+            .argv = argv,
+            .stdin = .ignore,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        });
+        //var child = std.process.Child.init(argv, alloc);
 
-        child.stdout_behavior = std.process.Child.StdIo.Pipe;
-        child.stderr_behavior = std.process.Child.StdIo.Pipe;
-        child.stdin_behavior = .Ignore;
-        child.spawn() catch |e| {
-            //std.debug.print("Spawning task {any} failed.\n", .{e});
-            return e;
-        };
+        // child.stdout_behavior = std.process.Child.StdIo.Pipe;
+        // child.stderr_behavior = std.process.Child.StdIo.Pipe;
+        // child.stdin_behavior = .Ignore;
+        // child.spawn() catch |e| {
+        //     //std.debug.print("Spawning task {any} failed.\n", .{e});
+        //     return e;
+        // };
 
         // TODO: either pass child OR return it: DON"T DO BOTH WITHOUT MUTEX
-        _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ allocator, pushfn, child, id });
+        _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ io, alloc, pushfn, child, id });
 
         // TODO: BUG BUG BUG - child.wait will clean up and remove pipes. We probably only want to remove pipes once process ends AND
         // we have confirmed the pipe is drained
@@ -139,8 +146,8 @@ pub const TaskJson = struct {
         const alloc = self.arena.allocator();
 
         // Load the JSON data
-        const max_bytes = 1024 * 1024;
-        const data = try std.fs.cwd().readFileAlloc(self.arena.child_allocator, filepath, max_bytes);
+        const size_limit = Io.Limit.limited64(1024 * 1024);
+        const data = try std.Io.Dir.cwd().readFileAlloc(self.arena.child_allocator, filepath, size_limit);
         defer self.arena.child_allocator.free(data);
         std.log.debug("{s}", .{data});
 

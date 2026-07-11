@@ -1,6 +1,7 @@
 //! Thread-Safe template for a ring buffer with std compatible reader and writer and safety checks
 
 const std = @import("std");
+const Io = std.Io;
 
 /// Options for the ring buffer template
 pub const RingBufferOptions = struct {
@@ -12,7 +13,7 @@ pub fn RingBuffer(comptime options: RingBufferOptions) type {
     const T = options.T;
 
     return struct {
-        mutex: std.Thread.Mutex,
+        mutex: std.Io.Mutex,
         buffer: []T,
         head: usize = 0,
         tail: usize = 0,
@@ -22,7 +23,7 @@ pub fn RingBuffer(comptime options: RingBufferOptions) type {
 
         /// Creates a new ring buffer from a user provided buffer
         pub fn init(buf: []T) Rb {
-            return .{ .mutex = .{}, .buffer = buf };
+            return .{ .mutex = .init, .buffer = buf };
         }
 
         pub fn clear(self: *Rb) void {
@@ -31,64 +32,156 @@ pub fn RingBuffer(comptime options: RingBufferOptions) type {
             self.used = 0;
         }
 
+        pub fn write(self: *Rb, io: Io, src: []const u8) WriteError!usize {
+            if (T != u8)
+                @compileError("write() is only supported for u8 ring buffers");
+
+            if (src.len == 0)
+                return 0;
+
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+
+            const free = self.buffer.len -| self.used;
+            if (free == 0)
+                return error.RingBufferFull;
+
+            const n = @min(src.len, free);
+
+            // First contiguous region
+            const first = @min(n, self.buffer.len - self.head);
+            std.mem.copyForwards(
+                u8,
+                self.buffer[self.head .. self.head + first],
+                src[0..first],
+            );
+
+            // Wrapped region
+            const second = n - first;
+            if (second != 0) {
+                std.mem.copyForwards(
+                    u8,
+                    self.buffer[0..second],
+                    src[first .. first + second],
+                );
+            }
+
+            self.head = (self.head + n) % self.buffer.len;
+            self.used += n;
+
+            return n;
+        }
+
+        pub fn writeAll(self: *Rb, io: Io, src: []const u8) WriteError!void {
+            var index: usize = 0;
+
+            while (index < src.len) {
+                const n = try self.write(io, src[index..]);
+                if (n == 0)
+                    return error.RingBufferFull;
+
+                index += n;
+            }
+        }
+
+        pub fn read(self: *Rb, io: Io, dst: []u8) usize {
+            if (T != u8)
+                @compileError("read() is only supported for u8 ring buffers");
+
+            if (dst.len == 0)
+                return 0;
+
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+
+            const n = @min(dst.len, self.used);
+            if (n == 0)
+                return 0;
+
+            const first = @min(n, self.buffer.len - self.tail);
+            std.mem.copyForwards(
+                u8,
+                dst[0..first],
+                self.buffer[self.tail .. self.tail + first],
+            );
+
+            const second = n - first;
+            if (second != 0) {
+                std.mem.copyForwards(
+                    u8,
+                    dst[first .. first + second],
+                    self.buffer[0..second],
+                );
+            }
+
+            self.tail = (self.tail + n) % self.buffer.len;
+            self.used -= n;
+
+            return n;
+        }
+
+        pub fn readAll(self: *Rb, io: Io, dst: []u8) usize {
+            return self.read(io, dst);
+        }
+
         /// Errors that can occur when writing to the buffer
         pub const WriteError = error{RingBufferFull};
         /// STD compatible writer for the ring buffer
-        pub const Writer = std.io.GenericWriter(*Rb, WriteError, writeFn);
-        /// Returns the writer for the ring buffer
-        pub fn writer(self: *Rb) Writer {
-            return .{ .context = self };
-        }
-        /// Write function for the STD writer
-        fn writeFn(self: *Rb, m: []const u8) WriteError!usize {
-            if (T != u8)
-                @compileError("Writer and Reader interfaces only support u8");
+        // pub const Writer = std.io.GenericWriter(*Rb, WriteError, writeFn);
+        // /// Returns the writer for the ring buffer
+        // pub fn writer(self: *Rb) Writer {
+        //     return .{ .context = self };
+        // }
+        // /// Write function for the STD writer
+        // fn writeFn(self: *Rb, io: Io, m: []const u8) WriteError!usize {
+        //     if (T != u8)
+        //         @compileError("Writer and Reader interfaces only support u8");
 
-            if (m.len == 0)
-                return 0;
+        //     if (m.len == 0)
+        //         return 0;
 
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        //     self.mutex.lockUncancelable(io);
+        //     defer self.mutex.unlock(io);
 
-            const free_space = self.buffer.len - self.used;
-            if (free_space == 0)
-                return error.RingBufferFull;
+        //     const free_space = self.buffer.len - self.used;
+        //     if (free_space == 0)
+        //         return error.RingBufferFull;
 
-            const writable = @min(m.len, free_space);
-            // Write as much as we can
-            if (self.head > self.tail) {
-                // the available space is not contiguous
-                const before_wrap = self.buffer.len - self.head;
+        //     const writable = @min(m.len, free_space);
+        //     // Write as much as we can
+        //     if (self.head > self.tail) {
+        //         // the available space is not contiguous
+        //         const before_wrap = self.buffer.len - self.head;
 
-                if (before_wrap >= writable) {
-                    // things fit without wrapping
-                    std.mem.copyForwards(u8, self.buffer[self.head..], m);
-                    self.head += writable;
-                } else {
-                    // we have to wrap
-                    std.mem.copyForwards(u8, self.buffer[self.head..], m[0..before_wrap]);
-                    std.mem.copyForwards(u8, self.buffer[0..self.tail], m[before_wrap..writable]);
-                    self.head = writable - before_wrap;
-                }
-            } else {
-                if (self.head == self.tail) {
-                    std.debug.assert(self.used == 0);
-                    self.head = 0;
-                    self.tail = 0;
-                }
-                // the available space is contiguous
-                std.mem.copyForwards(u8, self.buffer[self.head..], m[0..writable]); // copy what fits
-                self.head += writable;
-            }
+        //         if (before_wrap >= writable) {
+        //             // things fit without wrapping
+        //             std.mem.copyForwards(u8, self.buffer[self.head..], m);
+        //             self.head += writable;
+        //         } else {
+        //             // we have to wrap
+        //             std.mem.copyForwards(u8, self.buffer[self.head..], m[0..before_wrap]);
+        //             std.mem.copyForwards(u8, self.buffer[0..self.tail], m[before_wrap..writable]);
+        //             self.head = writable - before_wrap;
+        //         }
+        //     } else {
+        //         if (self.head == self.tail) {
+        //             std.debug.assert(self.used == 0);
+        //             self.head = 0;
+        //             self.tail = 0;
+        //         }
+        //         // the available space is contiguous
+        //         std.mem.copyForwards(u8, self.buffer[self.head..], m[0..writable]); // copy what fits
+        //         self.head += writable;
+        //     }
 
-            self.used += writable;
-            return writable;
-        }
+        //     self.used += writable;
+        //     return writable;
+        // }
 
         /// Pushes a single element to the ring buffer
-        pub fn push(self: *Rb, value: T) WriteError!void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        pub fn push(self: *Rb, io: Io, value: T) WriteError!void {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
 
             if (self.used == self.buffer.len)
                 return error.RingBufferFull;
@@ -104,59 +197,59 @@ pub fn RingBuffer(comptime options: RingBufferOptions) type {
         /// Errors that can occur when reading from the buffer (won't be the same when using the reader interface)
         pub const ReadError = error{RingBufferEmpty};
         /// STD compatible reader for the ring buffer
-        pub const Reader = std.io.Reader(*Rb, error{}, readFn);
-        /// Returns the reader for the ring buffer
-        pub fn reader(self: *Rb) Reader {
-            return .{ .context = self };
-        }
-        /// Read function for the STD reader
-        fn readFn(self: *Rb, b: []u8) error{}!usize {
-            if (T != u8)
-                @compileError("Writer and Reader interfaces only support u8");
+        // pub const Reader = std.io.Reader(*Rb, error{}, readFn);
+        // /// Returns the reader for the ring buffer
+        // pub fn reader(self: *Rb) Reader {
+        //     return .{ .context = self };
+        // }
+        // /// Read function for the STD reader
+        // fn readFn(self: *Rb, io: Io, b: []u8) error{}!usize {
+        //     if (T != u8)
+        //         @compileError("Writer and Reader interfaces only support u8");
 
-            if (b.len == 0)
-                return 0;
+        //     if (b.len == 0)
+        //         return 0;
 
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        //     self.mutex.lockUncancelable(io);
+        //     defer self.mutex.unlock(io);
 
-            const used_space = self.used;
-            if (used_space == 0)
-                return 0;
+        //     const used_space = self.used;
+        //     if (used_space == 0)
+        //         return 0;
 
-            const readable = std.math.min(used_space, b.len);
-            // Read as much as we can
-            if (self.head > self.tail) {
-                // the readable data is contiguous
-                std.mem.copy(u8, b, self.buffer[self.tail..(self.tail + readable)]);
-                self.tail += readable;
-            } else {
-                // the readable data is not contiguous
-                const before_wrap = self.buffer.len - self.tail;
+        //     const readable = std.math.min(used_space, b.len);
+        //     // Read as much as we can
+        //     if (self.head > self.tail) {
+        //         // the readable data is contiguous
+        //         std.mem.copy(u8, b, self.buffer[self.tail..(self.tail + readable)]);
+        //         self.tail += readable;
+        //     } else {
+        //         // the readable data is not contiguous
+        //         const before_wrap = self.buffer.len - self.tail;
 
-                if (before_wrap >= readable) {
-                    // things can be read without wrapping
-                    std.mem.copy(u8, b, self.buffer[self.tail..(self.tail + readable)]);
-                    self.tail += readable;
-                } else {
-                    const after_wrap = readable - before_wrap;
-                    std.debug.assert(after_wrap <= self.head);
+        //         if (before_wrap >= readable) {
+        //             // things can be read without wrapping
+        //             std.mem.copy(u8, b, self.buffer[self.tail..(self.tail + readable)]);
+        //             self.tail += readable;
+        //         } else {
+        //             const after_wrap = readable - before_wrap;
+        //             std.debug.assert(after_wrap <= self.head);
 
-                    // the reading has to wrap
-                    std.mem.copy(u8, b[0..before_wrap], self.buffer[self.tail..]);
-                    std.mem.copy(u8, b[before_wrap..readable], self.buffer[0..after_wrap]);
-                    self.tail = readable - before_wrap;
-                }
-            }
+        //             // the reading has to wrap
+        //             std.mem.copy(u8, b[0..before_wrap], self.buffer[self.tail..]);
+        //             std.mem.copy(u8, b[before_wrap..readable], self.buffer[0..after_wrap]);
+        //             self.tail = readable - before_wrap;
+        //         }
+        //     }
 
-            self.used -= readable;
-            return readable;
-        }
+        //     self.used -= readable;
+        //     return readable;
+        // }
 
         /// Pops a single element from the ring buffer
-        pub fn pop(self: *Rb) ReadError!T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        pub fn pop(self: *Rb, io: Io) ReadError!T {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
 
             if (self.used == 0)
                 return error.RingBufferEmpty;
@@ -172,27 +265,27 @@ pub fn RingBuffer(comptime options: RingBufferOptions) type {
         }
 
         /// Returns the number of elements in the buffer
-        pub fn getUsedSpace(self: *Rb) usize {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        pub fn getUsedSpace(self: *Rb, io: Io) usize {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
 
             return self.used;
         }
         /// Returns the number of elements that can be written to the buffer
-        pub fn getFreeSpace(self: *Rb) usize {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+        pub fn getFreeSpace(self: *Rb, io: Io) usize {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
 
             return self.buffer.len - self.used;
         }
 
         /// Empties the buffer into a writer
-        pub fn flushEverythingToWriter(self: *Rb, stream: anytype) !void {
+        pub fn flushEverythingToWriter(self: *Rb, io: Io, stream: anytype) !void {
             if (T != u8)
                 @compileError("Only implemented for u8");
 
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
 
             if (self.head > self.tail) {
                 // the readable data is contiguous
@@ -207,18 +300,22 @@ pub fn RingBuffer(comptime options: RingBufferOptions) type {
 
         /// Dumps the contents of the ring buffer to `stderr`.
         /// In a formatted way that helps with debugging
-        pub fn dump(self: *Rb) void {
-            self.dumpToStream(std.io.getStdErr().writer()) catch return;
+        pub fn dump(self: *Rb, io: Io) void {
+            var buf: [1024]u8 = undefined;
+            self.dumpToStream(
+                io,
+                std.Io.File.stderr().writer(io, &buf),
+            ) catch return;
         }
 
         /// Dumps the contents of the ring buffer to `stream`
         /// In a formatted way that helps with debugging
-        pub fn dumpToStream(self: *Rb, stream: anytype) !void {
+        pub fn dumpToStream(self: *Rb, io: Io, stream: anytype) !void {
             if (T != u8)
                 @compileError("Only implemented for u8 as of now");
 
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
 
             const w = stream;
 

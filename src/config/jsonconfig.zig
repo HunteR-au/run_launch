@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const utils = @import("utils");
 
 const JsonValue = std.json.Value;
@@ -12,7 +13,7 @@ const Task = @import("task.zig").Task;
 const Tasks = @import("task.zig").Tasks;
 const expand = @import("expand.zig");
 
-pub fn parseLaunch(alloc: Alloc, root_object: JsonValue) !Launch {
+pub fn parseLaunch(io: Io, alloc: Alloc, root_object: JsonValue) !Launch {
     var results: Launch = undefined;
 
     const version_str = root_object.object.get("version").?.string;
@@ -35,14 +36,14 @@ pub fn parseLaunch(alloc: Alloc, root_object: JsonValue) !Launch {
                 item.object.get("request").?.string,
             };
             inline for (fields, 0..) |fieldname, j| {
-                @field(allocated_configs[i], fieldname) = try copyAndAttemptExpand(alloc, strings[j]);
+                @field(allocated_configs[i], fieldname) = try copyAndAttemptExpand(io, alloc, strings[j]);
                 errdefer if (@field(allocated_configs[i], fieldname)) |x| alloc.free(x);
             }
 
             const optionalfields = comptime .{ "program", "module", "preLaunchTask", "postDebugTask", "consoleTitle", "console", "envFile" };
             inline for (optionalfields) |fieldname| {
                 if (item.object.get(fieldname)) |value| {
-                    @field(allocated_configs[i], fieldname) = try copyAndAttemptExpand(alloc, value.string);
+                    @field(allocated_configs[i], fieldname) = try copyAndAttemptExpand(io, alloc, value.string);
                 }
                 errdefer {
                     if (@field(allocated_configs[i], fieldname)) |p| alloc.free(p);
@@ -62,7 +63,7 @@ pub fn parseLaunch(alloc: Alloc, root_object: JsonValue) !Launch {
 
             if (item.object.get("connect")) |connect| {
                 const host_str = connect.object.get("host").?.string;
-                allocated_configs[i].connect.host = try copyAndAttemptExpand(alloc, host_str);
+                allocated_configs[i].connect.host = try copyAndAttemptExpand(io, alloc, host_str);
                 errdefer if (allocated_configs[i].connect.host) |t| alloc.free(t);
                 allocated_configs[i].connect.port = @intCast(connect.object.get("port").?.integer);
             }
@@ -73,7 +74,7 @@ pub fn parseLaunch(alloc: Alloc, root_object: JsonValue) !Launch {
     if (root_object.object.get("compounds")) |compoundsObj| {
         const compounds = try alloc.alloc(Compound, compoundsObj.array.items.len);
         for (compoundsObj.array.items, 0..) |compoundObj, j| {
-            compounds[j] = try Compound.init(alloc, compoundObj);
+            compounds[j] = try Compound.init(io, alloc, compoundObj);
             errdefer compounds[j].deinit(alloc);
         }
         results.compounds = compounds;
@@ -82,14 +83,14 @@ pub fn parseLaunch(alloc: Alloc, root_object: JsonValue) !Launch {
     return results;
 }
 
-pub fn parseTasks(alloc: Alloc, root_object: JsonValue) !?Tasks {
+pub fn parseTasks(io: Io, alloc: Alloc, root_object: JsonValue) !?Tasks {
     std.debug.assert(root_object == .object);
 
     var tasks: Tasks = .init();
     errdefer tasks.deinit(alloc);
 
     //const version_str = root_object.object.get("version").?.string;
-    //const versioncopy = try copyAndAttemptExpand(alloc, version_str);
+    //const versioncopy = try copyAndAttemptExpand(io, alloc, version_str);
     //errdefer alloc.free(versioncopy);
     //
     //self.version = versioncopy;
@@ -108,7 +109,7 @@ pub fn parseTasks(alloc: Alloc, root_object: JsonValue) !?Tasks {
             for (task_array) |*config| config.* = .{};
 
             for (list.items, 0..) |task, i| switch (task) {
-                .object => task_array[i] = try parseTask(alloc, task),
+                .object => task_array[i] = try parseTask(io, alloc, task),
                 else => return error.FieldInvalidType,
             };
 
@@ -125,7 +126,7 @@ pub fn parseTasks(alloc: Alloc, root_object: JsonValue) !?Tasks {
     return tasks;
 }
 
-fn parseTask(alloc: Alloc, value: JsonValue) !Task {
+fn parseTask(io: Io, alloc: Alloc, value: JsonValue) !Task {
     std.debug.assert(value == .object);
 
     var task: Task = .{};
@@ -135,7 +136,7 @@ fn parseTask(alloc: Alloc, value: JsonValue) !Task {
 
     // required field
     if (map.get("label")) |label| switch (label) {
-        .string => |s| task.label = try copyAndAttemptExpand(alloc, s),
+        .string => |s| task.label = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     } else {
         return error.MissingRequiredField;
@@ -143,7 +144,7 @@ fn parseTask(alloc: Alloc, value: JsonValue) !Task {
 
     // required field
     if (map.get("type")) |type_value| switch (type_value) {
-        .string => |s| task.type = try copyAndAttemptExpand(alloc, s),
+        .string => |s| task.type = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     } else {
         return error.MissingRequiredField;
@@ -151,19 +152,19 @@ fn parseTask(alloc: Alloc, value: JsonValue) !Task {
 
     // required field
     if (map.get("command")) |command| switch (command) {
-        .string => |s| task.command = try copyAndAttemptExpand(alloc, s),
+        .string => |s| task.command = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     } else {
         return error.MissingRequiredField;
     }
 
     if (map.get("group")) |group| switch (group) {
-        .string => |s| task.group = try copyAndAttemptExpand(alloc, s),
+        .string => |s| task.group = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("problemMatcher")) |problemMatcher| switch (problemMatcher) {
-        .string => |s| task.problemMatcher = try copyAndAttemptExpand(alloc, s),
+        .string => |s| task.problemMatcher = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
@@ -179,7 +180,7 @@ fn parseTask(alloc: Alloc, value: JsonValue) !Task {
             for (arg_strs) |*s| s.* = &.{};
 
             for (list.items, 0..) |item, i| switch (item) {
-                .string => |s| arg_strs[i] = try copyAndAttemptExpand(alloc, s),
+                .string => |s| arg_strs[i] = try copyAndAttemptExpand(io, alloc, s),
                 else => return error.FieldInvalidType,
             };
 
@@ -191,7 +192,7 @@ fn parseTask(alloc: Alloc, value: JsonValue) !Task {
     return task;
 }
 
-fn parseCompound(alloc: Alloc, value: JsonValue) !Compound {
+fn parseCompound(io: Io, alloc: Alloc, value: JsonValue) !Compound {
     std.debug.assert(value == .object);
 
     var compound: Compound = .{};
@@ -210,19 +211,19 @@ fn parseCompound(alloc: Alloc, value: JsonValue) !Compound {
     const map = value.object;
 
     if (map.get("name")) |name| switch (name) {
-        .string => |s| compound.name = try copyAndAttemptExpand(alloc, s),
+        .string => |s| compound.name = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     } else {
         return Compound.CompoundParsingErrors.NoNameField;
     }
 
     if (map.get("preLaunchTask")) |pre_task| switch (pre_task) {
-        .string => |s| compound.preLaunchTask = try copyAndAttemptExpand(alloc, s),
+        .string => |s| compound.preLaunchTask = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("postDebugTask")) |pre_task| switch (pre_task) {
-        .string => |s| compound.postDebugTask = try copyAndAttemptExpand(alloc, s),
+        .string => |s| compound.postDebugTask = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
@@ -241,7 +242,7 @@ fn parseCompound(alloc: Alloc, value: JsonValue) !Compound {
 
             for (list.items, 0..) |entry, i| switch (entry) {
                 .string => |s| {
-                    compound.configurations.?[i] = try copyAndAttemptExpand(alloc, s);
+                    compound.configurations.?[i] = try copyAndAttemptExpand(io, alloc, s);
                 },
                 else => return error.FieldInvalidType,
             };
@@ -252,7 +253,7 @@ fn parseCompound(alloc: Alloc, value: JsonValue) !Compound {
     return compound;
 }
 
-fn parseConfiguration(alloc: Alloc, value: JsonValue) !Configuration {
+fn parseConfiguration(io: Io, alloc: Alloc, value: JsonValue) !Configuration {
     std.debug.assert(value == .object);
 
     var config: Configuration = .{};
@@ -261,7 +262,7 @@ fn parseConfiguration(alloc: Alloc, value: JsonValue) !Configuration {
 
     // required field
     if (map.get("name")) |name| switch (name) {
-        .string => |s| config.name = try copyAndAttemptExpand(alloc, s.scalar),
+        .string => |s| config.name = try copyAndAttemptExpand(io, alloc, s.scalar),
         else => return error.FieldInvalidType,
     } else {
         return error.MissingRequiredField;
@@ -269,54 +270,54 @@ fn parseConfiguration(alloc: Alloc, value: JsonValue) !Configuration {
 
     // required field
     if (map.get("type")) |type_value| switch (type_value) {
-        .string => |s| config.type = try copyAndAttemptExpand(alloc, s.scalar),
+        .string => |s| config.type = try copyAndAttemptExpand(io, alloc, s.scalar),
         else => return error.FieldInvalidType,
     } else {
         return error.MissingRequiredField;
     }
 
     if (map.get("request")) |request| switch (request) {
-        .string => |s| config.type = try copyAndAttemptExpand(alloc, s),
+        .string => |s| config.type = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("consoleTitle")) |consoleTitle| switch (consoleTitle) {
-        .string => |s| config.type = try copyAndAttemptExpand(alloc, s),
+        .string => |s| config.type = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("module")) |module| switch (module) {
-        .string => |s| config.module = try copyAndAttemptExpand(alloc, s),
+        .string => |s| config.module = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("program")) |program| switch (program) {
-        .string => |s| config.type = try copyAndAttemptExpand(alloc, s),
+        .string => |s| config.type = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("console")) |console| switch (console) {
-        .string => |s| config.type = try copyAndAttemptExpand(alloc, s),
+        .string => |s| config.type = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("stopOnEntry")) |stopOnEntry| switch (stopOnEntry) {
-        .string => |s| config.type = try copyAndAttemptExpand(alloc, s),
+        .string => |s| config.type = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("preLaunchTask")) |preLaunchTask| switch (preLaunchTask) {
-        .string => |s| config.type = try copyAndAttemptExpand(alloc, s),
+        .string => |s| config.type = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("postDebugTask")) |postDebugTask| switch (postDebugTask) {
-        .string => |s| config.type = try copyAndAttemptExpand(alloc, s),
+        .string => |s| config.type = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
 
     if (map.get("envFile")) |envFile| switch (envFile) {
-        .string => |s| config.type = try copyAndAttemptExpand(alloc, s),
+        .string => |s| config.type = try copyAndAttemptExpand(io, alloc, s),
         else => return error.FieldInvalidType,
     };
     //
@@ -333,7 +334,7 @@ fn parseConfiguration(alloc: Alloc, value: JsonValue) !Configuration {
     if (map.get("connect")) |connect| switch (connect) {
         .object => |m| {
             if (m.get("host")) |host| switch (host) {
-                .string => |s| config.connect.host = try copyAndAttemptExpand(alloc, s),
+                .string => |s| config.connect.host = try copyAndAttemptExpand(io, alloc, s),
                 else => return error.FieldInvalidType,
             };
             //const port = connect_map.get("port");
@@ -404,8 +405,8 @@ fn parseConfigEnv(alloc: Alloc, value: JsonValue) ![]const utils.EnvTuple {
     return envs;
 }
 
-fn copyAndAttemptExpand(alloc: Alloc, input: []const u8) ![]u8 {
-    return expand.expand_string(alloc, input) catch |err| switch (err) {
+fn copyAndAttemptExpand(io: Io, alloc: Alloc, input: []const u8) ![]u8 {
+    return expand.expand_string(io, alloc, input) catch |err| switch (err) {
         expand.ExpandErrors.NoExpansionFound => {
             return try alloc.dupe(u8, input);
         },

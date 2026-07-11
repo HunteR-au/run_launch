@@ -1,4 +1,6 @@
 const std = @import("std");
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
 const Filter = @import("filter.zig");
 const Reviewer = @import("reviewer.zig");
 const ProcessBuffer = @import("processbuffer.zig").ProcessBuffer;
@@ -8,18 +10,18 @@ pub const Pipeline = @This();
 pub const MetaData = Reviewer.MetaData;
 
 arena: std.heap.ArenaAllocator,
-alloc: std.mem.Allocator,
+alloc: Allocator,
 filters: std.ArrayList(Filter),
 reviewers: std.ArrayList(Reviewer),
-m: std.Thread.Mutex,
+m: std.Io.Mutex,
 
-pub fn init(alloc: std.mem.Allocator) !Pipeline {
+pub fn init(alloc: Allocator) !Pipeline {
     return .{
         .arena = std.heap.ArenaAllocator.init(alloc),
         .alloc = alloc,
         .filters = try std.ArrayList(Filter).initCapacity(alloc, 1),
         .reviewers = try std.ArrayList(Reviewer).initCapacity(alloc, 1),
-        .m = std.Thread.Mutex{},
+        .m = .init,
     };
 }
 
@@ -40,13 +42,14 @@ pub fn deinit(self: *Pipeline) void {
 /// through 2nd pass via a series of objects called reviewers. Reviewers do not make edit to the buffer!
 pub fn runPipeline(
     self: *Pipeline,
-    alloc: std.mem.Allocator,
+    io: Io,
+    alloc: Allocator,
     /// A list of lines, noting that a line is defined as a string ending in a '\n'
     buffer: []const u8,
     metadata: MetaData,
 ) ![]u8 {
-    self.m.lock();
-    defer self.m.unlock();
+    self.m.lockUncancelable(io);
+    defer self.m.unlock(io);
 
     // Require that the buffer consist of ONLY lines
     std.debug.assert(buffer[buffer.len - 1] == '\n');
@@ -73,16 +76,16 @@ pub fn runPipeline(
     return result;
 }
 
-pub fn appendFilter(self: *Pipeline, filter: Filter) !void {
-    self.m.lock();
-    defer self.m.unlock();
+pub fn appendFilter(self: *Pipeline, io: Io, filter: Filter) !void {
+    self.m.lockUncancelable(io);
+    defer self.m.unlock(io);
 
     try self.filters.append(self.alloc, filter);
 }
 
-pub fn removeFilter(self: *Pipeline, id: Filter.HandleId) ?Filter {
-    self.m.lock();
-    defer self.m.unlock();
+pub fn removeFilter(self: *Pipeline, io: Io, id: Filter.HandleId) ?Filter {
+    self.m.lockUncancelable(io);
+    defer self.m.unlock(io);
 
     for (self.filters.items, 0..) |*filter, i| {
         if (filter.id == id) {
@@ -92,16 +95,16 @@ pub fn removeFilter(self: *Pipeline, id: Filter.HandleId) ?Filter {
     return null;
 }
 
-pub fn appendReviewer(self: *Pipeline, reviewer: Reviewer) !void {
-    self.m.lock();
-    defer self.m.unlock();
+pub fn appendReviewer(self: *Pipeline, io: Io, reviewer: Reviewer) !void {
+    self.m.lockUncancelable(io);
+    defer self.m.unlock(io);
 
     try self.reviewers.append(self.alloc, reviewer);
 }
 
-pub fn removeReviewer(self: *Pipeline, id: Reviewer.HandleId) ?Reviewer {
-    self.m.lock();
-    defer self.m.unlock();
+pub fn removeReviewer(self: *Pipeline, io: Io, id: Reviewer.HandleId) ?Reviewer {
+    self.m.lockUncancelable(io);
+    defer self.m.unlock(io);
 
     for (self.reviewers.items, 0..) |*reviewer, i| {
         if (reviewer.id == id) {

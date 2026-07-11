@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 pub const vaxis = @import("vaxis");
 pub const output_view_mod = @import("outputview.zig");
 
@@ -43,10 +44,10 @@ pub const View = struct {
         return v;
     }
 
-    pub fn deinit(self: *View) void {
+    pub fn deinit(self: *View, io: Io) void {
         // free any outputviews this view contains
         for (self.outputviews.items) |t| {
-            t.deinit();
+            t.deinit(io);
         }
         self.outputviews.deinit(self.alloc);
         self.flexitems.deinit(self.alloc);
@@ -163,7 +164,7 @@ pub const View = struct {
         return outputview;
     }
 
-    pub fn split_output(self: *View, output: *OutputWidget, from_pos: usize, dir: Direction) !void {
+    pub fn split_output(self: *View, io: Io, output: *OutputWidget, from_pos: usize, dir: Direction) !void {
         if (from_pos >= self.outputviews.items.len) {
             //std.debug.print("view.split_output: from_pos {d} items.len {d}\n", .{ from_pos, self.outputviews.items.len });
             return ViewErrors.InvalidArg;
@@ -211,11 +212,11 @@ pub const View = struct {
         // remove outputview moved from if it has no outputs
         if (self.outputviews.items[new_from_pos].outputs.items.len == 0) {
             var ov_to_del = self.remove_outputview(new_from_pos);
-            ov_to_del.deinit();
+            ov_to_del.deinit(io);
         }
     }
 
-    pub fn move_output(self: *View, output: *OutputWidget, from_pos: usize, to_pos: usize) !void {
+    pub fn move_output(self: *View, io: Io, output: *OutputWidget, from_pos: usize, to_pos: usize) !void {
         if (from_pos >= self.outputviews.items.len or to_pos >= self.outputviews.items.len) {
             //std.debug.print("view.move_output: from_pos {d} to_pos {d} items.len {d}\n", .{ from_pos, to_pos, self.outputviews.items.len });
             return ViewErrors.InvalidArg;
@@ -243,7 +244,7 @@ pub const View = struct {
         // remove outputview moved from if it has no outputs
         if (self.outputviews.items[from_pos].outputs.items.len == 0) {
             var ov_to_del = self.remove_outputview(from_pos);
-            ov_to_del.deinit();
+            ov_to_del.deinit(io);
         }
     }
 
