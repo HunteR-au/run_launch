@@ -862,7 +862,8 @@ pub fn searchStr(self: *Output, io: Io, search_str: []const u8, start_search_lin
         if (match) |*m| {
             // jump to the line containing the start of the match
             self.widget_ref.?.jump_output_to_line(
-                self.nonowned_process_buffer.filtered_buffer.getLineIndexFromOffset(m.lowerBound).?,
+                //self.nonowned_process_buffer.filtered_buffer.getLineIndexFromOffset(m.lowerBound).?,
+                self.nonowned_process_buffer.getLineIndexFromOffset(.Filtered, m.lowerBound).?,
             ) catch return;
 
             // free previous search_info and save new one
@@ -901,7 +902,8 @@ pub fn searchNext(self: *Output, io: Io) void {
         if (sinfo.iterator.next(io) catch return) |*match| {
             // jump to the line containing the start of the match
             self.widget_ref.?.jump_output_to_line(
-                self.nonowned_process_buffer.filtered_buffer.getLineIndexFromOffset(match.lowerBound).?,
+                //self.nonowned_process_buffer.filtered_buffer.getLineIndexFromOffset(match.lowerBound).?,
+                self.nonowned_process_buffer.getLineIndexFromOffset(.Filtered, match.lowerBound).?,
             ) catch return;
 
             // unhighlight previous match
@@ -933,7 +935,8 @@ pub fn searchPrev(self: *Output, io: Io) void {
         if (sinfo.iterator.prev(io) catch return) |*match| {
             // jump to the line container the  start of the match
             self.widget_ref.?.jump_output_to_line(
-                self.nonowned_process_buffer.filtered_buffer.getLineIndexFromOffset(match.lowerBound).?,
+                //self.nonowned_process_buffer.filtered_buffer.getLineIndexFromOffset(match.lowerBound).?,
+                self.nonowned_process_buffer.getLineIndexFromOffset(.Filtered, match.lowerBound).?,
             ) catch return;
 
             // unhighlight previous match
@@ -1066,12 +1069,12 @@ pub fn unsubscribeHandlersFromCmd(self: *Output) void {
 }
 
 fn copyBuffer(self: *const Output, alloc: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
-    return self.nonowned_process_buffer.copyFilteredBuffer(alloc);
+    return self.nonowned_process_buffer.copyBuffer(alloc, .Filtered);
 }
 
 fn copyUnfiltedBuffer(self: *const Output, alloc: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
     // TODO
-    return self.nonowned_process_buffer.copyUnfilteredBuffer(alloc);
+    return self.nonowned_process_buffer.copyBuffer(alloc, .Raw);
 }
 
 test "folding text" {

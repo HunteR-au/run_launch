@@ -412,7 +412,7 @@ pub const OutputWidget = struct {
             // convert the buffer offset to line number
             const line_num = self.output
                 .nonowned_process_buffer
-                .getFilteredLineIndexFromOffset(ofs);
+                .getLineIndexFromOffset(.Filtered, ofs);
 
             return line_num;
         }
@@ -617,7 +617,7 @@ const Window = struct {
                 return self
                     .output
                     .nonowned_process_buffer
-                    .getFilteredIndexOfLine(i) orelse {
+                    .getIndexOfLine(.Filtered, i) orelse {
                     @panic("Windows starting offset is beyond the buffer length");
                 };
             },
@@ -711,12 +711,12 @@ const Window = struct {
         // update parent buffer length
         self.last_draw.process_buffer_len = self.output
             .nonowned_process_buffer
-            .getFilteredBufferLength();
+            .getBufferLength(.Filtered);
 
         // update parent number of lines
         self.last_draw.process_buffer_num_lines = self.output
             .nonowned_process_buffer
-            .getNumFilteredNewlines();
+            .getNumNewLines(.Filtered);
     }
 
     pub fn updateWindowPostRender(self: *Window, window_size: usize) void {
@@ -812,7 +812,7 @@ const Window = struct {
         return try self
             .output
             .nonowned_process_buffer
-            .copyRange(alloc, ofs, self.windowByteLen());
+            .copyRange(alloc, .Filtered, ofs, self.windowByteLen());
     }
 };
 

@@ -487,7 +487,7 @@ const TuiApp = struct {
                 try actions.dumpOutputBuffer(
                     io,
                     self._alloc,
-                    try output.output.nonowned_process_buffer.copyUnfilteredBuffer(self._alloc),
+                    try output.output.nonowned_process_buffer.copyBuffer(self._alloc, .Raw),
                     output.id,
                     output.process_name,
                 );

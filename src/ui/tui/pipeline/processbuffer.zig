@@ -76,6 +76,8 @@ pub const ProcessBuffer = struct {
     pub const IteratorPtr = IteratorTypes.IteratorPtr;
     pub const IteratorKind = IteratorTypes.IteratorKind;
 
+    pub const BufferBacking = enum { Raw, Filtered };
+
     pub fn init(io: Io, alloc: Allocator) !*ProcessBuffer {
         const self = try alloc.create(ProcessBuffer);
 
@@ -354,93 +356,77 @@ pub const ProcessBuffer = struct {
         try self.reprocessPipeline();
     }
 
-    pub fn copyFilteredBuffer(
+    pub fn copyBuffer(
         self: *ProcessBuffer,
         alloc: Allocator,
+        backing: BufferBacking,
     ) Allocator.Error![]u8 {
         self.m.lockUncancelable(self.io);
         defer self.m.unlock(self.io);
 
-        return try alloc.dupe(u8, self.filtered_buffer.buf.items);
-    }
+        const backing_buffer: *LineBuffer = switch (backing) {
+            .Raw => self.buffer,
+            .Filtered => &self.filtered_buffer,
+        };
 
-    pub fn copyUnfilteredBuffer(
-        self: *ProcessBuffer,
-        alloc: Allocator,
-    ) Allocator.Error![]u8 {
-        self.m.lockUncancelable(self.io);
-        defer self.m.unlock(self.io);
-
-        return try alloc.dupe(u8, self.buffer.buf.items);
+        return try alloc.dupe(u8, backing_buffer.buf.items);
     }
 
     pub fn copyRange(
         self: *ProcessBuffer,
         alloc: Allocator,
+        backing: BufferBacking,
         offset: usize,
         len: usize,
     ) ![]u8 {
         self.m.lockUncancelable(self.io);
         defer self.m.unlock(self.io);
 
-        if (offset + len > self.filtered_buffer.buf.items.len) {
-            std.log.debug("buffer length: {d}, offset: {d}, to_idx: {d}\n", .{
-                self.filtered_buffer.buf.items.len,
-                offset,
-                len,
-            });
+        const backing_buffer: *LineBuffer = switch (backing) {
+            .Raw => self.buffer,
+            .Filtered => &self.filtered_buffer,
+        };
+
+        if (offset + len > backing_buffer.buf.items.len) {
             return Error.InvalidArguments;
         }
-        return try alloc.dupe(u8, self.filtered_buffer.buf.items[offset .. offset + len]);
+        return try alloc.dupe(u8, backing_buffer.buf.items[offset .. offset + len]);
     }
 
-    pub fn copyUnfilteredRange(
-        self: *ProcessBuffer,
-        alloc: Allocator,
-        offset: usize,
-        len: usize,
-    ) ![]u8 {
+    pub fn getBufferLength(self: *ProcessBuffer, backing: BufferBacking) usize {
         self.m.lockUncancelable(self.io);
         defer self.m.unlock(self.io);
-
-        if (offset + len > self.buffer.buf.items.len) {
-            return Error.InvalidArguments;
+        switch (backing) {
+            .Raw => return self.buffer.count(),
+            .Filtered => return self.filtered_buffer.count(),
         }
-        return try alloc.dupe(u8, self.buffer.buf.items[offset .. offset + len]);
     }
 
-    pub fn getFilteredBufferLength(
-        self: *ProcessBuffer,
-    ) usize {
+    pub fn getNumNewLines(self: *ProcessBuffer, backing: BufferBacking) usize {
         self.m.lockUncancelable(self.io);
         defer self.m.unlock(self.io);
-        return self.filtered_buffer.count();
+        switch (backing) {
+            .Raw => return self.buffer.newlines.items.len,
+            .Filtered => return self.filtered_buffer.newlines.items.len,
+        }
     }
 
-    pub fn getNumFilteredNewlines(
-        self: *ProcessBuffer,
-    ) usize {
+    pub fn getLineIndexFromOffset(self: *ProcessBuffer, backing: BufferBacking, offset: usize) ?usize {
         self.m.lockUncancelable(self.io);
         defer self.m.unlock(self.io);
-        return self.filtered_buffer.newlines.items.len;
+        switch (backing) {
+            .Raw => return self.buffer.getLineIndexFromOffset(offset),
+            .Filtered => return self.filtered_buffer.getLineIndexFromOffset(offset),
+        }
     }
 
-    pub fn getFilteredLineIndexFromOffset(self: *ProcessBuffer, offset: usize) ?usize {
+    pub fn getIndexOfLine(self: *ProcessBuffer, backing: BufferBacking, idx: usize) ?usize {
         self.m.lockUncancelable(self.io);
         defer self.m.unlock(self.io);
-        return self.filtered_buffer.getLineIndexFromOffset(offset);
-    }
-
-    pub fn getFilteredIndexOfLine(self: *ProcessBuffer, idx: usize) ?usize {
-        self.m.lockUncancelable(self.io);
-        defer self.m.unlock(self.io);
-        return self.filtered_buffer.getIndexOfLine(idx);
-    }
-
-    pub fn getLineFromOffset(self: *ProcessBuffer, offset: usize) usize {
-        self.m.lockUncancelable(self.io);
-        defer self.m.unlock(self.io);
-        self.filtered_buffer.getLineIndexFromOffset(offset).?;
+        switch (backing) {
+            .Raw => return self.buffer.getIndexOfLine(idx),
+            .Filtered => return self.filtered_buffer.getIndexOfLine(idx),
+        }
     }
 
     const Index = union(enum) {
