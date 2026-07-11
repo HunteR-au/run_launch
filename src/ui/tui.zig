@@ -47,22 +47,70 @@ const Key = struct {
     mod: vaxis.Key.Modifiers,
 };
 
-const TuiBindings = struct {
-    pub const FocusCmdWindow = Key{ .cp = '/', .mod = .{} };
-    pub const Escape = Key{ .cp = vaxis.Key.escape, .mod = .{} };
-    pub const ShowHelp = Key{ .cp = vaxis.Key.f2, .mod = .{} };
-    pub const FastQuit = Key{ .cp = 'c', .mod = .{ .ctrl = false } };
-    pub const OutputViewPrev1 = Key{ .cp = 'w', .mod = .{ .shift = true } };
-    pub const OutputViewPrev2 = Key{ .cp = vaxis.Key.tab, .mod = .{ .shift = true } };
-    pub const OutputViewNext1 = Key{ .cp = 'e', .mod = .{ .shift = true } };
-    pub const OutputViewNext2 = Key{ .cp = vaxis.Key.tab, .mod = .{} };
-    pub const ViewPrev = Key{ .cp = 'w', .mod = .{ .shift = false } };
-    pub const ViewNext = Key{ .cp = 'e', .mod = .{ .shift = false } };
-    pub const MoveOutputViewLeft = Key{ .cp = 's', .mod = .{} };
-    pub const MoveOutputViewRight = Key{ .cp = 'd', .mod = .{} };
-    pub const SplitOutputViewLeft = Key{ .cp = 's', .mod = .{ .shift = true } };
-    pub const SplitOutputViewRight = Key{ .cp = 'd', .mod = .{ .shift = true } };
+pub const Action = enum {
+    FocusCmdWindow,
+    Escape,
+    ShowHelp,
+    FastQuit,
+    OutputViewPrev,
+    OutputViewNext,
+    ViewPrev,
+    ViewNext,
+    MoveOutputViewLeft,
+    MoveOutputViewRight,
+    SplitOutputViewLeft,
+    SplitOutputViewRight,
+    RefreshScreen,
 };
+
+const Bindings = struct {
+    const BindType = struct { action: Action, key: Key };
+    const list = [_]BindType{
+        .{ .action = Action.FocusCmdWindow, .key = Key{ .cp = '/', .mod = .{} } },
+        .{ .action = Action.Escape, .key = Key{ .cp = vaxis.Key.escape, .mod = .{} } },
+        .{ .action = Action.ShowHelp, .key = Key{ .cp = vaxis.Key.f2, .mod = .{} } },
+        .{ .action = Action.FastQuit, .key = Key{ .cp = 'c', .mod = .{ .ctrl = false } } },
+        .{ .action = Action.OutputViewPrev, .key = Key{ .cp = 'w', .mod = .{ .shift = true } } },
+        .{ .action = Action.OutputViewPrev, .key = Key{ .cp = vaxis.Key.tab, .mod = .{ .shift = true } } },
+        .{ .action = Action.OutputViewNext, .key = Key{ .cp = 'e', .mod = .{ .shift = true } } },
+        .{ .action = Action.OutputViewNext, .key = Key{ .cp = vaxis.Key.tab, .mod = .{} } },
+        .{ .action = Action.ViewPrev, .key = Key{ .cp = 'w', .mod = .{ .shift = false } } },
+        .{ .action = Action.ViewNext, .key = Key{ .cp = 'e', .mod = .{ .shift = false } } },
+        .{ .action = Action.MoveOutputViewLeft, .key = Key{ .cp = 's', .mod = .{} } },
+        .{ .action = Action.MoveOutputViewRight, .key = Key{ .cp = 'd', .mod = .{} } },
+        .{ .action = Action.SplitOutputViewLeft, .key = Key{ .cp = 's', .mod = .{ .shift = true } } },
+        .{ .action = Action.SplitOutputViewRight, .key = Key{ .cp = 'd', .mod = .{ .shift = true } } },
+        .{ .action = Action.RefreshScreen, .key = Key{ .cp = 'q', .mod = .{} } },
+    };
+    pub const FocusCmdWindow = .{ .action = Action.FocusCmdWindow, .key = Key{ .cp = '/', .mod = .{} } };
+
+    pub fn matches(key: vaxis.Key) ?Action {
+        for (Bindings.list) |bind| {
+            if (key.matches(bind.key.cp, bind.key.mod)) {
+                return bind.action;
+            }
+        }
+
+        return null;
+    }
+};
+
+// const TuiBindings = struct {
+//     pub const FocusCmdWindow = Key{ .cp = '/', .mod = .{} };
+//     pub const Escape = Key{ .cp = vaxis.Key.escape, .mod = .{} };
+//     pub const ShowHelp = Key{ .cp = vaxis.Key.f2, .mod = .{} };
+//     pub const FastQuit = Key{ .cp = 'c', .mod = .{ .ctrl = false } };
+//     pub const OutputViewPrev1 = Key{ .cp = 'w', .mod = .{ .shift = true } };
+//     pub const OutputViewPrev2 = Key{ .cp = vaxis.Key.tab, .mod = .{ .shift = true } };
+//     pub const OutputViewNext1 = Key{ .cp = 'e', .mod = .{ .shift = true } };
+//     pub const OutputViewNext2 = Key{ .cp = vaxis.Key.tab, .mod = .{} };
+//     pub const ViewPrev = Key{ .cp = 'w', .mod = .{ .shift = false } };
+//     pub const ViewNext = Key{ .cp = 'e', .mod = .{ .shift = false } };
+//     pub const MoveOutputViewLeft = Key{ .cp = 's', .mod = .{} };
+//     pub const MoveOutputViewRight = Key{ .cp = 'd', .mod = .{} };
+//     pub const SplitOutputViewLeft = Key{ .cp = 's', .mod = .{ .shift = true } };
+//     pub const SplitOutputViewRight = Key{ .cp = 'd', .mod = .{ .shift = true } };
+// };
 
 const TuiApp = struct {
     app_model: AppModel,
@@ -105,43 +153,49 @@ const TuiApp = struct {
     pub fn handleCapture(self: *TuiApp, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         switch (event) {
             .key_press => |key| {
-                if (key.matches(TuiBindings.FocusCmdWindow.cp, TuiBindings.FocusCmdWindow.mod)) {
-                    if (self.mode == .main) {
-                        self.mode = .cmdview;
-                        try ctx.requestFocus(self.app_model.cmd.view.widget());
-                        return ctx.consumeAndRedraw();
-                    }
-                } else if (key.matches(TuiBindings.Escape.cp, TuiBindings.Escape.mod)) {
-                    if (self.mode == .cmdview) {
-                        self.mode = .main;
-                        if (self.app_model.model_view.get_focused_output_widget()) |ow| {
-                            try ctx.requestFocus(ow.widget());
-                        } else {
-                            try ctx.requestFocus(self.widget());
+                const opt_result = Bindings.matches(key);
+                if (opt_result) |result| switch (result) {
+                    .FocusCmdWindow => {
+                        if (self.mode == .main) {
+                            self.mode = .cmdview;
+                            try ctx.requestFocus(self.app_model.cmd.view.widget());
+                            return ctx.consumeAndRedraw();
                         }
-                        return ctx.consumeEvent();
-                    }
-                } else if (key.matches(TuiBindings.ShowHelp.cp, TuiBindings.ShowHelp.mod)) {
-                    if (self.mode == .main) {
-                        const does_help_exist = self.help_id != null;
-
-                        if (!does_help_exist) {
-                            try self.show_help(ctx.io, self.arena.allocator());
+                    },
+                    .Escape => {
+                        if (self.mode == .cmdview) {
+                            self.mode = .main;
+                            if (self.app_model.model_view.get_focused_output_widget()) |ow| {
+                                try ctx.requestFocus(ow.widget());
+                            } else {
+                                try ctx.requestFocus(self.widget());
+                            }
+                            return ctx.consumeEvent();
                         }
+                    },
+                    .ShowHelp => {
+                        if (self.mode == .main) {
+                            const does_help_exist = self.help_id != null;
 
-                        // find the outputview that contain's help
-                        for (self.app_model.model_view.outputviews.items) |ov| {
-                            for (ov.outputs.items) |o| {
-                                if (std.mem.eql(u8, o.process_name, "help")) {
-                                    // focus the help's output widget
-                                    ov.focus_output(o);
-                                    try ctx.requestFocus(o.widget());
+                            if (!does_help_exist) {
+                                try self.show_help(ctx.io, self.arena.allocator());
+                            }
+
+                            // find the outputview that contain's help
+                            for (self.app_model.model_view.outputviews.items) |ov| {
+                                for (ov.outputs.items) |o| {
+                                    if (std.mem.eql(u8, o.process_name, "help")) {
+                                        // focus the help's output widget
+                                        ov.focus_output(o);
+                                        try ctx.requestFocus(o.widget());
+                                    }
                                 }
                             }
+                            return ctx.consumeEvent();
                         }
-                        return ctx.consumeEvent();
-                    }
-                }
+                    },
+                    else => {},
+                };
             },
             .focus_in => {
                 if (self.mode == .cmdview) {
@@ -205,125 +259,120 @@ const TuiApp = struct {
                 }
             },
             .key_press => |key| {
-                if (key.matches(TuiBindings.FastQuit.cp, TuiBindings.FastQuit.mod)) {
-                    // This will current kill the tui but not kill the program...
-                    ctx.quit = true;
-                    return;
-                } else if (key.matches(TuiBindings.OutputViewPrev1.cp, TuiBindings.OutputViewPrev1.mod) or
-                    key.matches(TuiBindings.OutputViewPrev2.cp, TuiBindings.OutputViewPrev2.mod))
-                {
-                    const output_view = self.app_model.model_view.get_focused();
-                    if (output_view) |ov| {
-                        const output = ov.focus_prev();
-                        if (output) |o| {
-                            try ctx.requestFocus(o.widget());
-                            return ctx.consumeAndRedraw();
-                        }
-                    }
-                    return;
-                } else if (key.matches(TuiBindings.ViewPrev.cp, TuiBindings.ViewPrev.mod)) {
-                    if (self.app_model.model_view.focus_prev()) |ov| {
-                        if (ov.focused_ow) |o| try ctx.requestFocus(o.widget());
-                    }
-                    return ctx.consumeAndRedraw();
-                } else if (key.matches(TuiBindings.ViewNext.cp, TuiBindings.ViewNext.mod)) {
-                    if (self.app_model.model_view.focus_next()) |ov| {
-                        if (ov.focused_ow) |o| try ctx.requestFocus(o.widget());
-                    }
-                    return ctx.consumeAndRedraw();
-                } else if (key.matches(
-                    TuiBindings.OutputViewNext1.cp,
-                    TuiBindings.OutputViewNext1.mod,
-                ) or
-                    key.matches(
-                        TuiBindings.OutputViewNext2.cp,
-                        TuiBindings.OutputViewNext2.mod,
-                    ))
-                {
-                    // Only switch outputs in the main mode
-                    if (self.mode == .main) {
+                const opt_result = Bindings.matches(key);
+                if (opt_result) |result| switch (result) {
+                    .FastQuit => {
+                        // This will current kill the tui but not kill the program...
+                        ctx.quit = true;
+                        return;
+                    },
+                    .OutputViewPrev => {
                         const output_view = self.app_model.model_view.get_focused();
                         if (output_view) |ov| {
-                            const output = ov.focus_next();
+                            const output = ov.focus_prev();
                             if (output) |o| {
                                 try ctx.requestFocus(o.widget());
                                 return ctx.consumeAndRedraw();
                             }
                         }
                         return;
-                    }
-                } else if (key.matches(
-                    TuiBindings.MoveOutputViewLeft.cp,
-                    TuiBindings.MoveOutputViewLeft.mod,
-                )) {
-                    const output_view = self.app_model.model_view.get_focused();
-                    if (output_view) |ov| {
-                        const output = ov.focused_ow;
-                        if (output) |o| {
-                            const from = try self.app_model.model_view.get_position(ov);
-                            self.app_model.model_view.move_output(ctx.io, o, from, from -| 1) catch |err|
-                                switch (err) {
-                                    view.View.ViewErrors.InvalidArg => {
-                                        return;
-                                    },
-                                    else => {
-                                        return err;
-                                    },
-                                };
-                            try ctx.requestFocus(o.widget());
-                            return ctx.consumeAndRedraw();
+                    },
+                    .OutputViewNext => {
+                        // Only switch outputs in the main mode
+                        if (self.mode == .main) {
+                            const output_view = self.app_model.model_view.get_focused();
+                            if (output_view) |ov| {
+                                const output = ov.focus_next();
+                                if (output) |o| {
+                                    try ctx.requestFocus(o.widget());
+                                    return ctx.consumeAndRedraw();
+                                }
+                            }
+                            return;
                         }
-                    }
-                } else if (key.matches(
-                    TuiBindings.SplitOutputViewLeft.cp,
-                    TuiBindings.SplitOutputViewLeft.mod,
-                )) {
-                    const output_view = self.app_model.model_view.get_focused();
-                    if (output_view) |ov| {
-                        const output = ov.focused_ow;
-                        if (output) |o| {
-                            const from = try self.app_model.model_view.get_position(ov);
-                            try self.app_model.model_view.split_output(ctx.io, o, from, view.Direction.left);
-                            try ctx.requestFocus(o.widget());
-                            return ctx.consumeAndRedraw();
+                    },
+                    .ViewPrev => {
+                        if (self.app_model.model_view.focus_prev()) |ov| {
+                            if (ov.focused_ow) |o| try ctx.requestFocus(o.widget());
                         }
-                    }
-                } else if (key.matches(
-                    TuiBindings.MoveOutputViewRight.cp,
-                    TuiBindings.MoveOutputViewRight.mod,
-                )) {
-                    const output_view = self.app_model.model_view.get_focused();
-                    if (output_view) |ov| {
-                        const output = ov.focused_ow;
-                        if (output) |o| {
-                            const from = try self.app_model.model_view.get_position(ov);
-                            self.app_model.model_view.move_output(ctx.io, o, from, from +| 1) catch |err|
-                                switch (err) {
-                                    view.View.ViewErrors.InvalidArg => {
-                                        return;
-                                    },
-                                    else => {
-                                        return err;
-                                    },
-                                };
-                            try ctx.requestFocus(o.widget());
-                            return ctx.consumeAndRedraw();
+                        return ctx.consumeAndRedraw();
+                    },
+                    .ViewNext => {
+                        if (self.app_model.model_view.focus_next()) |ov| {
+                            if (ov.focused_ow) |o| try ctx.requestFocus(o.widget());
                         }
-                    }
-                } else if (key.matches(TuiBindings.SplitOutputViewRight.cp, TuiBindings.SplitOutputViewRight.mod)) {
-                    const output_view = self.app_model.model_view.get_focused();
-                    if (output_view) |ov| {
-                        const output = ov.focused_ow;
-                        if (output) |o| {
-                            const from = try self.app_model.model_view.get_position(ov);
-                            try self.app_model.model_view.split_output(ctx.io, o, from, view.Direction.right);
-                            try ctx.requestFocus(o.widget());
-                            return ctx.consumeAndRedraw();
+                        return ctx.consumeAndRedraw();
+                    },
+                    .MoveOutputViewLeft => {
+                        const output_view = self.app_model.model_view.get_focused();
+                        if (output_view) |ov| {
+                            const output = ov.focused_ow;
+                            if (output) |o| {
+                                const from = try self.app_model.model_view.get_position(ov);
+                                self.app_model.model_view.move_output(ctx.io, o, from, from -| 1) catch |err|
+                                    switch (err) {
+                                        view.View.ViewErrors.InvalidArg => {
+                                            return;
+                                        },
+                                        else => {
+                                            return err;
+                                        },
+                                    };
+                                try ctx.requestFocus(o.widget());
+                                return ctx.consumeAndRedraw();
+                            }
                         }
-                    }
-                } else if (key.matches('q', .{})) {
-                    try ctx.addCmd(.queue_refresh);
-                }
+                    },
+                    .MoveOutputViewRight => {
+                        const output_view = self.app_model.model_view.get_focused();
+                        if (output_view) |ov| {
+                            const output = ov.focused_ow;
+                            if (output) |o| {
+                                const from = try self.app_model.model_view.get_position(ov);
+                                self.app_model.model_view.move_output(ctx.io, o, from, from +| 1) catch |err|
+                                    switch (err) {
+                                        view.View.ViewErrors.InvalidArg => {
+                                            return;
+                                        },
+                                        else => {
+                                            return err;
+                                        },
+                                    };
+                                try ctx.requestFocus(o.widget());
+                                return ctx.consumeAndRedraw();
+                            }
+                        }
+                    },
+                    .SplitOutputViewLeft => {
+                        const output_view = self.app_model.model_view.get_focused();
+                        if (output_view) |ov| {
+                            const output = ov.focused_ow;
+                            if (output) |o| {
+                                const from = try self.app_model.model_view.get_position(ov);
+                                try self.app_model.model_view.split_output(ctx.io, o, from, view.Direction.left);
+                                try ctx.requestFocus(o.widget());
+                                return ctx.consumeAndRedraw();
+                            }
+                        }
+                    },
+                    .SplitOutputViewRight => {
+                        const output_view = self.app_model.model_view.get_focused();
+                        if (output_view) |ov| {
+                            const output = ov.focused_ow;
+                            if (output) |o| {
+                                const from = try self.app_model.model_view.get_position(ov);
+                                try self.app_model.model_view.split_output(ctx.io, o, from, view.Direction.right);
+                                try ctx.requestFocus(o.widget());
+                                return ctx.consumeAndRedraw();
+                            }
+                        }
+                    },
+                    .RefreshScreen => {
+                        try ctx.addCmd(.queue_refresh);
+                        return;
+                    },
+                    else => {},
+                };
             },
             .mouse => |mouse| {
                 _ = mouse;
