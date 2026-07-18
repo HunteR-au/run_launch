@@ -151,3 +151,28 @@ pub fn get_via_strid(app_model: *AppModel, strid: []const u8) ?*OutputWidget {
 
     return null;
 }
+
+const ViewIterator = struct {
+    outer: []const *OutputView,
+    outer_index: usize = 0,
+    inner_index: usize = 0,
+
+    pub fn next(self: *ViewIterator) ?*OutputWidget {
+        while (self.outer_index < self.outer.len) : (self.outer_index += 1) {
+            const inner = self.outer[self.outer_index].outputs.items;
+            if (self.inner_index < inner.len) {
+                const item = inner[self.inner_index];
+                self.inner_index += 1;
+                return item;
+            }
+            self.inner_index = 0;
+        }
+        return null;
+    }
+};
+
+pub fn get_view_list_iterator(app_model: *AppModel) ViewIterator {
+    return .{
+        .outer = app_model.model_view.outputviews.items,
+    };
+}

@@ -6,6 +6,38 @@ const Cmd = @import("cmd.zig").Cmd;
 
 const vxfw = vaxis.vxfw;
 
+const Key = struct {
+    cp: u21,
+    mod: vaxis.Key.Modifiers,
+};
+
+pub const Action = enum {
+    SelectUp,
+    SelectDown,
+    SelectHistoryItem,
+};
+
+const Bindings = struct {
+    const BindType = struct { action: Action, key: Key };
+    const list = [_]BindType{
+        .{ .action = Action.SelectUp, .key = Key{ .cp = vaxis.Key.up, .mod = .{ .ctrl = true } } },
+        .{ .action = Action.SelectUp, .key = Key{ .cp = 'j', .mod = .{ .ctrl = true } } },
+        .{ .action = Action.SelectDown, .key = Key{ .cp = vaxis.Key.down, .mod = .{ .ctrl = true } } },
+        .{ .action = Action.SelectDown, .key = Key{ .cp = 'k', .mod = .{ .ctrl = true } } },
+        .{ .action = Action.SelectHistoryItem, .key = Key{ .cp = vaxis.Key.enter, .mod = .{ .ctrl = true } } },
+    };
+
+    pub fn matches(key: vaxis.Key) ?Action {
+        for (Bindings.list) |bind| {
+            if (key.matches(bind.key.cp, bind.key.mod)) {
+                return bind.action;
+            }
+        }
+
+        return null;
+    }
+};
+
 const nonselected = vaxis.Style{ .bg = .default, .fg = .default };
 const selected = vaxis.Style{ .bg = .{ .rgb = .{ 100, 100, 100 } }, .fg = .default };
 
@@ -138,32 +170,59 @@ pub const HistoryWidget = struct {
     pub fn handleEvent(self: *HistoryWidget, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         switch (event) {
             .key_press => |key| {
-                if (key.matches(vaxis.Key.up, .{ .ctrl = true }) or
-                    key.matches('j', .{ .ctrl = true }))
-                {
-                    self.selectUp();
-                    ctx.consumeAndRedraw();
-                } else if (key.matches(vaxis.Key.down, .{ .ctrl = true }) or
-                    key.matches('k', .{ .ctrl = true }))
-                {
-                    self.selectDown();
-                    ctx.consumeAndRedraw();
-                } else if (key.matches(vaxis.Key.enter, .{ .ctrl = true })) {
-                    if (self.line_selected) |line| {
-                        if (line >= self.history.items.len)
-                            std.debug.panic("HistoryWidget: OOB on selected history line: historylen = {d} selected_line = {d}", .{ self.history.items.len, line });
+                const opt_result = Bindings.matches(key);
+                if (opt_result) |result| switch (result) {
+                    .SelectUp => {
+                        self.selectUp();
+                        ctx.consumeAndRedraw();
+                    },
+                    .SelectDown => {
+                        self.selectDown();
+                        ctx.consumeAndRedraw();
+                    },
+                    .SelectHistoryItem => {
+                        if (self.line_selected) |line| {
+                            if (line >= self.history.items.len)
+                                std.debug.panic("HistoryWidget: OOB on selected history line: historylen = {d} selected_line = {d}", .{ self.history.items.len, line });
 
-                        try self.cmd.view.handleEvent(
-                            ctx,
-                            cmdevents.makeEvent(&cmdevents.CmdEvent{
-                                .select_history = .{
-                                    .cmd_str = self.history.items[line].text,
-                                    .history_idx = line,
-                                },
-                            }),
-                        );
-                    }
-                }
+                            try self.cmd.view.handleEvent(
+                                ctx,
+                                cmdevents.makeEvent(&cmdevents.CmdEvent{
+                                    .select_history = .{
+                                        .cmd_str = self.history.items[line].text,
+                                        .history_idx = line,
+                                    },
+                                }),
+                            );
+                        }
+                    },
+                };
+                // if (key.matches(vaxis.Key.up, .{ .ctrl = true }) or
+                //     key.matches('j', .{ .ctrl = true }))
+                // {
+                //     self.selectUp();
+                //     ctx.consumeAndRedraw();
+                // } else if (key.matches(vaxis.Key.down, .{ .ctrl = true }) or
+                //     key.matches('k', .{ .ctrl = true }))
+                // {
+                //     self.selectDown();
+                //     ctx.consumeAndRedraw();
+                // } else if (key.matches(vaxis.Key.enter, .{ .ctrl = true })) {
+                //     if (self.line_selected) |line| {
+                //         if (line >= self.history.items.len)
+                //             std.debug.panic("HistoryWidget: OOB on selected history line: historylen = {d} selected_line = {d}", .{ self.history.items.len, line });
+
+                //         try self.cmd.view.handleEvent(
+                //             ctx,
+                //             cmdevents.makeEvent(&cmdevents.CmdEvent{
+                //                 .select_history = .{
+                //                     .cmd_str = self.history.items[line].text,
+                //                     .history_idx = line,
+                //                 },
+                //             }),
+                //         );
+                //     }
+                // }
             },
             else => {},
         }

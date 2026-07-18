@@ -4,6 +4,7 @@ const utils = @import("utils");
 const Output = @import("../outputwidget.zig").Output;
 const CmdWidget = @import("../cmd//cmdwidget.zig").CmdWidget;
 const CmdHinter = @import("cmdhints.zig").CommandHinter;
+const CmdAutomation = @import("cmd_automation.zig");
 
 const vxfw = @import("vaxis").vxfw;
 
@@ -64,6 +65,36 @@ pub const Cmd = struct {
         var iter = self.history.iterator();
         while (iter.next()) |i| self.alloc.free(i);
         self.alloc.destroy(self);
+    }
+
+    pub fn run_script(self: *const Cmd, io: Io, script: []const u8, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+        const autos = try CmdAutomation.parse_script(self.alloc, script);
+        defer {
+            for (autos) |a| a.deinit(self.alloc);
+        }
+
+        for (autos) |step| {
+            switch (step.select) {
+                .str => |select_cmd| {
+                    // select the output
+                    try self.handleCmd(io, select_cmd, ctx, event);
+
+                    // run the cmd
+                    try self.handleCmd(io, step.cmd, ctx, event);
+                },
+                .skip => {
+                    // no select action, run cmd
+                    try self.handleCmd(io, step.cmd, ctx, event);
+                },
+                .all => {
+                    // run the cmd on ALL outputs
+                    // TODO: maybe need a flag to signal I want to force is not in view
+
+                    // run the cmd
+                    try self.handleCmd(io, step.cmd, ctx, event);
+                },
+            }
+        }
     }
 
     pub fn handleCmd(self: *const Cmd, io: Io, buffer: []const u8, ctx: *vxfw.EventContext, event: vxfw.Event) !void {

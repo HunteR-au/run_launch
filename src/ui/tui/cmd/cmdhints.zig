@@ -1,23 +1,4 @@
 const std = @import("std");
-// TODO: logic for cmd hints
-
-// update(cmdstr)
-
-// find prefix matches for commands
-// create a list of all matches
-// find matches for a command
-// collect options if they exist
-// print arg format
-
-// addHandler - called from cmd.zig
-// removeHandler - called from cmd.zig
-
-// Q: what should go in a handler
-
-// hint types
-// cmd suggestions
-// cmd arguments
-// previous inputs
 
 pub const Hint = union(enum) {
     command: []const u8,

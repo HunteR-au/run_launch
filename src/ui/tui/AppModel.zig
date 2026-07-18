@@ -9,6 +9,7 @@ const view = @import("view.zig");
 const cmdwidget = @import("cmd/cmdwidget.zig");
 const Cmd = @import("cmd/cmd.zig").Cmd;
 const buffermgr = @import("buffermanager.zig");
+const EntityViewer = @import("widgets/entity_viewer.zig");
 const runner = @import("runner");
 
 pub const View = view.View;
@@ -22,3 +23,4 @@ uiconfig: ?*UiConfig,
 buffers: *BufferMgr,
 executor: *ConfiguredRunner,
 cmd: *Cmd,
+entity_viewer: *EntityViewer,

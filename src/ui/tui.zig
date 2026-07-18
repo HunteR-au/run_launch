@@ -6,6 +6,7 @@ pub const vaxis = @import("vaxis");
 pub const uiconfig = @import("uiconfig");
 pub const view = @import("tui/view.zig");
 pub const cmdwidget = @import("tui/cmd/cmdwidget.zig");
+pub const EntityViewer = @import("tui/widgets/entity_viewer.zig");
 pub const Cmd = @import("tui/cmd/cmd.zig").Cmd;
 pub const help = @import("tui/help/help.zig");
 pub const runner = @import("runner");
@@ -34,7 +35,7 @@ const ProcessBuffersMap = struct {
     map: std.AutoHashMapUnmanaged(uuid.UUID, *ProcessBuffer),
 };
 
-const ModelState = enum { main, cmdview, jsonview };
+const ModelState = enum { main, cmdview, jsonview, objview };
 
 pub const TUISignal = struct {
     mutex: std.Io.Mutex = .init,
@@ -49,6 +50,7 @@ const Key = struct {
 
 pub const Action = enum {
     FocusCmdWindow,
+    FocusObjViewerWindow,
     Escape,
     ShowHelp,
     FastQuit,
@@ -66,6 +68,7 @@ pub const Action = enum {
 const Bindings = struct {
     const BindType = struct { action: Action, key: Key };
     const list = [_]BindType{
+        .{ .action = Action.FocusObjViewerWindow, .key = Key{ .cp = vaxis.Key.f1, .mod = .{} } },
         .{ .action = Action.FocusCmdWindow, .key = Key{ .cp = '/', .mod = .{} } },
         .{ .action = Action.Escape, .key = Key{ .cp = vaxis.Key.escape, .mod = .{} } },
         .{ .action = Action.ShowHelp, .key = Key{ .cp = vaxis.Key.f2, .mod = .{} } },
@@ -82,7 +85,6 @@ const Bindings = struct {
         .{ .action = Action.SplitOutputViewRight, .key = Key{ .cp = 'd', .mod = .{ .shift = true } } },
         .{ .action = Action.RefreshScreen, .key = Key{ .cp = 'q', .mod = .{} } },
     };
-    pub const FocusCmdWindow = .{ .action = Action.FocusCmdWindow, .key = Key{ .cp = '/', .mod = .{} } };
 
     pub fn matches(key: vaxis.Key) ?Action {
         for (Bindings.list) |bind| {
@@ -94,23 +96,6 @@ const Bindings = struct {
         return null;
     }
 };
-
-// const TuiBindings = struct {
-//     pub const FocusCmdWindow = Key{ .cp = '/', .mod = .{} };
-//     pub const Escape = Key{ .cp = vaxis.Key.escape, .mod = .{} };
-//     pub const ShowHelp = Key{ .cp = vaxis.Key.f2, .mod = .{} };
-//     pub const FastQuit = Key{ .cp = 'c', .mod = .{ .ctrl = false } };
-//     pub const OutputViewPrev1 = Key{ .cp = 'w', .mod = .{ .shift = true } };
-//     pub const OutputViewPrev2 = Key{ .cp = vaxis.Key.tab, .mod = .{ .shift = true } };
-//     pub const OutputViewNext1 = Key{ .cp = 'e', .mod = .{ .shift = true } };
-//     pub const OutputViewNext2 = Key{ .cp = vaxis.Key.tab, .mod = .{} };
-//     pub const ViewPrev = Key{ .cp = 'w', .mod = .{ .shift = false } };
-//     pub const ViewNext = Key{ .cp = 'e', .mod = .{ .shift = false } };
-//     pub const MoveOutputViewLeft = Key{ .cp = 's', .mod = .{} };
-//     pub const MoveOutputViewRight = Key{ .cp = 'd', .mod = .{} };
-//     pub const SplitOutputViewLeft = Key{ .cp = 's', .mod = .{ .shift = true } };
-//     pub const SplitOutputViewRight = Key{ .cp = 'd', .mod = .{ .shift = true } };
-// };
 
 const TuiApp = struct {
     app_model: AppModel,
@@ -126,6 +111,8 @@ const TuiApp = struct {
     handlers_ids: std.ArrayList(cmdwidget.Cmd.HandleId),
     help_id: ?uuid.UUID = null,
     mode: ModelState = .main,
+    prev_mode: ModelState = .main,
+    start_script: ?[]const u8 = null,
     // views: vxfw.Surface,
     // views -> view-group -> tab-group && output-group
 
@@ -162,13 +149,46 @@ const TuiApp = struct {
                             return ctx.consumeAndRedraw();
                         }
                     },
+                    .FocusObjViewerWindow => {
+                        var is_rendering = false;
+
+                        switch (self.mode) {
+                            .main => {
+                                self.prev_mode = .main;
+                                self.mode = .objview;
+                                is_rendering = true;
+                            },
+                            .cmdview => {
+                                // we need to save the prev state
+                                self.prev_mode = .cmdview;
+                                self.mode = .objview;
+                                is_rendering = true;
+                            },
+                            else => {},
+                        }
+
+                        if (is_rendering) {
+                            try self.app_model.entity_viewer.update_objects(
+                                self._alloc,
+                                try EntityViewer.create_objects(self._alloc, &self.app_model, ctx.io),
+                            );
+                            try ctx.requestFocus(self.app_model.entity_viewer.widget());
+                            return ctx.consumeAndRedraw();
+                        }
+                    },
                     .Escape => {
-                        if (self.mode == .cmdview) {
-                            self.mode = .main;
-                            if (self.app_model.model_view.get_focused_output_widget()) |ow| {
-                                try ctx.requestFocus(ow.widget());
-                            } else {
-                                try ctx.requestFocus(self.widget());
+                        if (self.mode == .cmdview or self.mode == .objview) {
+                            switch (self.prev_mode) {
+                                .cmdview => {
+                                    self.mode = .cmdview;
+                                    self.prev_mode = .main;
+                                    try ctx.requestFocus(self.app_model.cmd.view.widget());
+                                },
+                                .main => {
+                                    self.mode = .main;
+                                    try self.focus_on_main(ctx);
+                                },
+                                else => unreachable,
                             }
                             return ctx.consumeEvent();
                         }
@@ -198,17 +218,26 @@ const TuiApp = struct {
                 };
             },
             .focus_in => {
-                if (self.mode == .cmdview) {
-                    try ctx.requestFocus(self.app_model.cmd.view.widget());
-                    //try ctx.requestFocus(self.cmd_view.widget());
-                    return ctx.consumeEvent();
-                } else if (self.mode == .main) {
-                    if (self.app_model.model_view.get_focused_output_widget()) |ow| {
-                        try ctx.requestFocus(ow.widget());
-                    } else {
-                        try ctx.requestFocus(self.widget());
-                    }
-                    return ctx.consumeEvent();
+                switch (self.mode) {
+                    .cmdview => {
+                        try ctx.requestFocus(self.app_model.cmd.view.widget());
+                        return ctx.consumeEvent();
+                    },
+                    .main => {
+                        try self.focus_on_main(ctx);
+                        return ctx.consumeEvent();
+                    },
+                    .objview => {
+                        try ctx.requestFocus(self.app_model.entity_viewer.widget());
+                        return ctx.consumeEvent();
+                    },
+                    else => {},
+                }
+            },
+            .init => {
+                if (self.start_script) |script| {
+                    // TODO: probably should have some user output for errors
+                    self.app_model.cmd.run_script(ctx.io, script, ctx, event) catch {};
                 }
             },
             else => {},
@@ -460,6 +489,43 @@ const TuiApp = struct {
                 children[1] = cmdwidget_child;
             },
             .jsonview => {},
+            .objview => {
+                if (self.prev_mode == .cmdview) {
+                    children = try ctx.arena.alloc(vxfw.SubSurface, 3);
+                    const output_child: vxfw.SubSurface = .{
+                        .origin = .{ .row = 0, .col = 0 },
+                        .surface = try self.app_model.model_view.draw(ctx),
+                    };
+
+                    const entity_viewer_child: vxfw.SubSurface = .{
+                        .origin = .{ .row = 0, .col = 0 },
+                        .surface = try self.app_model.entity_viewer.draw(ctx),
+                    };
+
+                    const cmdwidget_child: vxfw.SubSurface = .{
+                        .origin = .{ .row = 0, .col = 0 },
+                        .surface = try self.app_model.cmd.view.draw(ctx),
+                    };
+
+                    children[0] = output_child;
+                    children[1] = entity_viewer_child;
+                    children[2] = cmdwidget_child;
+                } else {
+                    children = try ctx.arena.alloc(vxfw.SubSurface, 2);
+                    const output_child: vxfw.SubSurface = .{
+                        .origin = .{ .row = 0, .col = 0 },
+                        .surface = try self.app_model.model_view.draw(ctx),
+                    };
+
+                    const entity_viewer_child: vxfw.SubSurface = .{
+                        .origin = .{ .row = 0, .col = 0 },
+                        .surface = try self.app_model.entity_viewer.draw(ctx),
+                    };
+
+                    children[0] = output_child;
+                    children[1] = entity_viewer_child;
+                }
+            },
         }
 
         return .{
@@ -553,6 +619,14 @@ const TuiApp = struct {
         }
         self.handlers_ids.clearAndFree(self._alloc);
     }
+
+    pub fn focus_on_main(self: *TuiApp, ctx: *vxfw.EventContext) !void {
+        if (self.app_model.model_view.get_focused_output_widget()) |ow| {
+            try ctx.requestFocus(ow.widget());
+        } else {
+            try ctx.requestFocus(self.widget());
+        }
+    }
 };
 
 var model: *TuiApp = undefined;
@@ -587,6 +661,7 @@ fn run_tui(io: Io, alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner,
             .buffers = try .init(alloc),
             .executor = executor,
             .cmd = try .init(alloc),
+            .entity_viewer = try .init(alloc, null),
         },
         .cmd_view = undefined,
         .arena = arena,
@@ -599,25 +674,39 @@ fn run_tui(io: Io, alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner,
 
     if (builtin.mode == .Debug) {
         // Set up output views and process buffers for debugging
-        const output_view = try OutputView.init(alloc);
-        const output_view2 = try OutputView.init(alloc);
-        try model.app_model.model_view.add_outputview(output_view, 0);
-        try model.app_model.model_view.add_outputview(output_view2, 1);
-
-        const b1 = try model.app_model.buffers.create_process_buffer(io, alloc);
-        const b2 = try model.app_model.buffers.create_process_buffer(io, alloc);
-        try output_view.add_output(try OutputWidget.init(
+        _ = try processviewmgr.create_process_view(
+            io,
             alloc,
+            &model.app_model,
             "default_output",
-            b1.id,
-            b1.buffer,
-        ));
-        try output_view.add_output(try OutputWidget.init(
+        );
+
+        _ = try processviewmgr.create_process_view(
+            io,
             alloc,
+            &model.app_model,
             "default_output2",
-            b2.id,
-            b2.buffer,
-        ));
+        );
+
+        //const output_view = try OutputView.init(alloc);
+        //const output_view2 = try OutputView.init(alloc);
+        //try model.app_model.model_view.add_outputview(output_view, 0);
+        //try model.app_model.model_view.add_outputview(output_view2, 1);
+        //
+        //const b1 = try model.app_model.buffers.create_process_buffer(io, alloc);
+        //const b2 = try model.app_model.buffers.create_process_buffer(io, alloc);
+        //try output_view.add_output(try OutputWidget.init(
+        //    alloc,
+        //    "default_output",
+        //    b1.id,
+        //    b1.buffer,
+        //));
+        //try output_view.add_output(try OutputWidget.init(
+        //    alloc,
+        //    "default_output2",
+        //    b2.id,
+        //    b2.buffer,
+        //));
     }
 
     defer arena.deinit();
@@ -683,55 +772,6 @@ pub fn createProcessView(io: Io, alloc: std.mem.Allocator, processname: []const 
     //std.time.sleep(10_000_000_000);
     //std.debug.print("creating output: {s}\n", .{processname});
 
-    // const id: uuid.UUID = undefined;
-    // if (keep_running.load(.seq_cst)) {
-    //     const buf = try model.app_model.buffers.create_process_buffer(alloc);
-    //     errdefer {
-    //         model.app_model.buffers.remove_buffer(buf.id);
-    //     }
-
-    //     const p_output = try OutputWidget.init(
-    //         alloc,
-    //         processname,
-    //         buf.id,
-    //         buf.buffer.process,
-    //     );
-    //     errdefer p_output.deinit();
-
-    //     id = buf.id;
-
-    //     if (model.uiconfig) |config| {
-    //         try p_output.setupViaUiconfig(config);
-    //     }
-
-    //     // Add a reference to the cmd
-    //     try p_output.output.subscribeHandlersToCmd(model.app_model.cmd);
-
-    //     // create an outputview if none exist
-    //     if (model.app_model.model_view.outputviews.items.len == 0) {
-    //         const output_view = try OutputView.init(alloc);
-
-    //         const view_position = 0;
-    //         model.app_model.model_view
-    //             .add_outputview(output_view, view_position) catch |err| switch (err) {
-    //             error.OutOfMemory => |e| {
-    //                 // bubble up alloc errors
-    //                 return e;
-    //             },
-    //             error.InvalidArg, error.OutputNotFound => |e| {
-    //                 // we currently don't support returning other errors, so just panic!
-    //                 std.debug.panic("createProcessView critically failed.\n error: {any}", .{e});
-    //             },
-    //         };
-    //     }
-
-    //     // we can assume there is at least one active view
-    //     try model.modelview.modelview.outputviews.items[0].add_output(p_output);
-
-    //     app.vx.setMouseMode(&app.tty.tty_writer.interface, true) catch {};
-    // }
-    // return id;
-
     const id = try processviewmgr.create_process_view(io, alloc, &model.app_model, processname);
     app.vx.setMouseMode(&app.tty.tty_writer.interface, true) catch {};
     return id;
@@ -765,7 +805,35 @@ pub fn pushLogging(io: Io, alloc: std.mem.Allocator, process_id: uuid.UUID, buff
 
 // TODOs
 
+// config that runs mutiple programs
+// script system for config
+
+// //// SCRIPTING INPUT SYSTEM ///// (DONE)
+// GLOBAL: color my_pattern red:line
+// Print: keep yes no apple
+// ~0: keep yes
+// : merge test ~0 ~1
+// test:
+// TODO - I don't have the ability to run a cmd on ALL yet
+
+// create a panel in the middle of the screen to list all buffers/view
+// design: create a widget around optionPicker
+//  optionPicker should be the base abstraction (done)
+//  BUG: merge cannot ref views (only buffers)
+//  BUG: buffer should show program
+//  BUG: view should show title
+//  BUG: the viewer can lose focus
+//  IDEA: allow viewer to be shown when cmd up (maybe a stack for the tui mode...)
+//  TODO: need to think how to display views and buffers a little more
+
 // create a wrapped line mode
+
+// create a script system to run cmds when run_launch starts
+
+// update the config + executor to allow for multiple programs to run
+// I want a simple config + complex config
+// - complex should have pre/posts
+// - simple just cmdlines, envs, script
 
 // create option to render the tail
 //  - this is going to be kinda complicated
@@ -779,7 +847,8 @@ pub fn pushLogging(io: Io, alloc: std.mem.Allocator, process_id: uuid.UUID, buff
 //          - with features such as addding env or exec path
 //      - control running post tasks with UI still running
 
-// TODO: f1 to open up a view_picker screen (or generic ui selection screen)
+// TODO: cmd error feedback
+// TODO: f1 to open up a vikew_picker screen (or generic ui selection screen)
 // TODO color title for selected outputview
 // TODO make tabs
 // TODO: report errors when processes die
@@ -841,6 +910,10 @@ pub fn pushLogging(io: Io, alloc: std.mem.Allocator, process_id: uuid.UUID, buff
 // noinfo
 
 // IDEA: make a simple file which lists a bunch of cmd lines so that it is easy to use run_launch
+// some config with an extension as .rl
+// -- runs a series of programs
+// -- should be able to run cmds
+// -- should be able to set envs for programs
 
 // FEATURE: grid views
 // IDEA:
@@ -853,8 +926,6 @@ pub fn pushLogging(io: Io, alloc: std.mem.Allocator, process_id: uuid.UUID, buff
 // start cmd
 
 // !!advanced ideas!!
-// combine two buffers
-//  - time stamps for each line
 // split into virtual buffers
 //  split (ie if in rule b1 else b2)
 // OR tee (ie if in rule b1 and b2 ELSE b1)

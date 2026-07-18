@@ -233,4 +233,53 @@ pub const BufferMgr = struct {
 
         return .{ .id = id, .buffer = new_buffer };
     }
+
+    const BufferIterator = struct {
+        const Map = std.AutoHashMapUnmanaged(uuid.UUID, *ProcessBuffer);
+
+        mutex: *std.Io.Mutex,
+        io: Io,
+        first: Map.Iterator,
+        second: Map.Iterator,
+        on_first: bool = true,
+        state: enum { first, second, done } = .first,
+
+        pub fn next(self: *BufferIterator) ?PBufferAndId {
+            if (self.state == .first) {
+                if (self.first.next()) |entry| return .{
+                    .id = entry.key_ptr.*,
+                    .buffer = entry.value_ptr.*,
+                };
+                self.mutex.unlock(self.io);
+                self.state = .second;
+            }
+            if (self.state == .second) {
+                if (self.second.next()) |entry| return .{
+                    .id = entry.key_ptr.*,
+                    .buffer = entry.value_ptr.*,
+                };
+                self.state = .done;
+            }
+            return null;
+        }
+
+        pub fn deinit(self: *BufferIterator) void {
+            if (self.state == .first) {
+                self.mutex.unlock(self.io);
+                self.state = .done;
+            }
+        }
+    };
+
+    /// A BufferIterator will put a lock on proces_buffer map, you MUST call deinit()
+    /// on the BufferIterator
+    pub fn get_view_list_iterator(self: *BufferMgr, io: Io) BufferIterator {
+        self.process_buffers.m.lockUncancelable(io);
+        return .{
+            .io = io,
+            .mutex = &self.process_buffers.m,
+            .first = self.process_buffers.map.iterator(),
+            .second = self.virtual_buffers.iterator(),
+        };
+    }
 };
