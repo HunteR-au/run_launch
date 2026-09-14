@@ -187,7 +187,9 @@ pub fn main(init: std.process.Init) !void {
         //_ = try runner.run(allocator, taskNameToRun, executor.config, tasks, uiview.createProcessView, uiview.pushLogging);
     } else {
         if (@import("builtin").mode == .Debug) {
-            //std.Thread.sleep(1000000);
+            executor.m.lockUncancelable(io);
+            defer executor.m.unlock(io);
+
             try ui_debug.start_debuginfo(io, alloc, tui.createProcessView, tui.pushLogging);
         }
         // Currently waiting will cause the pipes to be killed before being drained properly

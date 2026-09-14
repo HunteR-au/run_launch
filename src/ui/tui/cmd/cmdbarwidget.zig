@@ -54,6 +54,8 @@ pub const CmdBarWidget = struct {
     }
 
     pub fn setCmdViaNextHistory(self: *CmdBarWidget) !void {
+        if (self.cmd.history.count() == 0) return;
+
         const history_idx: usize = if (self.last_history_idx) |h| h -| 1 else self.cmd.history.count() - 1;
         const history_buffer = self.cmd.getHistory(history_idx);
         if (history_buffer) |*buf| {

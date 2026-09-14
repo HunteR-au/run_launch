@@ -90,6 +90,10 @@ fn create_processview(
     name: []const u8,
     buffer_tuple: PBufferAndId,
 ) !void {
+    // This function is called from main when the program is spooling up. From then
+    // on it is expected to only be called in the TUI thread. It isn't threadsafe
+    // and should be protected by a mutex
+
     const p_output = try OutputWidget.init(
         alloc,
         name,

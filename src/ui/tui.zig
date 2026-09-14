@@ -97,6 +97,29 @@ const Bindings = struct {
     }
 };
 
+const BufferEntry = struct {
+    id: uuid.UUID,
+    writer: *std.Io.Writer.Allocating,
+};
+const BufferEntries = struct {
+    m: std.Io.Mutex,
+    entries: std.ArrayList(BufferEntry),
+
+    fn append(self: *BufferEntries, io: std.Io, alloc: std.mem.Allocator, entry: BufferEntry) !void {
+        try self.m.lockUncancelable(io);
+        defer self.m.unlock(io);
+
+        try self.entries.append(alloc, entry);
+    }
+
+    fn find(self: *BufferEntries, id: uuid.UUID) ?*std.Io.Writer.Allocating {
+        for (self.entires.items) |e| {
+            if (std.meta.eql(e.id, id)) return e.writer;
+        }
+        return null;
+    }
+};
+
 const TuiApp = struct {
     app_model: AppModel,
     // modelview: *view.View,
@@ -113,6 +136,7 @@ const TuiApp = struct {
     mode: ModelState = .main,
     prev_mode: ModelState = .main,
     start_script: ?[]const u8 = null,
+    inputs: .{ .m = .init, .entries = .empty },
     // views: vxfw.Surface,
     // views -> view-group -> tab-group && output-group
 
@@ -674,39 +698,27 @@ fn run_tui(io: Io, alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner,
 
     if (builtin.mode == .Debug) {
         // Set up output views and process buffers for debugging
-        _ = try processviewmgr.create_process_view(
-            io,
-            alloc,
-            &model.app_model,
-            "default_output",
-        );
+        {
+            // As we are starting the TUI, the executor (in the main thread)
+            // is spooling up programs with this lock.
+            // This is hacking in thread safety just for debug
+            model.app_model.executor.m.lockUncancelable(io);
+            defer model.app_model.executor.m.unlock(io);
 
-        _ = try processviewmgr.create_process_view(
-            io,
-            alloc,
-            &model.app_model,
-            "default_output2",
-        );
+            _ = try processviewmgr.create_process_view(
+                io,
+                alloc,
+                &model.app_model,
+                "default_output",
+            );
 
-        //const output_view = try OutputView.init(alloc);
-        //const output_view2 = try OutputView.init(alloc);
-        //try model.app_model.model_view.add_outputview(output_view, 0);
-        //try model.app_model.model_view.add_outputview(output_view2, 1);
-        //
-        //const b1 = try model.app_model.buffers.create_process_buffer(io, alloc);
-        //const b2 = try model.app_model.buffers.create_process_buffer(io, alloc);
-        //try output_view.add_output(try OutputWidget.init(
-        //    alloc,
-        //    "default_output",
-        //    b1.id,
-        //    b1.buffer,
-        //));
-        //try output_view.add_output(try OutputWidget.init(
-        //    alloc,
-        //    "default_output2",
-        //    b2.id,
-        //    b2.buffer,
-        //));
+            _ = try processviewmgr.create_process_view(
+                io,
+                alloc,
+                &model.app_model,
+                "default_output2",
+            );
+        }
     }
 
     defer arena.deinit();
@@ -788,8 +800,12 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 
 pub fn pushLogging(io: Io, alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []const u8) std.mem.Allocator.Error!void {
     _ = alloc;
+    //_ = io;
 
     if (keep_running.load(.seq_cst)) {
+        //if (model.inputs.find(process_id)) |entry| {
+        //    entry.writer.writeAll(buffer) catch return error.OutOfMemory;
+        //}
         model.app_model.buffers.process_buffers.m.lockUncancelable(io);
         defer model.app_model.buffers.process_buffers.m.unlock(io);
 
@@ -803,7 +819,15 @@ pub fn pushLogging(io: Io, alloc: std.mem.Allocator, process_id: uuid.UUID, buff
     }
 }
 
+// redesign pushLogging/util_read_loop to make the reader loops do less work
+pub fn pullLogging(io: Io, alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []const u8) std.mem.Allocator.Error!void {}
+
 // TODOs
+
+// ---- priority list for now ----
+// 1) update config and config structs to my system
+// 2) wire in the scripting system
+// 3) normalize newlines for merge keep/hide bug
 
 // config that runs mutiple programs
 // script system for config
@@ -815,6 +839,10 @@ pub fn pushLogging(io: Io, alloc: std.mem.Allocator, process_id: uuid.UUID, buff
 // : merge test ~0 ~1
 // test:
 // TODO - I don't have the ability to run a cmd on ALL yet
+
+// TODO - write logic for postTask. I'm thinking post tasks should be outputted to the main tty
+// question is what if I kill a single output, or it dies
+// should postTasks wait... that would make restart harder
 
 // create a panel in the middle of the screen to list all buffers/view
 // design: create a widget around optionPicker
@@ -848,13 +876,10 @@ pub fn pushLogging(io: Io, alloc: std.mem.Allocator, process_id: uuid.UUID, buff
 //      - control running post tasks with UI still running
 
 // TODO: cmd error feedback
-// TODO: f1 to open up a vikew_picker screen (or generic ui selection screen)
 // TODO color title for selected outputview
-// TODO make tabs
 // TODO: report errors when processes die
 //
 // TODO: get text selection, copy, paste working
-// TODO: create a command to run another process
 // TODO: be able to grow/shrink outputviews
 // TODO: add grid views instead of columns
 // TODO: be able to set on/off/hover line numbers
@@ -878,13 +903,6 @@ pub fn pushLogging(io: Io, alloc: std.mem.Allocator, process_id: uuid.UUID, buff
 //  - same for keep line
 //  - FOUND OUT WHY - its because the sep is being treated as \r\n not \n
 //          but the render only uses \n
-
-// OOB - looks like a race condition:
-// TODO: fix all accesses to filtered_buffer and buffer that skip the mutex call!!
-//  in self.line_to_row.callback(...)
-//  in outputwidget.getLineNumberViaRow(text_row)
-//  in getLinesIndexFromOffset(ofs)
-//  in linebuffer.getLines()
 
 // sounds like a corruption bug via a race condition
 //      - looks like I'm bypassing the mutex in a process buffer
