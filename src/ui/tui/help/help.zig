@@ -88,6 +88,11 @@ pub fn getHelpString() []const u8 {
     \\
     \\      - toggle focused output lines on or off OR
     \\          set for all outputs
+    \\
+    \\wrap {--all on|off}
+    \\
+    \\      - toggle soft wrapping of long lines for the focused output OR
+    \\          set for all outputs
     \\merge view_name { --all | { ~m ... ~n } }
     \\
     \\      - merge the text of multiple views together sorted via the 

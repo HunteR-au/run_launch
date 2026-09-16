@@ -28,6 +28,8 @@ pub fn MultiStyleText(comptime StyleSource: type) type {
         softwrap: bool = true,
         overflow: enum { ellipsis, clip } = .ellipsis,
         width_basis: enum { parent, longest_line } = .longest_line,
+        /// Stop after this many rows (keeps the surface and the scroll offsets bounded).
+        max_rows: u16 = std.math.maxInt(u16),
 
         const Text = @This();
 
@@ -79,9 +81,9 @@ pub fn MultiStyleText(comptime StyleSource: type) type {
             var style_cursor: usize = 0;
             var row: u16 = 0;
             if (self.softwrap) {
-                var iter = SoftwrapIterator.init(self.text, ctx);
+                var iter = SoftwrapIterator.init(self.text, self.wrapContext(ctx));
                 while (iter.next()) |line| {
-                    if (row >= container_size.height) break;
+                    if (row >= container_size.height or row >= self.max_rows) break;
                     defer row += 1;
 
                     // `line.offset` is the byte offset of line.bytes[0] within self.text, which
@@ -133,7 +135,7 @@ pub fn MultiStyleText(comptime StyleSource: type) type {
             } else {
                 var line_iter: LineIterator = .{ .buf = self.text };
                 while (line_iter.next()) |line| {
-                    if (row >= container_size.height) break;
+                    if (row >= container_size.height or row >= self.max_rows) break;
                     defer row += 1;
 
                     const row_offset = line_iter.last_start;
@@ -189,14 +191,22 @@ pub fn MultiStyleText(comptime StyleSource: type) type {
             return surface.trimHeight(@max(row, ctx.min.height));
         }
 
+        /// Inside a `ScrollView` the child gets no maximum width (`max.width == null`), which
+        /// would disable wrapping. Wrap at the minimum width instead: the scroll view sets it to
+        /// the viewport width.
+        fn wrapContext(self: *const Text, ctx: vxfw.DrawContext) vxfw.DrawContext {
+            if (!self.softwrap or ctx.max.width != null) return ctx;
+            return ctx.withConstraints(ctx.min, .{ .width = @max(ctx.min.width, 1), .height = ctx.max.height });
+        }
+
         /// Determines the container size by finding the widest line in the viewable area
         fn findContainerSize(self: Text, ctx: vxfw.DrawContext) vxfw.Size {
             var row: u16 = 0;
             var max_width: u16 = ctx.min.width;
             if (self.softwrap) {
-                var iter = SoftwrapIterator.init(self.text, ctx);
+                var iter = SoftwrapIterator.init(self.text, self.wrapContext(ctx));
                 while (iter.next()) |line| {
-                    if (ctx.max.outsideHeight(row))
+                    if (ctx.max.outsideHeight(row) or row >= self.max_rows)
                         break;
 
                     defer row += 1;
@@ -205,7 +215,7 @@ pub fn MultiStyleText(comptime StyleSource: type) type {
             } else {
                 var line_iter: LineIterator = .{ .buf = self.text };
                 while (line_iter.next()) |line| {
-                    if (ctx.max.outsideHeight(row))
+                    if (ctx.max.outsideHeight(row) or row >= self.max_rows)
                         break;
                     const line_width: u16 = @truncate(ctx.stringWidth(line));
                     defer row += 1;
@@ -321,7 +331,9 @@ pub fn MultiStyleText(comptime StyleSource: type) type {
                                 while (iter.next()) |item| {
                                     const grapheme = item.bytes(word);
                                     const w = self.ctx.stringWidth(grapheme);
-                                    if (cur_width + w > max) {
+                                    // a grapheme wider than the whole row is still consumed
+                                    // when the row is empty, so every row makes progress
+                                    if (cur_width + w > max and cur_width > 0) {
                                         const end = self.index;
                                         return .{ .width = cur_width, .bytes = self.line[start..end], .offset = offset };
                                     }
@@ -354,4 +366,95 @@ pub fn MultiStyleText(comptime StyleSource: type) type {
             }
         };
     };
+}
+
+const testing = std.testing;
+
+const NoStyles = struct {
+    pub fn styleAt(_: *const NoStyles, _: *usize, _: usize) ?vaxis.Style {
+        return null;
+    }
+};
+
+/// Collects the row -> byte offset reports of a draw.
+const RowLog = struct {
+    offsets: std.ArrayList(usize) = .empty,
+
+    fn record(ptr: *anyopaque, row: usize, ofs: usize) Allocator.Error!void {
+        const self: *RowLog = @ptrCast(@alignCast(ptr));
+        std.debug.assert(row == self.offsets.items.len); // rows are reported in order
+        try self.offsets.append(testing.allocator, ofs);
+    }
+};
+
+const TestText = MultiStyleText(NoStyles);
+
+/// Draws `text` the way a `ScrollView` child sees it: a minimum width and no maximum width.
+fn drawInScrollView(arena: Allocator, log: *RowLog, text: []const u8, softwrap: bool, min_width: u16, max_rows: u16) !vxfw.Surface {
+    vxfw.DrawContext.init(.unicode);
+    const styles: NoStyles = .{};
+    const widget: TestText = .{
+        .text = text,
+        .styles = &styles,
+        .softwrap = softwrap,
+        .max_rows = max_rows,
+        .cb_ptr = log,
+        .cb_buffer_offset_at_row = RowLog.record,
+    };
+    const ctx: vxfw.DrawContext = .{
+        .arena = arena,
+        .min = .{ .width = min_width, .height = 0 },
+        .max = .{ .width = null, .height = null },
+        .cell_size = .{ .width = 10, .height = 20 },
+    };
+    return widget.draw(ctx);
+}
+
+const sample_text = "aaaa bbbb cccc\nd\n\ne";
+
+test "softwrap inside a scroll view wraps at the minimum width and reports row offsets" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var log: RowLog = .{};
+    defer log.offsets.deinit(testing.allocator);
+
+    const surf = try drawInScrollView(arena.allocator(), &log, sample_text, true, 10, std.math.maxInt(u16));
+    try testing.expectEqual(10, surf.size.width);
+    try testing.expectEqual(5, surf.size.height);
+    try testing.expectEqualSlices(usize, &.{ 0, 10, 15, 17, 18 }, log.offsets.items);
+}
+
+test "without softwrap lines are not broken and the surface is as wide as the longest line" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var log: RowLog = .{};
+    defer log.offsets.deinit(testing.allocator);
+
+    const surf = try drawInScrollView(arena.allocator(), &log, sample_text, false, 10, std.math.maxInt(u16));
+    try testing.expectEqual(14, surf.size.width);
+    try testing.expectEqual(4, surf.size.height);
+    try testing.expectEqualSlices(usize, &.{ 0, 15, 17, 18 }, log.offsets.items);
+}
+
+test "a grapheme wider than the viewport still makes progress" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var log: RowLog = .{};
+    defer log.offsets.deinit(testing.allocator);
+
+    // two double-width CJK graphemes, three bytes each, in a one-column viewport
+    const surf = try drawInScrollView(arena.allocator(), &log, "漢字", true, 1, std.math.maxInt(u16));
+    try testing.expectEqual(2, surf.size.height);
+    try testing.expectEqualSlices(usize, &.{ 0, 3 }, log.offsets.items);
+}
+
+test "max_rows bounds the rendered rows" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var log: RowLog = .{};
+    defer log.offsets.deinit(testing.allocator);
+
+    const surf = try drawInScrollView(arena.allocator(), &log, "a\nb\nc", true, 10, 2);
+    try testing.expectEqual(2, surf.size.height);
+    try testing.expectEqualSlices(usize, &.{ 0, 2 }, log.offsets.items);
 }

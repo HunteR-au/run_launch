@@ -55,6 +55,8 @@ filter_ids: std.ArrayList(Filter.HandleId),
 reviewer_ids: std.ArrayList(Reviewer.HandleId),
 is_focused: bool = false,
 show_lines: bool = true,
+/// soft-wrap long lines at the viewport width (off: horizontal scrolling)
+wrap_lines: bool = false,
 
 const UnfoldHandlerData = .{
     .event_str = "unfilter",
@@ -120,6 +122,11 @@ const ShowLinesHandlerData = .{
     .event_str = "lines",
     .arg_description = "{--all on|off}",
     .handle = handleShowLinesCmd,
+};
+const WrapHandlerData = .{
+    .event_str = "wrap",
+    .arg_description = "{--all on|off}",
+    .handle = handleWrapCmd,
 };
 const DumpBufferHandlerData = .{
     .event_str = "dump",
@@ -583,35 +590,50 @@ pub fn setupViaUiconfig(
     try self.installColorReviewer(pairs.items);
 }
 
+const ToggleArgs = struct { all: bool = false, requested: ?bool = null };
+
+/// Parses `[--all] [on|off]` for the toggle commands; null when an argument is not recognised.
+fn parseToggleArgs(arg_array: []const []const u8) ?ToggleArgs {
+    var result: ToggleArgs = .{};
+    for (arg_array) |arg| {
+        if (std.mem.eql(u8, arg, "--all")) {
+            result.all = true;
+        } else if (std.mem.eql(u8, arg, "on")) {
+            result.requested = true;
+        } else if (std.mem.eql(u8, arg, "off")) {
+            result.requested = false;
+        } else {
+            return null;
+        }
+    }
+    return result;
+}
+
 fn handleShowLinesCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
 
     const arg_array = try self.parseArgs(args);
     defer self.freeArgs(arg_array);
-
-    var b_all_flag = false;
-    var requested: ?bool = null;
-    for (arg_array) |arg| {
-        if (std.mem.eql(u8, arg, "--all")) {
-            b_all_flag = true;
-        } else if (std.mem.eql(u8, arg, "on")) {
-            requested = true;
-        } else if (std.mem.eql(u8, arg, "off")) {
-            requested = false;
-        } else {
-            // an invalid argument
-            return;
-        }
-    }
+    const toggle = parseToggleArgs(arg_array) orelse return;
 
     // Without --all only the focused output changes
-    if (!b_all_flag and !self.is_focused) return;
+    if (!toggle.all and !self.is_focused) return;
 
-    if (requested) |value| {
-        self.show_lines = value;
-    } else {
-        self.show_lines = !self.show_lines;
-    }
+    self.show_lines = toggle.requested orelse !self.show_lines;
+}
+
+fn handleWrapCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @ptrCast(@alignCast(listener));
+
+    const arg_array = try self.parseArgs(args);
+    defer self.freeArgs(arg_array);
+    const toggle = parseToggleArgs(arg_array) orelse return;
+
+    // Without --all only the focused output changes
+    if (!toggle.all and !self.is_focused) return;
+
+    self.wrap_lines = toggle.requested orelse !self.wrap_lines;
+    if (self.widget_ref) |widget| widget.onWrapToggled();
 }
 
 fn handleDumpCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
@@ -794,6 +816,7 @@ pub fn subscribeHandlersToCmd(self: *Output, cmd: *Cmd) !void {
         &JumpHandlerData,
         &InfoHandlerData,
         &ShowLinesHandlerData,
+        &WrapHandlerData,
         &DumpBufferHandlerData,
     };
 

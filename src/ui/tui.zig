@@ -895,10 +895,11 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 // 1) update config and config structs to my system
 // 2) wire in the scripting system
 // 3) normalize newlines for merge keep/hide bug (done)
-// 4) wrapped line mode
+// 4) wrapped line mode (vibed)
 // 5) match line mode where waits for some process condition (exit 0) or string match on last line or any line and exits if success
 // 6) be able to remove merged views,
 // 7) kill/hide views backed by a process
+// 8) consider what to do about character controls....not sure atm
 
 // config that runs mutiple programs
 // script system for config

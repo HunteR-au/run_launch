@@ -4,10 +4,11 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 
 const LineNumbersWidget = @import("linenumbers.zig").LineNumbersWidget;
+const RowInfo = @import("linenumbers.zig").RowInfo;
 
 pub const LinesAndTextWidget = struct {
     const LineToRow = struct {
-        callback: *const fn (ptr: *anyopaque, row: usize) ?usize,
+        callback: *const fn (ptr: *anyopaque, row: usize) ?RowInfo,
         ptr: *anyopaque,
     };
 
@@ -58,8 +59,8 @@ pub const LinesAndTextWidget = struct {
         // populate the lines values for the lines widget
         self.lines.?.reset();
         for (0..height) |row| {
-            if (self.line_to_row.callback(self.line_to_row.ptr, row)) |line_num| {
-                try self.lines.?.addLine(row, line_num + line_num_offset);
+            if (self.line_to_row.callback(self.line_to_row.ptr, row)) |info| {
+                try self.lines.?.addLine(row, info.line + line_num_offset, info.is_start);
             }
         }
 

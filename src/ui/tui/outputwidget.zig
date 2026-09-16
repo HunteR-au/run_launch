@@ -9,7 +9,9 @@ const vxfw = vaxis.vxfw;
 const Border = vxfw.Border;
 const ScrollBar = vxfw.ScrollBars;
 const ScrollView = vxfw.ScrollView;
-const LineNumbers = @import("widgets/linenumbers.zig").LineNumbersWidget;
+const linenumbers_mod = @import("widgets/linenumbers.zig");
+const LineNumbers = linenumbers_mod.LineNumbersWidget;
+pub const RowInfo = linenumbers_mod.RowInfo;
 const LinesAndTextWidget = @import("widgets/linesandtext.zig").LinesAndTextWidget;
 const UUID = utils.uuid.UUID;
 
@@ -27,6 +29,32 @@ const UnfocusedBorder: vaxis.Style = .{ .fg = .{ .rgb = .{ 255, 255, 255 } } };
 /// The vaxis scroll helpers take a `u8`; clamp instead of truncating.
 fn clampU8(n: anytype) u8 {
     return @intCast(@min(n, std.math.maxInt(u8)));
+}
+
+/// Rows rendered for a wrapped window are capped so the surface (`u16` rows) and the scroll
+/// view's `i17` offsets stay far from overflow even with pathological line lengths.
+const wrapped_row_cap: u16 = 8192;
+
+/// One rendered text row: the window-relative byte offset of its first grapheme and whether
+/// that offset starts a line (false for the continuation rows of a wrapped line).
+pub const RowEntry = struct { ofs: usize, is_start: bool };
+const RowMap = std.AutoHashMapUnmanaged(usize, RowEntry);
+
+/// Rows between the first row of the line shown on `row` and `row` itself.
+fn rowsIntoLine(map: *const RowMap, row: usize) usize {
+    var r = row;
+    while (true) {
+        const entry = map.get(r) orelse return row - r;
+        if (entry.is_start or r == 0) return row - r;
+        r -= 1;
+    }
+}
+
+/// True when `row` is the last row of the line shown on it: the next row is absent or starts
+/// another line.
+fn rowEndsLine(map: *const RowMap, row: usize) bool {
+    const next = map.get(row + 1) orelse return true;
+    return next.is_start;
 }
 
 pub const OutputWidget = struct {
@@ -49,8 +77,8 @@ pub const OutputWidget = struct {
     /// `peek().change` to decide whether a redraw is needed.
     last_drawn_change: ?u64 = null,
 
-    /// Key: rendered row, Value: window-relative byte offset of the first grapheme on it.
-    row_offsets: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+    /// Key: rendered row of the text child (not the viewport), Value: see `RowEntry`.
+    row_offsets: RowMap = .empty,
     highest_row: ?usize = null,
 
     pub fn init(
@@ -252,12 +280,18 @@ pub const OutputWidget = struct {
         try self.jump_output_to_line(self.window.last_draw.process_buffer_num_lines);
     }
 
+    /// Whole lines visible on the last frame, less one so a page keeps one line of overlap.
+    /// Counted in lines, not rows: with wrapping a screen holds fewer lines than rows.
+    fn pageLines(self: *const OutputWidget) usize {
+        return @max(self.window.last_draw.bottom_line -| self.window.last_draw.top_line, 1);
+    }
+
     pub fn pageUp(self: *OutputWidget) !void {
-        self.moveOutputUpLines(@max(self.window.last_draw.rows, 1));
+        self.moveOutputUpLines(self.pageLines());
     }
 
     pub fn pageDown(self: *OutputWidget) !void {
-        self.moveOutputDownLines(@max(self.window.last_draw.rows, 1));
+        self.moveOutputDownLines(self.pageLines());
     }
 
     pub fn jump_output_to_line(self: *OutputWidget, jump_to: usize) !void {
@@ -267,16 +301,21 @@ pub const OutputWidget = struct {
         const first_rendered_line = self.window.last_draw.top_line;
         const last_rendered_line = self.window.last_draw.bottom_line;
 
-        // check if line is already within rendered bounds
-        if (first_rendered_line <= line_num and line_num <= last_rendered_line) {
+        // check if line is already within rendered bounds (a bottom line whose wrapped tail
+        // is cut off does not count)
+        const bottom_visible = if (line_num == last_rendered_line)
+            self.window.last_draw.bottom_line_complete
+        else
+            line_num < last_rendered_line;
+        if (first_rendered_line <= line_num and bottom_visible) {
             return;
         }
 
-        // line is below
-        if (line_num > last_rendered_line) {
+        // line is below (or is the partially visible bottom line)
+        if (line_num >= last_rendered_line) {
             self.removePendingLines();
             self.setStickyScroll(line_num == total_lines);
-            self.moveOutputDownLines(line_num - last_rendered_line);
+            self.moveOutputDownLines(@max(line_num - last_rendered_line, 1));
             return;
         }
 
@@ -307,6 +346,14 @@ pub const OutputWidget = struct {
         self.window.pending_lines = 0;
     }
 
+    /// Called when `wrap_lines` changes: forget any horizontal scroll and re-anchor the window
+    /// on the first visible line at the next draw.
+    pub fn onWrapToggled(self: *OutputWidget) void {
+        self.scroll_bars.scroll_view.scroll.left = 0;
+        self.removePendingLines();
+        self.window.anchor_pending = true;
+    }
+
     /// Called by the text widget for every rendered row with the window-relative byte
     /// offset of the row's first grapheme.
     fn save_rendered_buffer_offset(ptr: *anyopaque, row: usize, offset: usize) std.mem.Allocator.Error!void {
@@ -315,21 +362,31 @@ pub const OutputWidget = struct {
         if (self.highest_row == null or self.highest_row.? < row) {
             self.highest_row = row;
         }
-        try self.row_offsets.put(self.alloc, row, offset);
+        try self.row_offsets.put(self.alloc, row, .{
+            .ofs = offset,
+            .is_start = self.frame.isLineStart(offset),
+        });
     }
 
     // Used as a callback to remove type information for widgets needing to call this
-    fn rowToLineCallback(ptr: *anyopaque, row: usize) ?usize {
+    fn rowToLineCallback(ptr: *anyopaque, row: usize) ?RowInfo {
         var self: *OutputWidget = @ptrCast(@alignCast(ptr));
-        const scroll_offset: usize = @intCast(self.scroll_bars.scroll_view.scroll.vertical_offset);
+        const scroll_offset: usize = @intCast(@max(self.scroll_bars.scroll_view.scroll.vertical_offset, 0));
         const text_row = row + scroll_offset;
-        return self.getLineNumberViaRow(text_row);
+        return self.getRowInfo(text_row);
     }
 
     /// Maps a rendered text row to the absolute filtered line number shown on it.
     pub fn getLineNumberViaRow(self: *OutputWidget, row: usize) ?usize {
-        const ofs = self.row_offsets.get(row) orelse return null;
-        return self.frame.lineAt(ofs);
+        const entry = self.row_offsets.get(row) orelse return null;
+        return self.frame.lineAt(entry.ofs);
+    }
+
+    /// `getLineNumberViaRow` plus whether the row is the first row of that line.
+    pub fn getRowInfo(self: *OutputWidget, row: usize) ?RowInfo {
+        const entry = self.row_offsets.get(row) orelse return null;
+        const line = self.frame.lineAt(entry.ofs) orelse return null;
+        return .{ .line = line, .is_start = entry.is_start };
     }
 
     pub fn draw(self: *OutputWidget, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -374,12 +431,19 @@ pub const OutputWidget = struct {
         const gutter_width = self.lines_widget.calculateGutterWidth(snap.meta.filtered_lines);
 
         // build the MultiStyleText structure
+        const wrap = self.output.wrap_lines;
         self.text = .{
             .text = self.frame.text,
             .styles = &self.frame,
             .cb_ptr = self,
             .cb_buffer_offset_at_row = save_rendered_buffer_offset,
+            .softwrap = wrap,
+            .max_rows = if (wrap) wrapped_row_cap else std.math.maxInt(u16),
         };
+        // wrapped text never needs the horizontal scrollbar row: reclaim it (gutter included)
+        self.scroll_bars.draw_horizontal_scrollbar = !wrap;
+        self.lines_widget.reserve_last_row = !wrap;
+        if (wrap) self.scroll_bars.scroll_view.scroll.left = 0;
 
         const is_focused = self.output.is_focused;
         var border_child: vxfw.SubSurface = undefined;
@@ -445,6 +509,9 @@ const Window = struct {
     last_draw: RenderInfo = .{},
     is_sticky: bool = true,
     pending_lines: i64 = 0,
+    /// Set while following (the viewport is pinned deep inside the window) and on a wrap
+    /// toggle; consumed by `reanchorIfNeeded` on the next non-following frame.
+    anchor_pending: bool = false,
     output: *Output,
 
     const RenderInfo = struct {
@@ -452,6 +519,8 @@ const Window = struct {
         top_line: usize = 0,
         /// last line visible on screen (inclusive)
         bottom_line: usize = 0,
+        /// false when the bottom line is wrapped and its last rows are below the viewport
+        bottom_line_complete: bool = true,
         /// number of text rows the scroll view showed
         rows: usize = 0,
         process_buffer_len: usize = 0,
@@ -471,7 +540,8 @@ const Window = struct {
     // the window is at the bottom of the buffer
     fn isOnBottom(self: *Window) bool {
         if (self.last_draw.process_buffer_num_lines == 0) return true;
-        if (self.last_draw.bottom_line >= self.last_draw.process_buffer_num_lines - 1) return true;
+        if (self.last_draw.bottom_line_complete and
+            self.last_draw.bottom_line >= self.last_draw.process_buffer_num_lines - 1) return true;
         return false;
     }
 
@@ -521,9 +591,27 @@ const Window = struct {
         var last_row = first_row + (rows -| 1);
         if (ow.highest_row) |h| last_row = @min(last_row, h);
         self.last_draw.bottom_line = ow.getLineNumberViaRow(last_row) orelse self.last_draw.top_line;
+        self.last_draw.bottom_line_complete = rowEndsLine(&ow.row_offsets, last_row);
+
+        if (self.is_sticky) self.anchor_pending = true;
+    }
+
+    /// Makes the window top coincide with the viewport top: `top_line` becomes the first
+    /// visible line and the scroll view keeps only the rows inside that line. Needed once rows
+    /// and lines differ (wrapping): scrolling `top_line` then moves exactly the lines at the
+    /// viewport rather than the lines entering the window far above it.
+    fn reanchorIfNeeded(self: *Window) void {
+        if (!self.anchor_pending or self.is_sticky) return;
+        self.anchor_pending = false;
+        const ow = self.output.widget_ref orelse return;
+        const scroll = &ow.scroll_bars.scroll_view.scroll;
+        const first_row: usize = @intCast(@max(scroll.vertical_offset, 0));
+        self.top_line = self.last_draw.top_line;
+        scroll.vertical_offset = @intCast(@min(rowsIntoLine(&ow.row_offsets, first_row), std.math.maxInt(i17)));
     }
 
     pub fn resolvePendingLines(self: *Window) void {
+        self.reanchorIfNeeded();
         switch (self.pending_lines) {
             // moving up, negative number
             std.math.minInt(i64)...-1 => |lines_to_move| {
@@ -587,3 +675,28 @@ const Window = struct {
         self.pending_lines = 0;
     }
 };
+
+test "row map helpers: rows into a wrapped line and line completeness" {
+    const testing = std.testing;
+    var map: RowMap = .empty;
+    defer map.deinit(testing.allocator);
+    // line A on rows 0-2 (wrapped), line B on row 3, line C on rows 4-5
+    try map.put(testing.allocator, 0, .{ .ofs = 0, .is_start = true });
+    try map.put(testing.allocator, 1, .{ .ofs = 10, .is_start = false });
+    try map.put(testing.allocator, 2, .{ .ofs = 20, .is_start = false });
+    try map.put(testing.allocator, 3, .{ .ofs = 30, .is_start = true });
+    try map.put(testing.allocator, 4, .{ .ofs = 40, .is_start = true });
+    try map.put(testing.allocator, 5, .{ .ofs = 50, .is_start = false });
+
+    try testing.expectEqual(0, rowsIntoLine(&map, 0));
+    try testing.expectEqual(2, rowsIntoLine(&map, 2));
+    try testing.expectEqual(0, rowsIntoLine(&map, 3));
+    try testing.expectEqual(1, rowsIntoLine(&map, 5));
+    try testing.expectEqual(0, rowsIntoLine(&map, 9)); // unknown row
+
+    try testing.expect(!rowEndsLine(&map, 0));
+    try testing.expect(rowEndsLine(&map, 2));
+    try testing.expect(rowEndsLine(&map, 3));
+    try testing.expect(!rowEndsLine(&map, 4));
+    try testing.expect(rowEndsLine(&map, 5)); // last row of the surface
+}

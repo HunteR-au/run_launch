@@ -93,8 +93,8 @@ pub const WindowSnapshot = struct {
         return self.line_starts.len -| 1;
     }
 
-    /// Absolute line index of the line containing the window-relative byte offset.
-    pub fn lineAt(self: *const WindowSnapshot, window_ofs: usize) ?usize {
+    /// Window-relative index of the line containing the window-relative byte offset.
+    fn lineIndexAt(self: *const WindowSnapshot, window_ofs: usize) ?usize {
         const count = self.lineCount();
         if (count == 0 or window_ofs >= self.text.len) return null;
         // largest i in [0, count) with line_starts[i] <= window_ofs
@@ -104,7 +104,19 @@ pub const WindowSnapshot = struct {
             const mid = lo + (hi - lo) / 2;
             if (self.line_starts[mid] <= window_ofs) lo = mid else hi = mid;
         }
-        return self.top_line + lo;
+        return lo;
+    }
+
+    /// Absolute line index of the line containing the window-relative byte offset.
+    pub fn lineAt(self: *const WindowSnapshot, window_ofs: usize) ?usize {
+        const idx = self.lineIndexAt(window_ofs) orelse return null;
+        return self.top_line + idx;
+    }
+
+    /// True when the window-relative byte offset is the first byte of a line.
+    pub fn isLineStart(self: *const WindowSnapshot, window_ofs: usize) bool {
+        const idx = self.lineIndexAt(window_ofs) orelse return false;
+        return self.line_starts[idx] == window_ofs;
     }
 
     /// Style at a window-relative byte offset. `cursor` is a hint that makes sequential
@@ -640,6 +652,10 @@ test "snapshotWindow copies the requested lines and clamps" {
     try testing.expectEqual(1, snap.lineAt(0).?);
     try testing.expectEqual(2, snap.lineAt(3).?);
     try testing.expectEqual(null, snap.lineAt(4));
+    try testing.expect(snap.isLineStart(0));
+    try testing.expect(!snap.isLineStart(1));
+    try testing.expect(snap.isLineStart(2));
+    try testing.expect(!snap.isLineStart(4));
 
     const follow = try pb.snapshotWindow(a, .{ .top_line = 0, .max_lines = 2, .follow_bottom = true });
     try testing.expectEqual(1, follow.top_line);
