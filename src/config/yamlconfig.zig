@@ -16,6 +16,7 @@ pub fn parseLaunch(io: Io, alloc: std.mem.Allocator, yaml: Yaml) !Launch {
     errdefer launch.deinit(alloc);
 
     // expect one document
+    if (yaml.docs.items.len == 0) return error.ParseFailure;
     const root = yaml.docs.items[0];
     const root_map = root.asMap() orelse {
         return error.ParseFailure;
@@ -80,6 +81,7 @@ pub fn parseTasks(io: Io, alloc: std.mem.Allocator, yaml: Yaml) !?Tasks {
     errdefer tasks.deinit(alloc);
 
     // expect one document
+    if (yaml.docs.items.len == 0) return error.ParseFailure;
     const root = yaml.docs.items[0];
     const root_map = root.asMap() orelse {
         return error.ParseFailure;
@@ -387,7 +389,7 @@ fn parseConfigEnv(alloc: std.mem.Allocator, value: Yaml.Value) ![]const utils.En
                 envs[i].val = try alloc.dupe(u8, str);
                 errdefer alloc.free(envs[i].val);
             },
-            else => {},
+            else => return error.FieldInvalidType,
         }
     }
     return envs;
@@ -400,4 +402,15 @@ fn copyAndAttemptExpand(io: Io, alloc: std.mem.Allocator, input: []const u8) ![]
         },
         else => return err,
     };
+}
+
+test "parseLaunch: an empty document is a parse error, not a panic" {
+    const alloc = std.testing.allocator;
+    var yaml: Yaml = .{ .source = "" };
+    defer yaml.deinit(alloc);
+    yaml.load(alloc) catch |err| switch (err) {
+        error.ParseFailure => return, // the loader itself already rejects it
+        else => return err,
+    };
+    try std.testing.expectError(error.ParseFailure, parseLaunch(std.testing.io, alloc, yaml));
 }

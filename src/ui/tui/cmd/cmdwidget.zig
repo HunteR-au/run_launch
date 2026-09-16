@@ -134,7 +134,8 @@ pub const CmdWidget = struct {
     pub fn draw(self: *CmdWidget, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const max_size = ctx.max.size();
 
-        const cmdbar_height_origin: i17 = max_size.height - 4;
+        // saturating: a terminal shorter than the cmd bar draws it from row 0
+        const cmdbar_height_origin: i17 = max_size.height -| 4;
 
         const cmdbar_child: vxfw.SubSurface = .{
             .origin = .{ .row = cmdbar_height_origin, .col = 0 },
@@ -142,7 +143,7 @@ pub const CmdWidget = struct {
         };
 
         const hinter_child: vxfw.SubSurface = .{
-            .origin = .{ .row = max_size.height - 1, .col = 0 },
+            .origin = .{ .row = max_size.height -| 1, .col = 0 },
             .surface = try self.hinter_view.draw(ctx),
         };
 

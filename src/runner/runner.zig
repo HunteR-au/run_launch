@@ -208,7 +208,8 @@ fn launchConfig(
     config: *const LaunchConfiguration,
 ) !*ProcIngest {
     // assume that the type is set
-    const runner_type = std.meta.stringToEnum(RunnerType, config.type.?) orelse {
+    const type_name = config.type orelse return error.InvalidChoice;
+    const runner_type = std.meta.stringToEnum(RunnerType, type_name) orelse {
         return error.InvalidChoice;
     };
 

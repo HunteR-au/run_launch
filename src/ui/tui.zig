@@ -894,7 +894,11 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 // ---- priority list for now ----
 // 1) update config and config structs to my system
 // 2) wire in the scripting system
-// 3) normalize newlines for merge keep/hide bug
+// 3) normalize newlines for merge keep/hide bug (done)
+// 4) wrapped line mode
+// 5) match line mode where waits for some process condition (exit 0) or string match on last line or any line and exits if success
+// 6) be able to remove merged views,
+// 7) kill/hide views backed by a process
 
 // config that runs mutiple programs
 // script system for config
@@ -921,8 +925,6 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 //  IDEA: allow viewer to be shown when cmd up (maybe a stack for the tui mode...)
 //  TODO: need to think how to display views and buffers a little more
 
-// create a wrapped line mode
-
 // create a script system to run cmds when run_launch starts
 
 // update the config + executor to allow for multiple programs to run
@@ -932,9 +934,6 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 
 // create option to render the tail
 //  - this is going to be kinda complicated
-
-// - fix the clean up management around processbuffers
-// - I think its time the model has a init and deinit
 
 // ADD reference to the executor to the TUI so that:
 //      - can call run on config names (DONE)
@@ -971,14 +970,7 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 //  - FOUND OUT WHY - its because the sep is being treated as \r\n not \n
 //          but the render only uses \n
 
-// sounds like a corruption bug via a race condition
-//      - looks like I'm bypassing the mutex in a process buffer
-//      - also looks like its more likely to happen with a merge
-
 // ScrollBars now has a bug in handleCapture new_view_cl_start: u32 = @intFromFloat(@ceil(new_view_col_start_f))
-
-// tasks child.wait() closes pipes
-// need to refactor the wait to not close pipes until process closed and piped emptied
 
 // TODO parse ui config in TUI
 // ---> options

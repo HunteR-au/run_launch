@@ -565,6 +565,11 @@ test "store: merge orders by sequence, follows live parents and survives parent 
 test "store: unknown parent in merge reports a failure event and creates nothing" {
     const alloc = testing.allocator;
     const io = testing.io;
+    // The failure below is expected; keep its warning out of the test output (the build
+    // runner shows any stderr from a test binary under a misleading "failed command" line).
+    testing.log_level = .err;
+    defer testing.log_level = .warn;
+
     const store = try IngestStore.init(alloc, io);
     defer store.deinit();
 

@@ -70,6 +70,25 @@ fn copyAndAttemptExpand(io: Io, alloc: std.mem.Allocator, input: []const u8) ![]
     };
 }
 
+/// The string in `value`, or `error.FieldInvalidType` when it is not a JSON string.
+pub fn jsonString(value: std.json.Value) error{FieldInvalidType}![]const u8 {
+    return switch (value) {
+        .string => |str| str,
+        else => error.FieldInvalidType,
+    };
+}
+
+/// `map[key]` as a string; null when the key is absent, an error when it is not a string.
+pub fn jsonOptionalString(map: std.json.ObjectMap, key: []const u8) error{FieldInvalidType}!?[]const u8 {
+    const value = map.get(key) orelse return null;
+    return try jsonString(value);
+}
+
+/// `map[key]` as a string; an error when the key is absent or not a string.
+pub fn jsonRequiredString(map: std.json.ObjectMap, key: []const u8) error{ FieldInvalidType, MissingRequiredField }![]const u8 {
+    return (try jsonOptionalString(map, key)) orelse error.MissingRequiredField;
+}
+
 pub const Compound = struct {
     name: ?[]const u8 = null,
     configurations: ?[][]const u8 = null,
@@ -81,31 +100,44 @@ pub const Compound = struct {
 
     pub fn init(io: Io, allocator: std.mem.Allocator, compoundNode: std.json.Value) !Compound {
         var self = Compound{};
-        const nameobj = compoundNode.object.get("name") orelse {
+        const map = switch (compoundNode) {
+            .object => |o| o,
+            else => return error.FieldInvalidType,
+        };
+
+        const nameobj = map.get("name") orelse {
             return CompoundParsingErrors.NoNameField;
         };
-        self.name = try copyAndAttemptExpand(io, allocator, nameobj.string);
+        self.name = try copyAndAttemptExpand(io, allocator, try jsonString(nameobj));
         errdefer allocator.free(self.name.?);
 
-        const prelaunchtaskObj = compoundNode.object.get("preLaunchTask");
-        if (prelaunchtaskObj) |obj| {
-            self.preLaunchTask = try copyAndAttemptExpand(io, allocator, obj.string);
-            errdefer allocator.free(self.preLaunchTask.?);
+        if (try jsonOptionalString(map, "preLaunchTask")) |str| {
+            self.preLaunchTask = try copyAndAttemptExpand(io, allocator, str);
         } else self.preLaunchTask = null;
+        errdefer if (self.preLaunchTask) |p| allocator.free(p);
 
-        const stopAllObj = compoundNode.object.get("stopAll");
-        if (stopAllObj) |obj| {
-            self.stopAll = obj.bool;
+        if (map.get("stopAll")) |obj| {
+            self.stopAll = switch (obj) {
+                .bool => |b| b,
+                else => return error.FieldInvalidType,
+            };
         } else self.stopAll = null;
 
-        const configurationsObj = compoundNode.object.get("configurations") orelse {
+        const configurationsObj = map.get("configurations") orelse {
             return CompoundParsingErrors.NoConfigurationsField;
         };
-        self.configurations = try allocator.alloc([]const u8, configurationsObj.array.items.len);
-        errdefer allocator.free(self.configurations.?);
-        for (configurationsObj.array.items, 0..) |obj, i| {
-            self.configurations.?[i] = try copyAndAttemptExpand(io, allocator, obj.string);
-            errdefer allocator.free(self.configurations.?[i]);
+        const config_items = switch (configurationsObj) {
+            .array => |a| a.items,
+            else => return error.FieldInvalidType,
+        };
+        self.configurations = try allocator.alloc([]const u8, config_items.len);
+        for (self.configurations.?) |*entry| entry.* = &.{};
+        errdefer {
+            for (self.configurations.?) |entry| if (entry.len > 0) allocator.free(entry);
+            allocator.free(self.configurations.?);
+        }
+        for (config_items, 0..) |obj, i| {
+            self.configurations.?[i] = try copyAndAttemptExpand(io, allocator, try jsonString(obj));
         }
         return self;
     }
@@ -146,30 +178,28 @@ pub const Launch = struct {
         return task;
     }
 
+    /// Entries without a name are skipped.
     pub fn find_config_by_name(self: *const Launch, name: []const u8) ?*Configuration {
         for (self.configurations) |*config| {
-            if (std.mem.eql(u8, name, config.name.?)) {
+            const config_name = config.name orelse continue;
+            if (std.mem.eql(u8, name, config_name)) {
                 return config;
             }
         }
         return null;
     }
 
+    /// Configurations are searched before compounds. Entries without a name are skipped.
     pub fn find_by_name(self: *const Launch, name: []const u8) ?ConfigOrCompound {
-        var result: ConfigOrCompound = undefined;
-
-        for (self.configurations) |*config| {
-            if (std.mem.eql(u8, name, config.name.?)) {
-                result = .{ .config = config };
-                return result;
-            }
+        if (self.find_config_by_name(name)) |config| {
+            return .{ .config = config };
         }
 
         if (self.compounds) |compounds| {
             for (compounds) |*compound| {
-                if (std.mem.eql(u8, name, compound.name.?)) {
-                    result = .{ .compound = compound };
-                    return result;
+                const compound_name = compound.name orelse continue;
+                if (std.mem.eql(u8, name, compound_name)) {
+                    return .{ .compound = compound };
                 }
             }
         }
@@ -195,3 +225,29 @@ pub const Launch = struct {
         allocator.free(self.*.configurations);
     }
 };
+
+test "find_by_name skips nameless entries and prefers configurations over compounds" {
+    var configs = [_]Configuration{
+        .{}, // nameless
+        .{ .name = "b", .type = "python", .request = "launch" },
+    };
+    const compounds = [_]Compound{
+        .{}, // nameless
+        .{ .name = "c" },
+        .{ .name = "b" }, // shadowed by the configuration of the same name
+    };
+    const launch: Launch = .{
+        .arena = undefined,
+        .version = "0.2.0",
+        .configurations = &configs,
+        .compounds = &compounds,
+    };
+
+    try std.testing.expectEqual(&configs[1], launch.find_config_by_name("b"));
+    try std.testing.expectEqual(null, launch.find_config_by_name("c"));
+    try std.testing.expectEqual(null, launch.find_config_by_name("zzz"));
+
+    try std.testing.expectEqual(&configs[1], launch.find_by_name("b").?.config);
+    try std.testing.expectEqual(&compounds[1], launch.find_by_name("c").?.compound);
+    try std.testing.expectEqual(null, launch.find_by_name("zzz"));
+}

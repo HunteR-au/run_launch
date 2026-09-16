@@ -14,77 +14,92 @@ const Tasks = @import("task.zig").Tasks;
 const expand = @import("expand.zig");
 
 pub fn parseLaunch(io: Io, alloc: Alloc, root_object: JsonValue) !Launch {
-    var results: Launch = undefined;
+    var results: Launch = try .init(alloc);
+    errdefer results.deinit(alloc);
 
-    const version_str = root_object.object.get("version").?.string;
-    results.version = try alloc.dupe(u8, version_str);
-    errdefer alloc.free(results.version);
+    const root = try expectObject(root_object);
 
-    const config = root_object.object.get("configurations").?;
-    if (config.array.items.len > 0) {
-        var allocated_configs: []Configuration = try alloc.alloc(Configuration, config.array.items.len);
+    results.version = try alloc.dupe(u8, try launch_.jsonRequiredString(root, "version"));
 
-        for (config.array.items, 0..) |item, i| {
-            // Need to initialize the fields
-            allocated_configs[i] = Configuration{};
+    const config = root.get("configurations") orelse return error.MissingRequiredField;
+    const config_items = switch (config) {
+        .array => |a| a.items,
+        else => return error.FieldInvalidType,
+    };
+    if (config_items.len > 0) {
+        const allocated_configs: []Configuration = try alloc.alloc(Configuration, config_items.len);
+        // Initialise every entry and hand the array to `results` right away, so the
+        // `errdefer deinit` above frees whatever was parsed when a later entry fails.
+        for (allocated_configs) |*c| c.* = .{};
+        results.configurations = allocated_configs;
 
-            // non-optional values: Allocate strings for field and free if anything goes wrong
+        for (config_items, 0..) |item, i| {
+            const obj = try expectObject(item);
+
+            // non-optional values
             const fields = comptime .{ "name", "type", "request" };
-            const strings = .{
-                item.object.get("name").?.string,
-                item.object.get("type").?.string,
-                item.object.get("request").?.string,
-            };
-            inline for (fields, 0..) |fieldname, j| {
-                @field(allocated_configs[i], fieldname) = try copyAndAttemptExpand(io, alloc, strings[j]);
-                errdefer if (@field(allocated_configs[i], fieldname)) |x| alloc.free(x);
+            inline for (fields) |fieldname| {
+                const str = try launch_.jsonRequiredString(obj, fieldname);
+                @field(allocated_configs[i], fieldname) = try copyAndAttemptExpand(io, alloc, str);
             }
 
             const optionalfields = comptime .{ "program", "module", "preLaunchTask", "postDebugTask", "consoleTitle", "console", "envFile" };
             inline for (optionalfields) |fieldname| {
-                if (item.object.get(fieldname)) |value| {
-                    @field(allocated_configs[i], fieldname) = try copyAndAttemptExpand(io, alloc, value.string);
-                }
-                errdefer {
-                    if (@field(allocated_configs[i], fieldname)) |p| alloc.free(p);
+                if (try launch_.jsonOptionalString(obj, fieldname)) |value| {
+                    @field(allocated_configs[i], fieldname) = try copyAndAttemptExpand(io, alloc, value);
                 }
             }
 
-            if (item.object.get("args")) |a| {
-                allocated_configs[i].args = try utils.parse_config_args(alloc, a.array);
-                // NOTE: no error defer - will cause mem bug - probably should create a deinit instead of writing the code here
-            }
+            if (obj.get("args")) |a| switch (a) {
+                .array => |arr| allocated_configs[i].args = try utils.parse_config_args(alloc, arr),
+                else => return error.FieldInvalidType,
+            };
 
-            // Parse the env arguments if they are present
-            if (item.object.get("env")) |e| {
-                allocated_configs[i].env = try utils.parse_config_env(alloc, e.object);
-                // NOTE: no error defer - will cause mem bug - probably should create a deinit instead of writing the code here
-            }
+            if (obj.get("env")) |e| switch (e) {
+                .object => |map| allocated_configs[i].env = try utils.parse_config_env(alloc, map),
+                else => return error.FieldInvalidType,
+            };
 
-            if (item.object.get("connect")) |connect| {
-                const host_str = connect.object.get("host").?.string;
+            if (obj.get("connect")) |connect| {
+                const connect_map = try expectObject(connect);
+                const host_str = try launch_.jsonRequiredString(connect_map, "host");
                 allocated_configs[i].connect.host = try copyAndAttemptExpand(io, alloc, host_str);
-                errdefer if (allocated_configs[i].connect.host) |t| alloc.free(t);
-                allocated_configs[i].connect.port = @intCast(connect.object.get("port").?.integer);
+                const port = connect_map.get("port") orelse return error.MissingRequiredField;
+                allocated_configs[i].connect.port = switch (port) {
+                    .integer => |n| std.math.cast(u16, n) orelse return error.InvalidPort,
+                    else => return error.FieldInvalidType,
+                };
             }
         }
-        results.configurations = allocated_configs;
     }
 
-    if (root_object.object.get("compounds")) |compoundsObj| {
-        const compounds = try alloc.alloc(Compound, compoundsObj.array.items.len);
-        for (compoundsObj.array.items, 0..) |compoundObj, j| {
-            compounds[j] = try Compound.init(io, alloc, compoundObj);
-            errdefer compounds[j].deinit(alloc);
-        }
+    if (root.get("compounds")) |compoundsObj| {
+        const compound_items = switch (compoundsObj) {
+            .array => |a| a.items,
+            else => return error.FieldInvalidType,
+        };
+        const compounds = try alloc.alloc(Compound, compound_items.len);
+        // As above: attach before parsing so a failing entry frees the ones before it.
+        for (compounds) |*c| c.* = .{};
         results.compounds = compounds;
+
+        for (compound_items, 0..) |compoundObj, j| {
+            compounds[j] = try Compound.init(io, alloc, compoundObj);
+        }
     } else results.compounds = null;
 
     return results;
 }
 
+fn expectObject(value: JsonValue) error{FieldInvalidType}!std.json.ObjectMap {
+    return switch (value) {
+        .object => |o| o,
+        else => error.FieldInvalidType,
+    };
+}
+
 pub fn parseTasks(io: Io, alloc: Alloc, root_object: JsonValue) !?Tasks {
-    std.debug.assert(root_object == .object);
+    const map = try expectObject(root_object);
 
     var tasks: Tasks = .init();
     errdefer tasks.deinit(alloc);
@@ -94,8 +109,6 @@ pub fn parseTasks(io: Io, alloc: Alloc, root_object: JsonValue) !?Tasks {
     //errdefer alloc.free(versioncopy);
     //
     //self.version = versioncopy;
-
-    const map = root_object.object;
 
     if (map.get("tasks")) |tasks_value| switch (tasks_value) {
         .array => |list| {
@@ -399,7 +412,7 @@ fn parseConfigEnv(alloc: Alloc, value: JsonValue) ![]const utils.EnvTuple {
                 envs[i].val = try alloc.dupe(u8, str);
                 errdefer alloc.free(envs[i].val);
             },
-            else => {},
+            else => return error.FieldInvalidType,
         }
     }
     return envs;
@@ -412,4 +425,62 @@ fn copyAndAttemptExpand(io: Io, alloc: Alloc, input: []const u8) ![]u8 {
         },
         else => return err,
     };
+}
+
+test "parseLaunch: an empty configurations array yields a fully initialised Launch" {
+    const alloc = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(JsonValue, alloc, "{\"version\": \"0.2.0\", \"configurations\": []}", .{});
+    defer parsed.deinit();
+
+    const launch = try parseLaunch(std.testing.io, alloc, parsed.value);
+    defer launch.deinit(alloc);
+
+    try std.testing.expectEqualStrings("0.2.0", launch.version);
+    try std.testing.expectEqual(0, launch.configurations.len);
+    try std.testing.expectEqual(null, launch.compounds);
+    try std.testing.expectEqual(null, launch.find_by_name("anything"));
+}
+
+test "parseLaunch: an invalid entry fails without leaking what was parsed before it" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\{"version": "0.2.0", "configurations": [
+        \\  {"name": "a", "type": "python", "request": "launch", "args": ["ok", 42]}
+        \\]}
+    ;
+    var parsed = try std.json.parseFromSlice(JsonValue, alloc, src, .{});
+    defer parsed.deinit();
+
+    try std.testing.expectError(error.FieldInvalidType, parseLaunch(std.testing.io, alloc, parsed.value));
+}
+
+
+test "parseLaunch: malformed documents are reported as errors, not panics" {
+    const alloc = std.testing.allocator;
+    const cases = .{
+        .{ error.FieldInvalidType, "[]" },
+        .{ error.MissingRequiredField, "{\"configurations\": []}" },
+        .{ error.FieldInvalidType, "{\"version\": 2, \"configurations\": []}" },
+        .{ error.MissingRequiredField, "{\"version\": \"0.2.0\"}" },
+        .{ error.FieldInvalidType, "{\"version\": \"0.2.0\", \"configurations\": {}}" },
+        .{ error.FieldInvalidType, "{\"version\": \"0.2.0\", \"configurations\": [7]}" },
+        .{ error.MissingRequiredField, "{\"version\": \"0.2.0\", \"configurations\": [{\"type\": \"python\", \"request\": \"launch\"}]}" },
+        .{ error.FieldInvalidType, "{\"version\": \"0.2.0\", \"configurations\": [{\"name\": 1, \"type\": \"python\", \"request\": \"launch\"}]}" },
+        .{ error.FieldInvalidType, "{\"version\": \"0.2.0\", \"configurations\": [{\"name\": \"a\", \"type\": \"python\", \"request\": \"launch\", \"program\": 3}]}" },
+        .{ error.FieldInvalidType, "{\"version\": \"0.2.0\", \"configurations\": [{\"name\": \"a\", \"type\": \"python\", \"request\": \"launch\", \"args\": \"x\"}]}" },
+        .{ error.FieldInvalidType, "{\"version\": \"0.2.0\", \"configurations\": [{\"name\": \"a\", \"type\": \"python\", \"request\": \"launch\", \"env\": []}]}" },
+        .{ error.FieldInvalidType, "{\"version\": \"0.2.0\", \"configurations\": [{\"name\": \"a\", \"type\": \"python\", \"request\": \"launch\", \"connect\": \"h:1\"}]}" },
+        .{ error.MissingRequiredField, "{\"version\": \"0.2.0\", \"configurations\": [{\"name\": \"a\", \"type\": \"python\", \"request\": \"launch\", \"connect\": {\"host\": \"h\"}}]}" },
+        .{ error.FieldInvalidType, "{\"version\": \"0.2.0\", \"configurations\": [{\"name\": \"a\", \"type\": \"python\", \"request\": \"launch\", \"connect\": {\"host\": \"h\", \"port\": \"5678\"}}]}" },
+        .{ error.InvalidPort, "{\"version\": \"0.2.0\", \"configurations\": [{\"name\": \"a\", \"type\": \"python\", \"request\": \"launch\", \"connect\": {\"host\": \"h\", \"port\": 70000}}]}" },
+        .{ error.FieldInvalidType, "{\"version\": \"0.2.0\", \"configurations\": [{\"name\": \"a\", \"type\": \"python\", \"request\": \"launch\"}], \"compounds\": {}}" },
+        .{ error.FieldInvalidType, "{\"version\": \"0.2.0\", \"configurations\": [{\"name\": \"a\", \"type\": \"python\", \"request\": \"launch\"}], \"compounds\": [{\"name\": \"c\", \"stopAll\": \"yes\", \"configurations\": []}]}" },
+        .{ error.FieldInvalidType, "{\"version\": \"0.2.0\", \"configurations\": [{\"name\": \"a\", \"type\": \"python\", \"request\": \"launch\"}], \"compounds\": [{\"name\": \"c\", \"configurations\": [\"a\", 2]}]}" },
+        .{ error.FieldInvalidType, "{\"version\": \"0.2.0\", \"configurations\": [{\"name\": \"a\", \"type\": \"python\", \"request\": \"launch\"}], \"compounds\": [{\"name\": \"ok\", \"configurations\": [\"a\"]}, {\"name\": 5, \"configurations\": []}]}" },
+    };
+    inline for (cases) |case| {
+        var parsed = try std.json.parseFromSlice(JsonValue, alloc, case[1], .{});
+        defer parsed.deinit();
+        try std.testing.expectError(case[0], parseLaunch(std.testing.io, alloc, parsed.value));
+    }
 }

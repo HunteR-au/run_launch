@@ -62,16 +62,14 @@ pub const Tasks = struct {
         }
     }
 
+    /// Tasks without a label are skipped.
     pub fn find_by_label(self: *const Tasks, label: []const u8) ?Task {
-        std.log.debug("find_by_label:\n", .{});
-        if (self.tasks) |tasks| {
-            return for (tasks) |*task| {
-                std.log.debug("find_by_label: {s} : {s}\n", .{ label, task.label.? });
-                if (std.mem.eql(u8, label, task.label.?)) {
-                    break task.*;
-                }
-            } else null;
-        } else return null;
+        const tasks = self.tasks orelse return null;
+        for (tasks) |*task| {
+            const task_label = task.label orelse continue;
+            if (std.mem.eql(u8, label, task_label)) return task.*;
+        }
+        return null;
     }
 };
 
@@ -95,7 +93,8 @@ pub const TaskJson = struct {
     pub fn find_by_label(self: *const TaskJson, label: []const u8) ?Task {
         if (self.*.tasks) |tasks| {
             return for (tasks) |*task| {
-                if (std.mem.eql(u8, label, task.label.?)) {
+                const task_label = task.label orelse continue;
+                if (std.mem.eql(u8, label, task_label)) {
                     break task.*;
                 }
             } else null;
@@ -173,4 +172,16 @@ fn copyAndAttemptExpand(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
         },
         else => return err,
     };
+}
+
+test "Tasks.find_by_label skips tasks without a label" {
+    var task_array = [_]Task{
+        .{ .type = "shell", .command = "echo" }, // no label
+        .{ .label = "build", .type = "shell", .command = "make" },
+    };
+    const tasks: Tasks = .{ .tasks = &task_array };
+
+    try std.testing.expectEqualStrings("make", tasks.find_by_label("build").?.command.?);
+    try std.testing.expectEqual(null, tasks.find_by_label("test"));
+    try std.testing.expectEqual(null, (Tasks{ .tasks = null }).find_by_label("build"));
 }

@@ -127,8 +127,13 @@ pub fn main(init: std.process.Init) !void {
     const launchPath = res.positionals[0].?;
     const taskNameToRun: []const u8 = res.positionals[1].?;
 
-    // parse configuration
-    const config = try parseConfig(io, alloc, launchPath);
+    // parse configuration (`${...}` tokens resolve against the process environment)
+    config_.expand.init_expand(init.environ_map);
+    defer config_.expand.deinit_expand();
+    const config = parseConfig(io, alloc, launchPath) catch |err| {
+        try stdout.print("could not load {s}: {t}\n", .{ launchPath, err });
+        return err;
+    };
 
     // The store owns every buffer; the pump feeds it; the runner produces; the TUI reads
     // snapshots and posts commands.
@@ -149,7 +154,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.debug("first positional arg: {s}\n", .{res.positionals[0].?});
     std.log.debug("version: {s}\n", .{executor.config.version});
-    std.log.debug("first config name: {?s}\n", .{executor.config.configurations[0].name});
+    std.log.debug("configurations: {d}\n", .{executor.config.configurations.len});
 
     var pre_handle: ?runner.WorkHandle = null;
     var run_handle: ?runner.WorkHandle = null;

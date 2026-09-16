@@ -106,7 +106,7 @@ pub const LineNumbersWidget = struct {
         var surf = try vxfw.Surface.init(ctx.arena, self.widget(), size);
 
         // we don't draw anything in the last row of the outputwidget
-        const last_row = size.height - 1;
+        const last_row = size.height -| 1;
 
         // Draw line numbers
         var style = secondary_style;

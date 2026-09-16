@@ -1,16 +1,15 @@
 const std = @import("std");
 const Io = std.Io;
 
-var environ: ?std.process.Environ.Map = null;
+var environ: ?*const std.process.Environ.Map = null;
 
-pub fn init_expand(env: std.process.Environ, alloc: std.mem.Allocator) void {
-    environ = env.createMap(alloc);
+/// `env_map` is borrowed for as long as expansion is used (main owns `init.environ_map`).
+pub fn init_expand(env_map: *const std.process.Environ.Map) void {
+    environ = env_map;
 }
 
 pub fn deinit_expand() void {
-    if (environ) |e| {
-        e.deinit();
-    }
+    environ = null;
 }
 
 pub const ExpandTokens = enum {
@@ -47,18 +46,17 @@ fn expansion_replace(io: Io, alloc: std.mem.Allocator, input: []const u8, begin_
     defer list.deinit(alloc);
 
     const env_prefix = "env:";
-    if (token.len > env_prefix.len) {
-        const actual_token = token[env_prefix.len..token.len];
-        if (environ.?.get(actual_token)) |value| {
-            defer alloc.free(value);
-            try list.appendSlice(alloc, input[0 .. begin_idx - 2]);
-            try list.appendSlice(alloc, value);
-            try list.appendSlice(alloc, input[end_idx + 1 .. input.len]);
-            std.log.debug("result: {s}\n", .{input[0..begin_idx]});
-            std.log.debug("result: {s}\n", .{value});
-            std.log.debug("result: {s}\n", .{input[end_idx..input.len]});
-            return list.toOwnedSlice(alloc);
-        }
+    if (std.mem.startsWith(u8, token, env_prefix)) {
+        const actual_token = token[env_prefix.len..];
+        const value = environ.?.get(actual_token) orelse return ExpandErrors.TokenExpectedEnvVar;
+        // `value` is borrowed from the map: not freed
+        try list.appendSlice(alloc, input[0 .. begin_idx - 2]);
+        try list.appendSlice(alloc, value);
+        try list.appendSlice(alloc, input[end_idx + 1 .. input.len]);
+        std.log.debug("result: {s}\n", .{input[0..begin_idx]});
+        std.log.debug("result: {s}\n", .{value});
+        std.log.debug("result: {s}\n", .{input[end_idx..input.len]});
+        return list.toOwnedSlice(alloc);
     }
 
     const case = std.meta.stringToEnum(ExpandTokens, token) orelse {
@@ -127,47 +125,30 @@ pub fn expand_string(io: Io, alloc: std.mem.Allocator, str: []const u8) ExpandEr
     return ExpandErrors.NoExpansionFound;
 }
 
-test "Expand String" {
-    const builtin = @import("builtin");
+test "expand_string: named tokens and env: prefix resolve from the map" {
     const alloc = std.testing.allocator;
-    const str_with_expand_test1 = "C:\\path\\${workspaceFolder}\\script.py";
-    const str_with_expand_test2 = "C:\\path\\${workspaceFolder}";
-    const str_with_expand_test3 = "${workspaceFolder}\\script.py";
+    const io = std.testing.io;
 
-    switch (builtin.target.os.tag) {
-        .windows => {
-            // zig test .\src\config\expand.zig -lc -target native
-            const windows = @cImport({
-                @cInclude("windows.h");
-            });
+    var map = std.process.Environ.Map.init(alloc);
+    defer map.deinit();
+    try map.put("workspaceFolder", "wow");
+    try map.put("FOO", "bar");
 
-            const name_w = try std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, "workspaceFolder");
-            defer std.heap.page_allocator.free(name_w);
+    init_expand(&map);
+    defer deinit_expand();
 
-            const value_w = try std.unicode.utf8ToUtf16LeAlloc(std.heap.page_allocator, "wow");
-            defer std.heap.page_allocator.free(value_w);
-
-            const success = windows.SetEnvironmentVariableW(
-                @ptrCast(name_w.ptr),
-                @ptrCast(value_w.ptr),
-            );
-
-            if (success == 0) {
-                return error.SetEnvFailed;
-            }
-
-            const expanded_str_test1 = try expand_string(alloc, str_with_expand_test1);
-            const expanded_str_test2 = try expand_string(alloc, str_with_expand_test2);
-            const expanded_str_test3 = try expand_string(alloc, str_with_expand_test3);
-            defer alloc.free(expanded_str_test1);
-            defer alloc.free(expanded_str_test2);
-            defer alloc.free(expanded_str_test3);
-            try std.testing.expectEqualStrings("C:\\path\\wow\\script.py", expanded_str_test1);
-            try std.testing.expectEqualStrings("C:\\path\\wow", expanded_str_test2);
-            try std.testing.expectEqualStrings("wow\\script.py", expanded_str_test3);
-        },
-        else => {
-            // No test for nix as of yet
-        },
+    const cases = .{
+        .{ "C:\\path\\${workspaceFolder}\\script.py", "C:\\path\\wow\\script.py" },
+        .{ "C:\\path\\${workspaceFolder}", "C:\\path\\wow" },
+        .{ "${workspaceFolder}\\script.py", "wow\\script.py" },
+        .{ "x ${env:FOO} y", "x bar y" },
+    };
+    inline for (cases) |case| {
+        const got = try expand_string(io, alloc, case[0]);
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings(case[1], got);
     }
+
+    try std.testing.expectError(ExpandErrors.TokenExpectedEnvVar, expand_string(io, alloc, "${env:MISSING}"));
+    try std.testing.expectError(ExpandErrors.NoExpansionFound, expand_string(io, alloc, "plain"));
 }

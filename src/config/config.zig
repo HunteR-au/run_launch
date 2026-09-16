@@ -8,6 +8,8 @@ const task_ = @import("task.zig");
 const yamlconfig = @import("yamlconfig.zig");
 const jsonconfig = @import("jsonconfig.zig");
 
+pub const expand = @import("expand.zig");
+
 pub const Launch = launch_.Launch;
 pub const LaunchConfiguration = launch_.Configuration;
 pub const Compound = launch_.Compound;
@@ -66,4 +68,12 @@ pub fn parseConfig(io: Io, alloc: Allocator, filepath: []const u8) !Configuratio
             };
         },
     }
+}
+
+test {
+    _ = expand;
+    _ = jsonconfig;
+    _ = yamlconfig;
+    _ = launch_;
+    _ = task_;
 }

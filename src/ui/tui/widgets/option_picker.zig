@@ -70,7 +70,8 @@ pub fn init(alloc: Allocator, title: []const u8, text_list: []const []const u8) 
 
     const items = try alloc.alloc(Items, text_list.len);
     for (items, 0..) |*item, i| {
-        item.text = .{ .text = text_list[i], .style = Nonselected };
+        // whole-struct assignment so the `is_selected` default applies to allocated elements
+        item.* = .{ .text = .{ .text = text_list[i], .style = Nonselected } };
     }
 
     self.* = .{
@@ -302,3 +303,17 @@ const TextBodyWidget = struct {
         }
     }
 };
+
+test "init leaves every item unselected" {
+    const alloc = std.testing.allocator;
+    const texts = [_][]const u8{ "~0: one", "!1: two" };
+
+    const picker = try OptionPicker.init(alloc, "title", &texts);
+    defer picker.deinit(alloc);
+
+    try std.testing.expectEqual(2, picker.items.len);
+    for (picker.items, 0..) |item, i| {
+        try std.testing.expect(!item.is_selected);
+        try std.testing.expectEqualStrings(texts[i], item.text.text);
+    }
+}

@@ -12,38 +12,42 @@ pub const EnvTuple = struct {
 };
 
 pub fn parse_config_args(allocator: Allocator, args_object: std.json.Array) ![]const []const u8 {
-    var args = try allocator.alloc([]u8, args_object.items.len);
-    errdefer allocator.free(args);
-
-    for (args_object.items, 0..) |item, i| {
-        switch (item) {
-            .string => |s| {
-                args[i] = try allocator.dupe(u8, s);
-                errdefer allocator.free(args[i]);
-            },
-            else => {},
-        }
+    const args = try allocator.alloc([]u8, args_object.items.len);
+    // Initialise every slot so the cleanup below is always safe
+    for (args) |*arg| arg.* = &.{};
+    errdefer {
+        for (args) |arg| if (arg.len > 0) allocator.free(arg);
+        allocator.free(args);
     }
+
+    for (args_object.items, 0..) |item, i| switch (item) {
+        .string => |str| args[i] = try allocator.dupe(u8, str),
+        else => return error.FieldInvalidType,
+    };
 
     return args;
 }
 
 pub fn parse_config_env(allocator: Allocator, env_object: std.json.ObjectMap) ![]const EnvTuple {
-    var envs = try allocator.alloc(EnvTuple, env_object.count());
-    errdefer allocator.free(envs);
-
-    for (env_object.keys(), env_object.values(), 0..) |key, val, i| {
-        switch (val) {
-            .string => |s| {
-                const valcopy = try allocator.dupe(u8, s);
-                errdefer allocator.free(valcopy);
-                const keycopy = try allocator.dupe(u8, key);
-                errdefer allocator.free(keycopy);
-                envs[i] = EnvTuple{ .key = keycopy, .val = valcopy };
-            },
-            else => {},
+    const envs = try allocator.alloc(EnvTuple, env_object.count());
+    // Initialise every slot so the cleanup below is always safe
+    for (envs) |*env| env.* = .{ .key = &.{}, .val = &.{} };
+    errdefer {
+        for (envs) |env| {
+            if (env.key.len > 0) allocator.free(env.key);
+            if (env.val.len > 0) allocator.free(env.val);
         }
+        allocator.free(envs);
     }
+
+    for (env_object.keys(), env_object.values(), 0..) |key, val, i| switch (val) {
+        .string => |str| {
+            envs[i].key = try allocator.dupe(u8, key);
+            envs[i].val = try allocator.dupe(u8, str);
+        },
+        else => return error.FieldInvalidType,
+    };
+
     return envs;
 }
 
@@ -255,4 +259,47 @@ test "parseTripleInt" {
     try testing.expectError(error.TooFewParts, parts3);
     try testing.expectError(error.TooManyParts, parts4);
     try testing.expectEqualSlices(u32, &expected5, &parts5);
+}
+
+test "parse_config_args: strings are duped, non-strings are rejected without leaking" {
+    const alloc = testing.allocator;
+
+    var ok = try std.json.parseFromSlice(std.json.Value, alloc, "[\"a\", \"bee\"]", .{});
+    defer ok.deinit();
+    const args = try parse_config_args(alloc, ok.value.array);
+    defer {
+        for (args) |s| alloc.free(s);
+        alloc.free(args);
+    }
+    try testing.expectEqual(2, args.len);
+    try testing.expectEqualStrings("a", args[0]);
+    try testing.expectEqualStrings("bee", args[1]);
+
+    var bad = try std.json.parseFromSlice(std.json.Value, alloc, "[\"ok\", 42]", .{});
+    defer bad.deinit();
+    try testing.expectError(error.FieldInvalidType, parse_config_args(alloc, bad.value.array));
+}
+
+test "parse_config_env: pairs are duped, non-string values are rejected without leaking" {
+    const alloc = testing.allocator;
+
+    var ok = try std.json.parseFromSlice(std.json.Value, alloc, "{\"K\": \"v\", \"E\": \"\"}", .{});
+    defer ok.deinit();
+    const envs = try parse_config_env(alloc, ok.value.object);
+    defer {
+        for (envs) |e| {
+            alloc.free(e.key);
+            alloc.free(e.val);
+        }
+        alloc.free(envs);
+    }
+    try testing.expectEqual(2, envs.len);
+    try testing.expectEqualStrings("K", envs[0].key);
+    try testing.expectEqualStrings("v", envs[0].val);
+    try testing.expectEqualStrings("E", envs[1].key);
+    try testing.expectEqualStrings("", envs[1].val);
+
+    var bad = try std.json.parseFromSlice(std.json.Value, alloc, "{\"K\": \"v\", \"N\": 1}", .{});
+    defer bad.deinit();
+    try testing.expectError(error.FieldInvalidType, parse_config_env(alloc, bad.value.object));
 }
