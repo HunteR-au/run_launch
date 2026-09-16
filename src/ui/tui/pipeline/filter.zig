@@ -1,6 +1,5 @@
+//! A Filter rewrites or drops individual lines. Filters run on the pump thread only.
 const std = @import("std");
-const builtin = @import("builtin");
-const ProcessBuffer = @import("processbuffer.zig").ProcessBuffer;
 
 pub const Filter = @This();
 
@@ -11,102 +10,72 @@ pub const TransformResult = union(enum) {
 pub const TransformLineFn = *const fn (self: *Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.Error!TransformResult;
 
 pub const HandleId = usize;
-var lastId: HandleId = 0;
+var last_id: std.atomic.Value(HandleId) = .init(0);
 
-arena: std.heap.ArenaAllocator,
+/// Owns the filter's payload (regexes, replacement strings). Never reset while the filter lives.
+/// Heap allocated so allocators handed out by `ownedAllocator` stay valid when the Filter
+/// struct itself is moved into the pipeline's list.
+owned: *std.heap.ArenaAllocator,
+/// Scratch memory for one `transform` call; reset by `freeMemory` after every pipeline run.
+scratch: *std.heap.ArenaAllocator,
 id: HandleId,
 transformLine: TransformLineFn,
 data: *anyopaque,
 
-pub fn init(alloc: std.mem.Allocator, data: *anyopaque, transform_func: TransformLineFn) !Filter {
-    lastId = lastId +| 1;
+pub fn init(alloc: std.mem.Allocator, transform_fn: TransformLineFn) std.mem.Allocator.Error!Filter {
+    const owned = try alloc.create(std.heap.ArenaAllocator);
+    errdefer alloc.destroy(owned);
+    owned.* = std.heap.ArenaAllocator.init(alloc);
+
+    const scratch = try alloc.create(std.heap.ArenaAllocator);
+    scratch.* = std.heap.ArenaAllocator.init(alloc);
+
     return .{
-        .id = lastId,
-        .arena = std.heap.ArenaAllocator.init(alloc),
-        .transformLine = transform_func,
-        .data = data,
+        .id = last_id.fetchAdd(1, .monotonic) + 1,
+        .owned = owned,
+        .scratch = scratch,
+        .transformLine = transform_fn,
+        .data = undefined,
     };
+}
+
+/// Allocator for the filter's payload. Allocate the data, then assign `data`.
+pub fn ownedAllocator(self: *const Filter) std.mem.Allocator {
+    return self.owned.allocator();
 }
 
 pub fn deinit(self: *Filter) void {
-    self.arena.deinit();
+    const alloc = self.owned.child_allocator;
+    self.scratch.deinit();
+    alloc.destroy(self.scratch);
+    self.owned.deinit();
+    alloc.destroy(self.owned);
 }
 
 pub fn freeMemory(self: *Filter) void {
-    _ = self.arena.reset(.retain_capacity);
+    _ = self.scratch.reset(.retain_capacity);
 }
 
-//
-// TODO: define the requirements for this function
-//
-pub fn transform(self: *Filter, buffer: []const u8) ![]const u8 {
-    const alloc = self.arena.allocator();
+/// Transforms a buffer of complete lines (each ending in '\n') and returns a buffer of
+/// complete lines allocated from the scratch arena. Lines are split on '\n' on every platform;
+/// a trailing '\r' is stripped so the filtered buffer is LF-only.
+pub fn transform(self: *Filter, buffer: []const u8) std.mem.Allocator.Error![]const u8 {
+    const alloc = self.scratch.allocator();
 
-    var lines = try std.ArrayList([]const u8).initCapacity(alloc, 1);
+    var out = try std.ArrayList(u8).initCapacity(alloc, buffer.len);
 
-    // TODO: This contains bugs. newlines are being chopped apart and not put back together!!!
-    switch (builtin.target.os.tag) {
-        .windows => {
-            const sep = "\r\n";
-            var it = std.mem.tokenizeSequence(u8, buffer, sep);
-            while (it.next()) |line| {
-                switch (try self.transformLine(self, self.data, line)) {
-                    .line => |new_buf| {
-                        try lines.append(alloc, new_buf);
-                    },
-                    .empty => {},
-                }
-            }
-            const new_buffer = try joinWithEndingSep(alloc, sep, lines.items);
-            std.log.debug("filtered lines: {s}", .{new_buffer});
-            return new_buffer;
-        },
-        else => {
-            const sep: u8 = '\n';
-            var it = std.mem.tokenizeScalar(u8, buffer, sep);
-            while (it.next()) |line| {
-                switch (try self.transformLine(self, self.data, line)) {
-                    .line => |new_buf| {
-                        try lines.append(alloc, new_buf);
-                    },
-                    .empty => {},
-                }
-            }
-            if (lines.items.len == 0) {
-                return "";
-            } else {
-                try lines.append(alloc, "");
-                const new_buffer = try joinWithEndingSep(alloc, &[1]u8{sep}, lines.items);
-                return new_buffer;
-            }
-        },
+    var pos: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, buffer, pos, '\n')) |nl| : (pos = nl + 1) {
+        var line = buffer[pos..nl];
+        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+
+        switch (try self.transformLine(self, self.data, line)) {
+            .line => |new_line| {
+                try out.appendSlice(alloc, new_line);
+                try out.append(alloc, '\n');
+            },
+            .empty => {},
+        }
     }
-}
-
-/// Naively combines a series of slices with a separator plus a separator at the end.
-/// Allocates memory for the result, which must be freed by the caller.
-fn joinWithEndingSep(allocator: std.mem.Allocator, separator: []const u8, slices: []const []const u8) std.mem.Allocator.Error![]u8 {
-    if (slices.len == 0) return &[0]u8{};
-
-    const total_len = blk: {
-        var sum: usize = separator.len * (slices.len);
-        for (slices) |slice| sum += slice.len;
-        break :blk sum;
-    };
-
-    const buf = try allocator.alloc(u8, total_len);
-    errdefer allocator.free(buf);
-
-    @memcpy(buf[0..slices[0].len], slices[0]);
-    var buf_index: usize = slices[0].len;
-    for (slices[1..]) |slice| {
-        @memcpy(buf[buf_index .. buf_index + separator.len], separator);
-        buf_index += separator.len;
-        @memcpy(buf[buf_index .. buf_index + slice.len], slice);
-        buf_index += slice.len;
-    }
-    @memcpy(buf[buf_index .. buf_index + separator.len], separator);
-
-    // No need for shrink since buf is exactly the correct size.
-    return buf;
+    return out.items;
 }

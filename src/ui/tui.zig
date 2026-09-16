@@ -10,7 +10,10 @@ pub const EntityViewer = @import("tui/widgets/entity_viewer.zig");
 pub const Cmd = @import("tui/cmd/cmd.zig").Cmd;
 pub const help = @import("tui/help/help.zig");
 pub const runner = @import("runner");
-pub const buffermgr = @import("tui/buffermanager.zig");
+pub const pump_mod = @import("pump");
+pub const Pump = pump_mod.Pump;
+pub const ingeststore = @import("tui/pipeline/ingeststore.zig");
+pub const IngestStore = ingeststore.IngestStore;
 pub const processviewmgr = @import("tui/processviewmgr.zig");
 
 const AppModel = @import("tui/AppModel.zig");
@@ -26,14 +29,8 @@ const graphemedata = vaxis.grapheme.GraphemeData;
 pub const OutputWidget = view.OutputWidget;
 pub const ProcessBuffer = view.output_view_mod.ProcessBuffer;
 pub const Handler = cmdwidget.Cmd.Handler;
-pub const BufferMgr = buffermgr.BufferMgr;
 
 const uuid = utils.uuid;
-
-const ProcessBuffersMap = struct {
-    m: std.Io.Mutex,
-    map: std.AutoHashMapUnmanaged(uuid.UUID, *ProcessBuffer),
-};
 
 const ModelState = enum { main, cmdview, jsonview, objview };
 
@@ -97,46 +94,20 @@ const Bindings = struct {
     }
 };
 
-const BufferEntry = struct {
-    id: uuid.UUID,
-    writer: *std.Io.Writer.Allocating,
-};
-const BufferEntries = struct {
-    m: std.Io.Mutex,
-    entries: std.ArrayList(BufferEntry),
-
-    fn append(self: *BufferEntries, io: std.Io, alloc: std.mem.Allocator, entry: BufferEntry) !void {
-        try self.m.lockUncancelable(io);
-        defer self.m.unlock(io);
-
-        try self.entries.append(alloc, entry);
-    }
-
-    fn find(self: *BufferEntries, id: uuid.UUID) ?*std.Io.Writer.Allocating {
-        for (self.entires.items) |e| {
-            if (std.meta.eql(e.id, id)) return e.writer;
-        }
-        return null;
-    }
-};
-
 const TuiApp = struct {
     app_model: AppModel,
-    // modelview: *view.View,
-    // uiconfig: ?*uiconfig.UiConfig = null,
-    // process_buffers: ProcessBuffersMap,
-    // buffers: *BufferMgr,
-    // executor: *ConfiguredRunner,
-    arena: std.heap.ArenaAllocator,
+    /// Heap allocated so `_alloc` (its allocator) stays valid for the life of the model.
+    arena: *std.heap.ArenaAllocator,
     _alloc: std.mem.Allocator,
     cmd_view: cmdwidget.CmdWidget,
     // cmd: *Cmd,
     handlers_ids: std.ArrayList(cmdwidget.Cmd.HandleId),
     help_id: ?uuid.UUID = null,
+    /// buffer whose view should take focus as soon as the pump announces it
+    pending_focus_id: ?uuid.UUID = null,
     mode: ModelState = .main,
     prev_mode: ModelState = .main,
     start_script: ?[]const u8 = null,
-    inputs: .{ .m = .init, .entries = .empty },
     // views: vxfw.Surface,
     // views -> view-group -> tab-group && output-group
 
@@ -155,10 +126,73 @@ const TuiApp = struct {
         return self.handleCapture(ctx, event);
     }
 
-    fn show_help(self: *TuiApp, io: Io, alloc: std.mem.Allocator) !void {
-        const id = try createProcessView(io, alloc, "help");
-        try pushLogging(io, alloc, id, help.getHelpString());
+    /// Asks the pump for a help buffer; its view is created and focused when the inbox
+    /// announces it.
+    fn show_help(self: *TuiApp) !void {
+        const store = self.app_model.store;
+        const id = try store.createBufferAsync("help");
+        try store.writeText(id, help.getHelpString());
         self.help_id = id;
+        self.pending_focus_id = id;
+    }
+
+    /// Focuses the view showing buffer `id`, if it exists yet.
+    fn focusBuffer(self: *TuiApp, ctx: *vxfw.EventContext, id: uuid.UUID) !bool {
+        const found = processviewmgr.find_by_buffer_id(&self.app_model, id) orelse return false;
+        const pos = try self.app_model.model_view.get_position(found.view);
+        try self.app_model.model_view.focus_outputview_by_idx(pos);
+        found.view.focus_output(found.widget);
+        try ctx.requestFocus(found.widget.widget());
+        return true;
+    }
+
+    /// Applies what the pump reported since the last tick: creates widgets for new buffers,
+    /// drops removed ones, logs failed commands.
+    fn drainInbox(self: *TuiApp, ctx: *vxfw.EventContext) !void {
+        const store = self.app_model.store;
+        var events = store.inbox.drain();
+        defer events.deinit(store.alloc);
+
+        for (events.items) |ev| {
+            switch (ev) {
+                .buffer_created => |c| {
+                    ctx.redraw = true;
+                    _ = processviewmgr.create_processview(
+                        ctx.io,
+                        model_alloc_root,
+                        &self.app_model,
+                        c.name,
+                        .{ .id = c.id, .buffer = c.pb },
+                    ) catch |err| {
+                        std.log.err("could not create view \"{s}\": {t}", .{ c.name, err });
+                        store.alloc.free(c.name);
+                        continue;
+                    };
+                    // the mirror takes ownership of the name (same allocator as the store)
+                    self.app_model.buffer_infos.append(model_alloc_root, .{
+                        .id = c.id,
+                        .strid = c.strid,
+                        .name = c.name,
+                        .pb = c.pb,
+                    }) catch store.alloc.free(c.name);
+
+                    if (self.pending_focus_id) |want| {
+                        if (std.meta.eql(want, c.id)) {
+                            self.pending_focus_id = null;
+                            _ = try self.focusBuffer(ctx, c.id);
+                        }
+                    }
+                },
+                .buffer_removed => |r| {
+                    self.app_model.removeBufferInfo(model_alloc_root, r.id);
+                    ctx.redraw = true;
+                },
+                .command_failed => |f| {
+                    std.log.warn("command failed: {s}", .{f.what});
+                    store.alloc.free(f.what);
+                },
+            }
+        }
     }
 
     pub fn handleCapture(self: *TuiApp, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
@@ -219,23 +253,13 @@ const TuiApp = struct {
                     },
                     .ShowHelp => {
                         if (self.mode == .main) {
-                            const does_help_exist = self.help_id != null;
-
-                            if (!does_help_exist) {
-                                try self.show_help(ctx.io, self.arena.allocator());
+                            if (self.help_id) |id| {
+                                // already created (or still on its way): focus it
+                                if (!try self.focusBuffer(ctx, id)) self.pending_focus_id = id;
+                            } else {
+                                self.show_help() catch |err| std.log.err("could not open help: {t}", .{err});
                             }
-
-                            // find the outputview that contain's help
-                            for (self.app_model.model_view.outputviews.items) |ov| {
-                                for (ov.outputs.items) |o| {
-                                    if (std.mem.eql(u8, o.process_name, "help")) {
-                                        // focus the help's output widget
-                                        ov.focus_output(o);
-                                        try ctx.requestFocus(o.widget());
-                                    }
-                                }
-                            }
-                            return ctx.consumeEvent();
+                            return ctx.consumeAndRedraw();
                         }
                     },
                     else => {},
@@ -310,13 +334,21 @@ const TuiApp = struct {
                     try self.app_model.model_view.focus_outputview_by_idx(0);
                     try output_view.eventHandler(ctx, event);
                 }
+
+                // The root tick is the only periodic timer: it redraws when a buffer changed
+                try ctx.tick(tick_ms, self.widget());
+            },
+            .tick => {
+                try ctx.tick(tick_ms, self.widget());
+                try self.drainInbox(ctx);
+                if (self.anyOutputChanged()) ctx.redraw = true;
             },
             .key_press => |key| {
                 const opt_result = Bindings.matches(key);
                 if (opt_result) |result| switch (result) {
                     .FastQuit => {
-                        // This will current kill the tui but not kill the program...
-                        ctx.quit = true;
+                        std.log.info("tui: fast quit requested", .{});
+                        requestQuit(ctx);
                         return;
                     },
                     .OutputViewPrev => {
@@ -441,14 +473,13 @@ const TuiApp = struct {
                         const cmd_name = cmd.get_cmd() orelse return;
                         if (std.mem.eql(u8, cmd_name, QuitHandlerData.event_str)) {
                             // quit the app
-                            keep_running.store(false, .seq_cst);
-                            ctx.quit = true;
+                            std.log.info("tui: quit command received", .{});
+                            requestQuit(ctx);
                             return;
                         } else if (std.mem.eql(u8, cmd_name, QuitSaveHandlerData.event_str)) {
                             // save then quit
                             try self.dumpAllOutputs(ctx.io);
-                            keep_running.store(false, .seq_cst);
-                            ctx.quit = true;
+                            requestQuit(ctx);
                             return;
                         } else if (std.mem.eql(u8, cmd_name, MergeViewsData.event_str)) {
                             // process merge command
@@ -479,6 +510,19 @@ const TuiApp = struct {
             },
             else => {},
         }
+    }
+
+    const tick_ms: u32 = 16;
+
+    /// True when any visible output widget's buffer has published a change since it was
+    /// last drawn.
+    fn anyOutputChanged(self: *TuiApp) bool {
+        for (self.app_model.model_view.outputviews.items) |ov| {
+            if (ov.focused_ow) |ow| {
+                if (ow.needsRedraw()) return true;
+            }
+        }
+        return false;
     }
 
     fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -570,17 +614,14 @@ const TuiApp = struct {
         if (handle) |*h| h.deinit();
     }
 
+    /// Dumps every output's raw buffer to disk. Synchronous: used right before quitting.
     fn dumpAllOutputs(self: *TuiApp, io: Io) !void {
-        // Dump all output buffers to disk
+        _ = io;
         for (self.app_model.model_view.outputviews.items) |outputview| {
             for (outputview.outputs.items) |output| {
-                try actions.dumpOutputBuffer(
-                    io,
-                    self._alloc,
-                    try output.output.nonowned_process_buffer.copyBuffer(self._alloc, .Raw),
-                    output.id,
-                    output.process_name,
-                );
+                output.output.dump(.Raw, .sync) catch |err| {
+                    std.log.err("dump of \"{s}\" failed: {t}", .{ output.process_name, err });
+                };
             }
         }
     }
@@ -654,15 +695,75 @@ const TuiApp = struct {
 };
 
 var model: *TuiApp = undefined;
+var ui_config: uiconfig.UiConfig = undefined;
+var model_alloc_root: std.mem.Allocator = undefined;
+var pump_ptr: *Pump = undefined;
+var store_ptr: *IngestStore = undefined;
 
 var keep_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 var tui_signal = TUISignal{};
+var tui_started: std.Io.Event = .unset;
+var tui_start_err: ?anyerror = null;
+var tui_loop_exited: std.atomic.Value(bool) = .init(false);
 var thread: ?std.Thread = null;
 var app: vxfw.App = undefined;
+
+/// Asks the vaxis event loop to exit. On Windows also starts a helper that wakes the
+/// blocked console reader, see `wakeInputThread`.
+fn requestQuit(ctx: *vxfw.EventContext) void {
+    keep_running.store(false, .seq_cst);
+    ctx.quit = true;
+    if (builtin.os.tag == .windows) {
+        const t = std.Thread.spawn(.{}, wakeInputThread, .{}) catch return;
+        t.detach();
+    }
+}
+
+const WinConsole = if (builtin.os.tag == .windows) struct {
+    const windows = std.os.windows;
+    extern "kernel32" fn WriteConsoleInputW(
+        hConsoleInput: windows.HANDLE,
+        lpBuffer: *const vaxis.Tty.INPUT_RECORD,
+        nLength: windows.DWORD,
+        lpNumberOfEventsWritten: *windows.DWORD,
+    ) callconv(.winapi) windows.BOOL;
+} else struct {};
+
+/// vaxis's `Loop.stop` unblocks its `ReadConsoleInputW` thread by asking the terminal for a
+/// device status report and waiting for the reply. Under ConPTY that query is not reliably
+/// answered, which leaves the loop stuck forever. Injecting a harmless key-release record
+/// into the console input wakes the reader so it can observe `should_quit`.
+fn wakeInputThread() void {
+    if (builtin.os.tag != .windows) return;
+    var record: vaxis.Tty.INPUT_RECORD = std.mem.zeroes(vaxis.Tty.INPUT_RECORD);
+    record.EventType = 0x0001; // KEY_EVENT
+    record.Event.KeyEvent = .{
+        .bKeyDown = .FALSE,
+        .wRepeatCount = 1,
+        .wVirtualKeyCode = 0x41, // 'A'
+        .wVirtualScanCode = 0,
+        .uChar = .{ .UnicodeChar = 'a' },
+        .dwControlKeyState = 0,
+    };
+
+    var attempts: usize = 0;
+    while (!tui_loop_exited.load(.acquire) and attempts < 250) : (attempts += 1) {
+        var written: std.os.windows.DWORD = 0;
+        _ = WinConsole.WriteConsoleInputW(app.tty.stdin, &record, 1, &written);
+        std.Io.sleep(pump_ptr.io, .fromMilliseconds(20), .awake) catch return;
+    }
+}
+
 fn run_tui(io: Io, alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner, env_map: *std.process.Environ.Map) !void {
-    // parse the ui config
-    var config = try uiconfig.parseConfigs(io, alloc);
-    defer config.deinit();
+    // Whatever happens, main must be released from waitForTUIClose.
+    defer setTUIClose(io);
+    // ... and from start_tui, with the error if we never got going.
+    errdefer |err| {
+        tui_start_err = err;
+        tui_started.set(io);
+    }
+
+    ui_config = try uiconfig.parseConfigs(io, alloc);
 
     var buffer: [1024]u8 = undefined;
     app = try vxfw.App.init(io, alloc, env_map, &buffer);
@@ -674,15 +775,17 @@ fn run_tui(io: Io, alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner,
 
     app.vx.refresh = true;
 
-    var arena = std.heap.ArenaAllocator.init(alloc);
+    const arena = try alloc.create(std.heap.ArenaAllocator);
+    arena.* = std.heap.ArenaAllocator.init(alloc);
     const model_alloc = arena.allocator();
+    model_alloc_root = alloc;
 
     model = try alloc.create(TuiApp);
     model.* = .{
         .app_model = .{
             .model_view = try view.View.init(alloc),
-            .uiconfig = &config,
-            .buffers = try .init(alloc),
+            .uiconfig = &ui_config,
+            .store = store_ptr,
             .executor = executor,
             .cmd = try .init(alloc),
             .entity_viewer = try .init(alloc, null),
@@ -693,72 +796,74 @@ fn run_tui(io: Io, alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner,
         .handlers_ids = try .initCapacity(model_alloc, 1),
     };
     model.cmd_view = try .init(alloc, model.app_model.cmd);
-    defer alloc.destroy(model);
-    keep_running.store(true, .seq_cst);
 
     if (builtin.mode == .Debug) {
-        // Set up output views and process buffers for debugging
-        {
-            // As we are starting the TUI, the executor (in the main thread)
-            // is spooling up programs with this lock.
-            // This is hacking in thread safety just for debug
-            model.app_model.executor.m.lockUncancelable(io);
-            defer model.app_model.executor.m.unlock(io);
-
-            _ = try processviewmgr.create_process_view(
-                io,
-                alloc,
-                &model.app_model,
-                "default_output",
-            );
-
-            _ = try processviewmgr.create_process_view(
-                io,
-                alloc,
-                &model.app_model,
-                "default_output2",
-            );
-        }
+        // Ask the pump for a couple of scratch buffers; their views appear on the first tick
+        _ = try store_ptr.createBufferAsync("default_output");
+        _ = try store_ptr.createBufferAsync("default_output2");
     }
-
-    defer arena.deinit();
-    defer model.app_model.buffers.deinit(io, alloc);
-    defer model.app_model.model_view.deinit(io);
 
     try model.subscribeHandlersToCmd();
 
-    try app.vx.setMouseMode(&app.tty.tty_writer.interface, true);
-    try app.run(model.widget(), .{});
+    // The model is ready: the pump and the runner may start using it.
+    keep_running.store(true, .seq_cst);
+    tui_started.set(io);
+
+    app.vx.setMouseMode(&app.tty.tty_writer.interface, true) catch {};
+    tui_loop_exited.store(false, .release);
+    app.run(model.widget(), .{}) catch |err| {
+        std.log.err("tui event loop exited with error: {t}", .{err});
+    };
+    tui_loop_exited.store(true, .release);
+    std.log.info("tui: event loop returned", .{});
 
     model.unsubscribeHandlersFromCmd();
     keep_running.store(false, .seq_cst);
-    setTUIClose(io);
+    // The model, buffers and views are torn down by `stop_tui` on the main thread once the
+    // pump has been stopped, so nothing can touch them while they are freed.
 }
 
-pub fn start_tui(io: Io, alloc: std.mem.Allocator, executor: *ConfiguredRunner, env_map: *std.process.Environ.Map) !void {
+/// Frees the model. Called by `stop_tui` after the TUI thread has been joined.
+fn teardownModel(io: Io) void {
+    const alloc = model_alloc_root;
+    model.app_model.model_view.deinit(io);
+    model.app_model.deinitBufferInfos(alloc);
+    model.arena.deinit();
+    alloc.destroy(model.arena);
+    alloc.destroy(model);
+    ui_config.deinit();
+}
+
+pub fn start_tui(
+    io: Io,
+    alloc: std.mem.Allocator,
+    executor: *ConfiguredRunner,
+    pump: *Pump,
+    store: *IngestStore,
+    env_map: *std.process.Environ.Map,
+) !void {
+    pump_ptr = pump;
+    store_ptr = store;
     thread = try std.Thread.spawn(
         .{ .allocator = alloc },
         run_tui,
         .{ io, alloc, executor, env_map },
     );
 
-    // wait till the tui app has started
-    const start = std.Io.Timestamp.now(io, std.Io.Clock.real);
-    while (!keep_running.load(.seq_cst)) {
-        const now = std.Io.Timestamp.now(io, std.Io.Clock.real);
-        const duration = std.Io.Timestamp.durationTo(start, now);
-        if (duration.toSeconds() > 10) {
-            return;
-        }
-    }
+    // wait till the tui app has started (or failed to)
+    tui_started.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } }) catch {
+        return error.TuiStartTimeout;
+    };
+    if (tui_start_err) |err| return err;
 }
 
-// Do not call this in the UI thread
-pub fn stop_tui() void {
+/// Joins the TUI thread and frees the model. Call from the main thread after the pump has
+/// been stopped (nothing may write into the buffers while they are freed).
+pub fn stop_tui(io: Io) void {
     if (thread) |t| {
-        keep_running.store(false, .seq_cst); // Signal the thread to stop
         t.join();
-        setTUIClose(); // Signal any other threads to stop
+        thread = null;
+        if (tui_start_err == null) teardownModel(io);
     }
 }
 
@@ -779,48 +884,10 @@ pub fn waitForTUIClose(io: Io) !void {
     }
 }
 
-pub fn createProcessView(io: Io, alloc: std.mem.Allocator, processname: []const u8) std.mem.Allocator.Error!uuid.UUID {
-    // FIX: terrible hack to avoid a race condition which actually hits on nix
-    //std.time.sleep(10_000_000_000);
-    //std.debug.print("creating output: {s}\n", .{processname});
-
-    const id = try processviewmgr.create_process_view(io, alloc, &model.app_model, processname);
-    app.vx.setMouseMode(&app.tty.tty_writer.interface, true) catch {};
-    return id;
-}
-
-pub fn killProcessView(processname: []const u8) void {
-    _ = processname;
-}
-
 pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Allocator.Error!void {
     _ = alloc;
     _ = jsonStr;
 }
-
-pub fn pushLogging(io: Io, alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []const u8) std.mem.Allocator.Error!void {
-    _ = alloc;
-    //_ = io;
-
-    if (keep_running.load(.seq_cst)) {
-        //if (model.inputs.find(process_id)) |entry| {
-        //    entry.writer.writeAll(buffer) catch return error.OutOfMemory;
-        //}
-        model.app_model.buffers.process_buffers.m.lockUncancelable(io);
-        defer model.app_model.buffers.process_buffers.m.unlock(io);
-
-        const target_buffer = model.app_model
-            .buffers
-            .process_buffers
-            .map.get(process_id);
-        if (target_buffer) |output| {
-            try output.append(buffer);
-        }
-    }
-}
-
-// redesign pushLogging/util_read_loop to make the reader loops do less work
-pub fn pullLogging(io: Io, alloc: std.mem.Allocator, process_id: uuid.UUID, buffer: []const u8) std.mem.Allocator.Error!void {}
 
 // TODOs
 

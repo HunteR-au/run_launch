@@ -1,189 +1,181 @@
+//! UI-side regex search over a ProcessBuffer's filtered lines.
+//!
+//! The searcher keeps its own copy of the filtered text (`SearchIndex`) that is refreshed
+//! incrementally: while the buffer's `version` is unchanged only the newly appended bytes
+//! are copied; when a reprocess changes line identity the copy is rebuilt. Match offsets
+//! are absolute filtered offsets and are only valid for the `version` they were found in.
 const std = @import("std");
-const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Regex = @import("regex").Regex;
 const processbuffer = @import("processbuffer.zig");
 const helpers = @import("../helpers.zig");
 
 const ProcessBuffer = processbuffer.ProcessBuffer;
-
 const RegexIterator = helpers.RegexIterator;
 
-// how do I want to use this
+pub const Match = struct {
+    /// absolute filtered line index containing the match
+    line: usize,
+    /// absolute filtered byte offsets
+    lo: usize,
+    hi: usize,
+};
 
-// FIND
-// iter = ProcessBufferSearchIterator.init(alloc, &regex, line_iter)
-// result = iter.next
-// jump_to(result.lowerBound, result.upperBound)                        <- todo
-// highlight(result.lowerBound, result.upperBound)                      <- todo
-// deHighlight...                                                       <- todo
-// output.save(iter)
+pub const SearchIndex = struct {
+    /// buffer version the copy corresponds to; null before the first refresh
+    version: ?u64 = null,
+    /// complete filtered lines, each ending in '\n'
+    text: std.ArrayList(u8) = .empty,
+    /// byte offset of the start of every line in `text`
+    line_starts: std.ArrayList(usize) = .empty,
 
-// NEXT
-// if iter
-// result = iter.next()
-// jump_to(result.lowerBound, result.upperBound)
-// highlight(result.lowerBound, result.upperBound)
-// deHighlight...
-// output.save(iter)
+    pub const Refresh = enum { unchanged, extended, rebuilt };
 
-// PREV
-// if iter
-// result = iter.prev()
-// jump_to(result.lowerBound, result.upperBound)
-// highlight(result.lowerBound, result.upperBound)
-// deHighlight...
-// output.save(iter)
+    pub fn deinit(self: *SearchIndex, alloc: Allocator) void {
+        self.text.deinit(alloc);
+        self.line_starts.deinit(alloc);
+    }
 
-pub fn startSearchFrom(io: Io, alloc: Allocator, process_buffer: *ProcessBuffer, regex: *Regex, line_num: usize) !ProcessBufferSearchIterator {
-    var iter = ProcessBufferSearchIterator.init(
-        alloc,
-        regex,
-        .{ .lineIterator = try ProcessBuffer.LineIterator.init(io, alloc, process_buffer) },
-    );
-    try iter.line_iter.lineIterator.setLine(io, line_num);
-    return iter;
-}
+    pub fn lineCount(self: *const SearchIndex) usize {
+        return self.line_starts.items.len;
+    }
 
-pub const ProcessBufferSearchIterator = struct {
+    /// The line without its trailing '\n'.
+    pub fn line(self: *const SearchIndex, i: usize) []const u8 {
+        const start = self.line_starts.items[i];
+        const end = if (i + 1 < self.line_starts.items.len) self.line_starts.items[i + 1] else self.text.items.len;
+        return self.text.items[start .. end - 1];
+    }
+
+    pub fn lineStart(self: *const SearchIndex, i: usize) usize {
+        return self.line_starts.items[i];
+    }
+
+    /// Brings the copy up to date with the buffer using one lock acquisition (none at all
+    /// when the published counters show nothing changed).
+    pub fn refresh(self: *SearchIndex, alloc: Allocator, pb: *ProcessBuffer) Allocator.Error!Refresh {
+        const meta = pb.peek();
+        if (self.version != null and self.version.? == meta.version and self.text.items.len == meta.filtered_len) {
+            return .unchanged;
+        }
+
+        var from: usize = if (self.version != null and self.version.? == meta.version) self.text.items.len else 0;
+        var copy = try pb.copyFilteredFrom(alloc, from);
+        if (from != 0 and copy.version != self.version.?) {
+            // the buffer was reprocessed between peek() and the copy: start over
+            alloc.free(copy.bytes);
+            from = 0;
+            copy = try pb.copyFilteredFrom(alloc, 0);
+        }
+        defer alloc.free(copy.bytes);
+
+        const rebuilt = from == 0;
+        if (rebuilt) {
+            self.text.clearRetainingCapacity();
+            self.line_starts.clearRetainingCapacity();
+        }
+
+        const base = self.text.items.len;
+        try self.text.appendSlice(alloc, copy.bytes);
+        var pos: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, copy.bytes, pos, '\n')) |nl| : (pos = nl + 1) {
+            try self.line_starts.append(alloc, base + pos);
+        }
+        self.version = copy.version;
+
+        return if (rebuilt) .rebuilt else .extended;
+    }
+};
+
+pub const Searcher = struct {
     alloc: Allocator,
-    regex: *Regex,
-    line_iter: ProcessBuffer.IteratorPtr,
-    line_offset: usize = 0,
-    cached_iter: ?CachedRegexMatchIterator = null,
-    cached_line: ?[]const u8 = null,
+    index: SearchIndex = .{},
+    regex: Regex,
+    /// line the cursor is on; `cached` holds that line's matches when non-null
+    cursor_line: usize = 0,
+    cached: ?CachedRegexMatchIterator = null,
 
-    pub const Result = struct {
-        str: []const u8,
-        lowerBound: usize,
-        upperBound: usize,
-    };
-
-    pub fn init(
-        alloc: Allocator,
-        re: *Regex,
-        line_iter: ProcessBuffer.IteratorPtr,
-    ) ProcessBufferSearchIterator {
+    pub fn init(alloc: Allocator, pattern: []const u8) !Searcher {
         return .{
             .alloc = alloc,
-            .regex = re,
-            .line_iter = line_iter,
+            .regex = try Regex.compile(alloc, pattern),
         };
     }
 
-    pub fn deinit(self: *ProcessBufferSearchIterator, io: Io) void {
-        if (self.cached_iter) |*iter| {
-            iter.deinit();
-        }
+    pub fn deinit(self: *Searcher) void {
+        self.dropCached();
+        self.index.deinit(self.alloc);
+        self.regex.deinit();
+    }
 
-        if (self.cached_line) |line| {
-            self.alloc.free(line);
-        }
+    fn dropCached(self: *Searcher) void {
+        if (self.cached) |*c| c.deinit();
+        self.cached = null;
+    }
 
-        switch (self.line_iter) {
-            .lineIterator => |i| {
-                i.deinit(io);
-            },
-            .reverseLineIterator => |i| {
-                i.deinit(io);
-            },
+    /// Refreshes the index. After a rebuild the cursor is clamped and any cached line
+    /// matches are dropped because line identity may have changed.
+    pub fn refresh(self: *Searcher, pb: *ProcessBuffer) Allocator.Error!SearchIndex.Refresh {
+        const result = try self.index.refresh(self.alloc, pb);
+        if (result == .rebuilt) {
+            self.dropCached();
+            self.cursor_line = @min(self.cursor_line, self.index.lineCount() -| 1);
+        }
+        return result;
+    }
+
+    /// Positions the cursor before the first match of `line` (for `next`) / after the last
+    /// match of `line` (for `prev`).
+    pub fn seekLine(self: *Searcher, line: usize) void {
+        self.dropCached();
+        self.cursor_line = @min(line, self.index.lineCount() -| 1);
+    }
+
+    fn cacheLine(self: *Searcher, position: CachedRegexMatchIterator.StartPosition) !void {
+        self.cached = try CachedRegexMatchIterator.init(
+            self.alloc,
+            &self.regex,
+            self.index.line(self.cursor_line),
+            position,
+        );
+    }
+
+    fn toMatch(self: *const Searcher, m: CachedRegexMatchIterator.LineMatch) Match {
+        const base = self.index.lineStart(self.cursor_line);
+        return .{ .line = self.cursor_line, .lo = base + m.lowerBound, .hi = base + m.upperBound };
+    }
+
+    /// Next match at or after the cursor, or null at the end of the buffer (the cursor then
+    /// stays on the last line, positioned after its last match).
+    pub fn next(self: *Searcher) !?Match {
+        const count = self.index.lineCount();
+        if (count == 0) return null;
+        while (true) {
+            if (self.cached == null) try self.cacheLine(.start);
+            if (self.cached.?.next()) |m| return self.toMatch(m);
+            if (self.cursor_line + 1 >= count) return null;
+            self.dropCached();
+            self.cursor_line += 1;
         }
     }
 
-    pub fn next(self: *ProcessBufferSearchIterator, io: Io) !?Result {
+    /// Previous match before the cursor, or null at the start of the buffer (the cursor then
+    /// stays on the first line, positioned before its first match).
+    pub fn prev(self: *Searcher) !?Match {
+        const count = self.index.lineCount();
+        if (count == 0) return null;
         while (true) {
-            if (self.cached_iter) |*cached_iter| {
-                if (cached_iter.next()) |match| {
-                    return .{
-                        .str = match.str,
-                        .lowerBound = self.line_offset + match.lowerBound,
-                        .upperBound = self.line_offset + match.upperBound,
-                    };
-                } else {
-                    self.alloc.free(self.cached_line.?);
-                    self.cached_line = null;
-                    self.cached_iter.?.deinit();
-                    self.cached_iter = null; // Exhausted current line
-                }
-            }
-
-            switch (self.line_iter) {
-                .lineIterator => |p| {
-                    if (try p.next(io, self.alloc)) |result| {
-                        self.cached_line = result.line;
-                        self.cached_iter = try CachedRegexMatchIterator.init(self.alloc, self.regex, self.cached_line.?, .start);
-                        self.line_offset = result.buffer_offset;
-                        continue;
-                    } else {
-                        // We have exhausted all lines
-                        return null;
-                    }
-                },
-                .reverseLineIterator => |p| {
-                    // TODO: this one is a bit more complicated - we need to cache all matches in the line
-                    if (try p.next(io, self.alloc)) |result| {
-                        // cache the results
-                        self.cached_line = result.line;
-                        self.cached_iter = try CachedRegexMatchIterator.init(self.alloc, self.regex, self.cached_line.?, .end);
-                        self.line_offset = result.buffer_offset;
-                        continue;
-                    } else {
-                        // We have exhausted all lines
-                        return null;
-                    }
-                },
-            }
-        }
-    }
-
-    pub fn prev(self: *ProcessBufferSearchIterator, io: Io) !?Result {
-        while (true) {
-            if (self.cached_iter) |*cached_iter| {
-                if (cached_iter.prev()) |match| {
-                    return .{
-                        .str = match.str,
-                        .lowerBound = self.line_offset + match.lowerBound,
-                        .upperBound = self.line_offset + match.upperBound,
-                    };
-                } else {
-                    self.alloc.free(self.cached_line.?);
-                    self.cached_line = null;
-                    self.cached_iter.?.deinit();
-                    self.cached_iter = null; // Exhausted current line
-                }
-            }
-
-            switch (self.line_iter) {
-                .lineIterator => |p| {
-                    if (try p.prev(io, self.alloc)) |result| {
-                        // cache the results
-                        self.cached_line = result.line;
-                        self.cached_iter = try CachedRegexMatchIterator.init(self.alloc, self.regex, self.cached_line.?, .end);
-                        self.line_offset = result.buffer_offset;
-                        continue;
-                    } else {
-                        // We have exhausted all lines
-                        return null;
-                    }
-                },
-                .reverseLineIterator => |p| {
-                    if (try p.prev(io, self.alloc)) |result| {
-                        self.cached_line = result.line;
-                        self.cached_iter = try CachedRegexMatchIterator.init(self.alloc, self.regex, self.cached_line.?, .start);
-                        self.line_offset = result.buffer_offset;
-                        continue;
-                    } else {
-                        // We have exhausted all lines
-                        return null;
-                    }
-                },
-            }
+            if (self.cached == null) try self.cacheLine(.end);
+            if (self.cached.?.prev()) |m| return self.toMatch(m);
+            if (self.cursor_line == 0) return null;
+            self.dropCached();
+            self.cursor_line -= 1;
         }
     }
 };
 
 const CachedRegexMatchIterator = struct {
-    const Match = struct {
+    const LineMatch = struct {
         str: []const u8,
         lowerBound: usize,
         upperBound: usize,
@@ -198,11 +190,12 @@ const CachedRegexMatchIterator = struct {
     pub const StartPosition = enum { start, end };
 
     alloc: Allocator,
-    matches: []Match,
+    matches: []LineMatch,
     index: Index = Index{ .start = {} },
 
     pub fn init(alloc: Allocator, regex: *Regex, input: []const u8, starting_position: StartPosition) !CachedRegexMatchIterator {
-        var match_list: std.ArrayListUnmanaged(Match) = .empty;
+        var match_list: std.ArrayList(LineMatch) = .empty;
+        errdefer match_list.deinit(alloc);
         var iter = RegexIterator{ .regex = regex, .input = input };
 
         while (try iter.next()) |m| {
@@ -222,7 +215,7 @@ const CachedRegexMatchIterator = struct {
         };
     }
 
-    pub fn next(self: *CachedRegexMatchIterator) ?Match {
+    pub fn next(self: *CachedRegexMatchIterator) ?LineMatch {
         self.index = switch (self.index) {
             .start => if (self.matches.len == 0) .end else .{ .ofs = 0 },
             .ofs => |i| if (i + 1 >= self.matches.len) .end else .{ .ofs = i + 1 },
@@ -231,7 +224,7 @@ const CachedRegexMatchIterator = struct {
         return self.peek();
     }
 
-    pub fn prev(self: *CachedRegexMatchIterator) ?Match {
+    pub fn prev(self: *CachedRegexMatchIterator) ?LineMatch {
         self.index = switch (self.index) {
             .end => if (self.matches.len == 0) .start else .{ .ofs = self.matches.len - 1 },
             .ofs => |i| if (i == 0) .start else .{ .ofs = i - 1 },
@@ -240,16 +233,8 @@ const CachedRegexMatchIterator = struct {
         return self.peek();
     }
 
-    pub fn peek(self: *CachedRegexMatchIterator) ?Match {
+    pub fn peek(self: *CachedRegexMatchIterator) ?LineMatch {
         if (self.index == .ofs) return self.matches[self.index.ofs] else return null;
-    }
-
-    pub fn reset(self: *CachedRegexMatchIterator) void {
-        self.index = .start;
-    }
-
-    pub fn seekToEnd(self: *CachedRegexMatchIterator) void {
-        self.index = .end;
     }
 
     pub fn deinit(self: *CachedRegexMatchIterator) void {
@@ -258,150 +243,64 @@ const CachedRegexMatchIterator = struct {
 };
 
 const testing = std.testing;
-test "Reverse direction of ProcessBufferSearchIterator within line" {
-    const alloc = testing.allocator_instance.allocator();
+
+test "Searcher: matches within a line and across lines, forward and backward" {
+    const alloc = testing.allocator;
     const io = testing.io;
 
-    const prefixes = comptime [_][]const u8{
-        "",
-        "Line 2 with ",
-        "Line 3 with ",
-    };
+    const pb = try ProcessBuffer.init(io, alloc);
+    defer pb.deinit();
+    try pb.append("string Line 1 with string string x\nLine 2 with string out\nLine 3 with string out");
 
-    const lines = comptime [_][]const u8{
-        prefixes[0] ++ "string Line 1 with string string string x",
-        prefixes[1] ++ "string out",
-        prefixes[2] ++ "string out",
-    };
+    var s = try Searcher.init(alloc, "string");
+    defer s.deinit();
+    try testing.expectEqual(.rebuilt, try s.refresh(pb));
+    try testing.expectEqual(2, s.index.lineCount()); // the tail line is incomplete
 
-    const line_lens = comptime blk: {
-        var result: [lines.len]usize = undefined;
-        for (0..lines.len) |i| {
-            result[i] = lines[i].len;
-        }
-        break :blk result;
-    };
-    _ = line_lens;
+    const m0 = (try s.next()).?;
+    try testing.expectEqual(Match{ .line = 0, .lo = 0, .hi = 6 }, m0);
+    const m1 = (try s.next()).?;
+    try testing.expectEqual(Match{ .line = 0, .lo = 19, .hi = 25 }, m1);
+    const m2 = (try s.next()).?;
+    try testing.expectEqual(Match{ .line = 0, .lo = 26, .hi = 32 }, m2);
+    const m3 = (try s.next()).?;
+    try testing.expectEqual(1, m3.line);
+    try testing.expectEqual(35 + 12, m3.lo);
+    try testing.expectEqual(null, try s.next());
 
-    const input = comptime blk: {
-        var input: []const u8 = "";
-        for (0..lines.len - 1) |i| {
-            input = input ++ lines[i] ++ "\n";
-        }
-        input = input ++ lines[lines.len - 1];
-        break :blk input;
-    };
-
-    const match_str = "string";
-    const process_buffer = try ProcessBuffer.init(io, alloc);
-    defer process_buffer.deinit();
-
-    try process_buffer.append(input);
-
-    var regex = try Regex.compile(alloc, match_str);
-    defer regex.deinit();
-
-    var iter = ProcessBufferSearchIterator.init(
-        alloc,
-        &regex,
-        .{ .lineIterator = try ProcessBuffer.LineIterator.init(
-            alloc,
-            process_buffer,
-        ) },
-    );
-    defer iter.deinit();
-
-    const m = try iter.next();
-    try testing.expect(m != null);
-    try testing.expectEqual(0, iter.line_offset);
-    try testing.expectEqualStrings(match_str, m.?.str);
-
-    const m1 = try iter.next();
-    try testing.expect(m1 != null);
-    try testing.expectEqual(0, iter.line_offset);
-    try testing.expectEqualStrings(match_str, m1.?.str);
-
-    const m2 = try iter.next();
-    try testing.expect(m2 != null);
-    try testing.expectEqual(0, iter.line_offset);
-    try testing.expectEqualStrings(match_str, m2.?.str);
-
-    const m3 = try iter.prev();
-    try testing.expect(m3 != null);
-    try testing.expectEqual(0, iter.line_offset);
-    try testing.expectEqualStrings(match_str, m3.?.str);
-    try testing.expectEqualDeep(m3, m1);
-
-    // TODO fix memory leaks
+    // backwards from the end walks the same matches in reverse
+    try testing.expectEqual(m3, (try s.prev()).?);
+    try testing.expectEqual(m2, (try s.prev()).?);
+    try testing.expectEqual(m1, (try s.prev()).?);
+    try testing.expectEqual(m0, (try s.prev()).?);
+    try testing.expectEqual(null, try s.prev());
+    // and forward again from the start
+    try testing.expectEqual(m0, (try s.next()).?);
 }
 
-test "Reverse direction of ProcessBufferSearchIterator over lines" {
-    const alloc = testing.allocator_instance.allocator();
+test "Searcher: refresh extends on append and rebuilds on reprocess" {
+    const alloc = testing.allocator;
     const io = testing.io;
 
-    const prefixes = comptime [_][]const u8{
-        "Line 1 with ",
-        "Line 2 with ",
-        "Line 3 with ",
-        "Line 4 with ",
-        "Line 5 with ",
-    };
+    const pb = try ProcessBuffer.init(io, alloc);
+    defer pb.deinit();
+    try pb.append("apple\n");
 
-    const lines = comptime [_][]const u8{
-        prefixes[0] ++ "string out",
-        prefixes[1] ++ "string out",
-        prefixes[2] ++ "string out",
-    };
+    var s = try Searcher.init(alloc, "apple");
+    defer s.deinit();
+    try testing.expectEqual(.rebuilt, try s.refresh(pb));
+    try testing.expectEqual(.unchanged, try s.refresh(pb));
 
-    const line_lens = comptime blk: {
-        var result: [lines.len]usize = undefined;
-        for (0..lines.len) |i| {
-            result[i] = lines[i].len;
-        }
-        break :blk result;
-    };
+    try pb.append("carrot\napple\n");
+    try testing.expectEqual(.extended, try s.refresh(pb));
+    try testing.expectEqual(3, s.index.lineCount());
+    try testing.expectEqualStrings("carrot", s.index.line(1));
 
-    const input = comptime blk: {
-        var input: []const u8 = "";
-        for (0..lines.len - 1) |i| {
-            input = input ++ lines[i] ++ "\n";
-        }
-        input = input ++ lines[lines.len - 1];
-        break :blk input;
-    };
+    s.seekLine(1);
+    try testing.expectEqual(Match{ .line = 2, .lo = 13, .hi = 18 }, (try s.next()).?);
 
-    const match_str = "string";
-    const process_buffer = try ProcessBuffer.init(io, alloc);
-    defer process_buffer.deinit();
-
-    try process_buffer.append(input);
-
-    var regex = try Regex.compile(alloc, match_str);
-    defer regex.deinit();
-
-    var iter = ProcessBufferSearchIterator.init(
-        alloc,
-        &regex,
-        .{ .lineIterator = try ProcessBuffer.LineIterator.init(
-            alloc,
-            process_buffer,
-        ) },
-    );
-    defer iter.deinit();
-
-    const m = try iter.next();
-    try testing.expect(m != null);
-    try testing.expectEqual(0, iter.line_offset);
-    try testing.expectEqualStrings(match_str, m.?.str);
-
-    const m1 = try iter.next();
-    try testing.expect(m1 != null);
-    try testing.expectEqual(line_lens[0] + 1, iter.line_offset);
-    try testing.expectEqualStrings(match_str, m1.?.str);
-
-    const m2 = try iter.prev();
-    try testing.expect(m2 != null);
-    try testing.expectEqual(0, iter.line_offset);
-    try testing.expectEqualStrings(match_str, m2.?.str);
-    try testing.expectEqualDeep(m2, m);
+    // a reprocess changes line identity: the index is rebuilt and the cursor clamped
+    try pb.removeAllFilters();
+    try testing.expectEqual(.rebuilt, try s.refresh(pb));
+    try testing.expectEqual(pb.peek().version, s.index.version.?);
 }

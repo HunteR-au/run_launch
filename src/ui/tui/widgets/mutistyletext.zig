@@ -5,65 +5,22 @@ const Allocator = std.mem.Allocator;
 
 const vxfw = vaxis.vxfw;
 
-//pub const StyleMap = std.HashMapUnmanaged(usize, usize, std.hash_map.AutoContext(usize), std.hash_map.default_max_load_percentage);
-//pub const StyleList = std.ArrayListUnmanaged(vaxis.Style);
-
-pub fn StyleCache(comptime StyleMap: type, comptime StyleList: type) type {
+/// A text widget that paints each grapheme with a style looked up from `StyleSource`.
+///
+/// `StyleSource` must provide `styleAt(self: *const StyleSource, cursor: *usize, ofs: usize) ?vaxis.Style`
+/// where `ofs` is a byte offset into `text`. The widget reports the byte offset of the first
+/// grapheme of every rendered row through `cb_buffer_offset_at_row` so the caller can map
+/// rows back to lines.
+pub fn MultiStyleText(comptime StyleSource: type) type {
     comptime {
-        if (!@hasDecl(StyleMap, "get")) {
-            @compileError("Type StyleMap must have a 'get' method");
-        }
-
-        const ti = @typeInfo(StyleList);
-        switch (ti) {
-            .@"struct" => |s| {
-                var hasList = false;
-                for (s.fields) |field| {
-                    //std.debug.print("{s}", field.name);
-                    if (std.mem.eql(u8, field.name, "items")) {
-                        hasList = true;
-                        break;
-                    }
-                }
-                if (!hasList) {
-                    @compileError("StyleList must have a member named 'list'");
-                }
-            },
-            else => @compileError("StyleList must be a struct"),
+        if (!@hasDecl(StyleSource, "styleAt")) {
+            @compileError("StyleSource must have a 'styleAt' method");
         }
     }
 
     return struct {
-        map: *StyleMap,
-        list: *StyleList,
-        offset: usize,
-
-        pub fn init(map: *StyleMap, list: *StyleList, ofs: usize) StyleCache(StyleMap, StyleList) {
-            return .{
-                .map = map,
-                .list = list,
-                .offset = ofs,
-            };
-        }
-
-        pub fn getStyle(self: *const @This(), byte_index: usize) ?vaxis.Style {
-            const style: ?vaxis.Style = blk: {
-                if (self.map.get(byte_index + self.offset)) |style_index| {
-                    break :blk self.list.items[style_index];
-                }
-                break :blk null;
-            };
-            return style;
-        }
-    };
-}
-
-pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
-    const Cache = StyleCache(StyleMap, StyleList);
-
-    return struct {
         text: []const u8,
-        style_cache: Cache,
+        styles: *const StyleSource,
         cb_ptr: ?*anyopaque = null,
         cb_buffer_offset_at_row: ?*const fn (ptr: *anyopaque, row: usize, buffer_ofs: usize) std.mem.Allocator.Error!void = null,
         style: vaxis.Style = .{},
@@ -72,7 +29,6 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
         overflow: enum { ellipsis, clip } = .ellipsis,
         width_basis: enum { parent, longest_line } = .longest_line,
 
-        pub const StyleCache = Cache;
         const Text = @This();
 
         pub fn widget(self: *const Text) vxfw.Widget {
@@ -85,6 +41,14 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
         fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
             const self: *const Text = @ptrCast(@alignCast(ptr));
             return self.draw(ctx);
+        }
+
+        fn reportRow(self: *const Text, row: usize, offset: usize) Allocator.Error!void {
+            if (self.cb_ptr) |ptr| {
+                if (self.cb_buffer_offset_at_row) |cb| {
+                    try cb(ptr, row, offset);
+                }
+            }
         }
 
         pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
@@ -112,27 +76,22 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
             const base: vaxis.Cell = .{ .style = base_style };
             @memset(surface.buffer, base);
 
+            var style_cursor: usize = 0;
             var row: u16 = 0;
             if (self.softwrap) {
                 var iter = SoftwrapIterator.init(self.text, ctx);
-                var iter_offset: usize = 0;
-                while (iter.next()) |line| : (iter_offset = iter.hard_iter.index) {
+                while (iter.next()) |line| {
                     if (row >= container_size.height) break;
                     defer row += 1;
 
-                    //std.log.debug("DRAW row={d}", .{row});
+                    // `line.offset` is the byte offset of line.bytes[0] within self.text, which
+                    // is correct for soft-wrapped continuation rows too.
+                    const row_offset = line.offset;
+                    var reported = false;
 
-                    // Track the first buffer offset for this row
-                    var first_offset_for_row: ?usize = null;
-
-                    // if the line length is zero, we want to still call the callback
-                    if (first_offset_for_row == null and line.bytes.len == 0) {
-                        first_offset_for_row = iter_offset;
-                        if (self.cb_ptr != null) {
-                            if (self.cb_buffer_offset_at_row) |cb| {
-                                try cb(self.cb_ptr.?, row, first_offset_for_row.?);
-                            }
-                        }
+                    if (line.bytes.len == 0) {
+                        try self.reportRow(row, row_offset);
+                        reported = true;
                     }
 
                     var col: u16 = switch (self.text_align) {
@@ -141,31 +100,19 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                         .right => container_size.width - line.width,
                     };
                     var char_iter = ctx.graphemeIterator(line.bytes);
-                    var char_iter_offset: usize = 0;
                     while (char_iter.next()) |char| {
                         const grapheme = char.bytes(line.bytes);
-                        //char_iter_offset = char.offset;
-                        char_iter_offset = char.start;
+                        const byte_ofs = row_offset + char.start;
 
-                        // Capture the first offest for this row
-                        if (first_offset_for_row == null) {
-                            first_offset_for_row = iter_offset + char_iter_offset;
-                            if (self.cb_ptr != null) {
-                                if (self.cb_buffer_offset_at_row) |cb| {
-                                    try cb(self.cb_ptr.?, row, first_offset_for_row.?);
-                                }
-                            }
+                        if (!reported) {
+                            try self.reportRow(row, byte_ofs);
+                            reported = true;
                         }
+
+                        const style = self.styles.styleAt(&style_cursor, byte_ofs);
 
                         if (std.mem.eql(u8, grapheme, "\t")) {
                             for (0..8) |i| {
-                                const style = self.style_cache.getStyle(iter_offset + char_iter_offset);
-                                // if (col == 0 and self.cb_ptr != null) {
-                                //     if (self.cb_buffer_offset_at_row) |cb| {
-                                //         try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
-                                //     }
-                                // }
-
                                 surface.writeCell(@intCast(col + i), row, .{
                                     .char = .{ .grapheme = " ", .width = 1 },
                                     .style = if (style) |s| s else self.style,
@@ -175,18 +122,6 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                             continue;
                         }
                         const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
-                        //byte_index = text_offset + char.offset;
-                        const style = self.style_cache.getStyle(iter_offset + char_iter_offset);
-
-                        // if (col == 0 and self.cb_ptr != null) {
-                        //     if (self.cb_buffer_offset_at_row) |cb| {
-                        //         try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
-                        //     }
-                        // }
-
-                        //if (style) |_| {
-                        //    std.debug.print("char {s} found style at: {d} + {d} = {d}\n", .{ grapheme, iter_offset, char_iter_offset, iter_offset + char_iter_offset });
-                        //}
 
                         surface.writeCell(col, row, .{
                             .char = .{ .grapheme = grapheme, .width = grapheme_width },
@@ -197,28 +132,20 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                 }
             } else {
                 var line_iter: LineIterator = .{ .buf = self.text };
-                var iter_offset: usize = 0;
-                while (line_iter.next()) |line| : (iter_offset = line_iter.index) {
+                while (line_iter.next()) |line| {
                     if (row >= container_size.height) break;
                     defer row += 1;
+
+                    const row_offset = line_iter.last_start;
+                    var reported = false;
+
                     // \t is default 1 wide. We add 7x the count of tab characters to get the full width
-
-                    //std.log.debug("DRAW nosoft row={d}", .{row});
-
                     const line_width = ctx.stringWidth(line) + 7 * std.mem.count(u8, line, "\t");
                     const resolved_line_width = @min(container_size.width, line_width);
 
-                    // Track the first buffer offset for this row
-                    var first_offset_for_row: ?usize = null;
-
-                    // if the line length is zero, we want to still call the callback
-                    if (first_offset_for_row == null and line.len == 0) {
-                        first_offset_for_row = iter_offset;
-                        if (self.cb_ptr != null) {
-                            if (self.cb_buffer_offset_at_row) |cb| {
-                                try cb(self.cb_ptr.?, row, first_offset_for_row.?);
-                            }
-                        }
+                    if (line.len == 0) {
+                        try self.reportRow(row, row_offset);
+                        reported = true;
                     }
 
                     var col: u16 = switch (self.text_align) {
@@ -227,50 +154,29 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                         .right => container_size.width - resolved_line_width,
                     };
                     var char_iter = ctx.graphemeIterator(line);
-                    var char_iter_offset: usize = 0;
                     while (char_iter.next()) |char| {
                         if (col >= container_size.width) break;
                         const grapheme = char.bytes(line);
-                        //char_iter_offset = char.offset;
-                        char_iter_offset = char.start;
+                        const byte_ofs = row_offset + char.start;
                         const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
 
-                        // Capture the first offset for this row
-                        if (first_offset_for_row == null) {
-                            first_offset_for_row = iter_offset + char_iter_offset;
-                            if (self.cb_ptr != null) {
-                                if (self.cb_buffer_offset_at_row) |cb| {
-                                    try cb(self.cb_ptr.?, row, first_offset_for_row.?);
-                                }
-                            }
+                        if (!reported) {
+                            try self.reportRow(row, byte_ofs);
+                            reported = true;
                         }
+
+                        const style = self.styles.styleAt(&style_cursor, byte_ofs);
 
                         if (col + grapheme_width >= container_size.width and
                             line_width > container_size.width and
                             self.overflow == .ellipsis)
                         {
-                            const style = self.style_cache.getStyle(iter_offset + char_iter_offset);
-
-                            // if (col == 0 and self.cb_ptr != null) {
-                            //     if (self.cb_buffer_offset_at_row) |cb| {
-                            //         try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
-                            //     }
-                            // }
-
                             surface.writeCell(col, row, .{
                                 .char = .{ .grapheme = "…", .width = 1 },
                                 .style = if (style) |s| s else self.style,
                             });
                             col = container_size.width;
                         } else {
-                            const style = self.style_cache.getStyle(iter_offset + char_iter_offset);
-
-                            // if (col == 0 and self.cb_ptr != null) {
-                            //     if (self.cb_buffer_offset_at_row) |cb| {
-                            //         try cb(self.cb_ptr.?, row, iter_offset + char_iter_offset);
-                            //     }
-                            // }
-
                             surface.writeCell(col, row, .{
                                 .char = .{ .grapheme = grapheme, .width = grapheme_width },
                                 .style = if (style) |s| s else self.style,
@@ -329,11 +235,14 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
         pub const LineIterator = struct {
             buf: []const u8,
             index: usize = 0,
+            /// byte offset of the start of the line most recently returned by `next`
+            last_start: usize = 0,
 
             fn next(self: *LineIterator) ?[]const u8 {
                 if (self.index >= self.buf.len) return null;
 
                 const start = self.index;
+                self.last_start = start;
                 const end = std.mem.indexOfAnyPos(u8, self.buf, self.index, "\r\n") orelse {
                     self.index = self.buf.len;
                     return self.buf[start..];
@@ -362,11 +271,15 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
             ctx: vxfw.DrawContext,
             line: []const u8 = "",
             index: usize = 0,
+            /// byte offset of `line[0]` within the full buffer
+            line_start: usize = 0,
             hard_iter: LineIterator,
 
             pub const Line = struct {
                 width: u16,
                 bytes: []const u8,
+                /// byte offset of `bytes[0]` within the full buffer
+                offset: usize,
             };
 
             const soft_breaks = " \t";
@@ -383,10 +296,12 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                 if (self.index == self.line.len) {
                     self.line = self.hard_iter.next() orelse return null;
                     self.line = std.mem.trimEnd(u8, self.line, " \t");
+                    self.line_start = self.hard_iter.last_start;
                     self.index = 0;
                 }
 
                 const start = self.index;
+                const offset = self.line_start + start;
                 var cur_width: u16 = 0;
                 while (self.index < self.line.len) {
                     const idx = self.nextWrap();
@@ -408,7 +323,7 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                                     const w = self.ctx.stringWidth(grapheme);
                                     if (cur_width + w > max) {
                                         const end = self.index;
-                                        return .{ .width = cur_width, .bytes = self.line[start..end] };
+                                        return .{ .width = cur_width, .bytes = self.line[start..end], .offset = offset };
                                     }
                                     cur_width += @intCast(w);
                                     self.index += grapheme.len;
@@ -417,14 +332,14 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                             // We are softwrapping, advance index to the start of the next word
                             const end = self.index;
                             self.index = std.mem.indexOfNonePos(u8, self.line, self.index, soft_breaks) orelse self.line.len;
-                            return .{ .width = cur_width, .bytes = self.line[start..end] };
+                            return .{ .width = cur_width, .bytes = self.line[start..end], .offset = offset };
                         }
                     }
 
                     self.index = idx;
                     cur_width += @intCast(next_width);
                 }
-                return .{ .width = cur_width, .bytes = self.line[start..] };
+                return .{ .width = cur_width, .bytes = self.line[start..], .offset = offset };
             }
 
             /// Determines the index of the end of the next word
@@ -437,242 +352,6 @@ pub fn MultiStyleText(comptime StyleMap: type, comptime StyleList: type) type {
                 }
                 return self.line.len;
             }
-
-            // consumes a \n byte
-            fn consumeLF(self: *SoftwrapIterator) void {
-                if (self.index >= self.buf.len) return;
-                if (self.buf[self.index] == '\n') self.index += 1;
-            }
-
-            // consumes a \r byte
-            fn consumeCR(self: *SoftwrapIterator) void {
-                if (self.index >= self.buf.len) return;
-                if (self.buf[self.index] == '\r') self.index += 1;
-            }
         };
     };
 }
-
-// test "SoftwrapIterator: LF breaks" {
-// const unicode = try vaxis.Unicode.init(std.testing.allocator);
-// defer unicode.deinit(std.testing.allocator);
-// vxfw.DrawContext.init(&unicode, .unicode);
-// var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-// defer arena.deinit();
-
-// const ctx: vxfw.DrawContext = .{
-// .min = .{ .width = 0, .height = 0 },
-// .max = .{ .width = 20, .height = 10 },
-// .arena = arena.allocator(),
-// .cell_size = .{ .width = 10, .height = 20 },
-// };
-// var iter = SoftwrapIterator.init("Hello, \n world", ctx);
-// const first = iter.next();
-// try std.testing.expect(first != null);
-// try std.testing.expectEqualStrings("Hello,", first.?.bytes);
-// try std.testing.expectEqual(6, first.?.width);
-
-// const second = iter.next();
-// try std.testing.expect(second != null);
-// try std.testing.expectEqualStrings(" world", second.?.bytes);
-// try std.testing.expectEqual(6, second.?.width);
-
-// const end = iter.next();
-// try std.testing.expect(end == null);
-// }
-
-// test "SoftwrapIterator: soft breaks that fit" {
-// const unicode = try vaxis.Unicode.init(std.testing.allocator);
-// defer unicode.deinit(std.testing.allocator);
-// vxfw.DrawContext.init(&unicode, .unicode);
-// var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-// defer arena.deinit();
-
-// const ctx: vxfw.DrawContext = .{
-// .min = .{ .width = 0, .height = 0 },
-// .max = .{ .width = 6, .height = 10 },
-// .arena = arena.allocator(),
-// .cell_size = .{ .width = 10, .height = 20 },
-// };
-// var iter = SoftwrapIterator.init("Hello, \nworld", ctx);
-// const first = iter.next();
-// try std.testing.expect(first != null);
-// try std.testing.expectEqualStrings("Hello,", first.?.bytes);
-// try std.testing.expectEqual(6, first.?.width);
-
-// const second = iter.next();
-// try std.testing.expect(second != null);
-// try std.testing.expectEqualStrings("world", second.?.bytes);
-// try std.testing.expectEqual(5, second.?.width);
-
-// const end = iter.next();
-// try std.testing.expect(end == null);
-// }
-
-// test "SoftwrapIterator: soft breaks that are longer than width" {
-// const unicode = try vaxis.Unicode.init(std.testing.allocator);
-// defer unicode.deinit(std.testing.allocator);
-// vxfw.DrawContext.init(&unicode, .unicode);
-// var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-// defer arena.deinit();
-
-// const ctx: vxfw.DrawContext = .{
-// .min = .{ .width = 0, .height = 0 },
-// .max = .{ .width = 6, .height = 10 },
-// .arena = arena.allocator(),
-// .cell_size = .{ .width = 10, .height = 20 },
-// };
-// var iter = SoftwrapIterator.init("very-long-word \nworld", ctx);
-// const first = iter.next();
-// try std.testing.expect(first != null);
-// try std.testing.expectEqualStrings("very-l", first.?.bytes);
-// try std.testing.expectEqual(6, first.?.width);
-
-// const second = iter.next();
-// try std.testing.expect(second != null);
-// try std.testing.expectEqualStrings("ong-wo", second.?.bytes);
-// try std.testing.expectEqual(6, second.?.width);
-
-// const third = iter.next();
-// try std.testing.expect(third != null);
-// try std.testing.expectEqualStrings("rd", third.?.bytes);
-// try std.testing.expectEqual(2, third.?.width);
-
-// const fourth = iter.next();
-// try std.testing.expect(fourth != null);
-// try std.testing.expectEqualStrings("world", fourth.?.bytes);
-// try std.testing.expectEqual(5, fourth.?.width);
-
-// const end = iter.next();
-// try std.testing.expect(end == null);
-// }
-
-// test "SoftwrapIterator: soft breaks with leading spaces" {
-// const unicode = try vaxis.Unicode.init(std.testing.allocator);
-// defer unicode.deinit(std.testing.allocator);
-// vxfw.DrawContext.init(&unicode, .unicode);
-// var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-// defer arena.deinit();
-
-// const ctx: vxfw.DrawContext = .{
-// .min = .{ .width = 0, .height = 0 },
-// .max = .{ .width = 6, .height = 10 },
-// .arena = arena.allocator(),
-// .cell_size = .{ .width = 10, .height = 20 },
-// };
-// var iter = SoftwrapIterator.init("Hello,        \n world", ctx);
-// const first = iter.next();
-// try std.testing.expect(first != null);
-// try std.testing.expectEqualStrings("Hello,", first.?.bytes);
-// try std.testing.expectEqual(6, first.?.width);
-
-// const second = iter.next();
-// try std.testing.expect(second != null);
-// try std.testing.expectEqualStrings(" world", second.?.bytes);
-// try std.testing.expectEqual(6, second.?.width);
-
-// const end = iter.next();
-// try std.testing.expect(end == null);
-// }
-
-// test "LineIterator: LF breaks" {
-// const input = "Hello, \n world";
-// var iter: LineIterator = .{ .buf = input };
-// const first = iter.next();
-// try std.testing.expect(first != null);
-// try std.testing.expectEqualStrings("Hello, ", first.?);
-
-// const second = iter.next();
-// try std.testing.expect(second != null);
-// try std.testing.expectEqualStrings(" world", second.?);
-
-// const end = iter.next();
-// try std.testing.expect(end == null);
-// }
-
-// test "LineIterator: CR breaks" {
-// const input = "Hello, \r world";
-// var iter: LineIterator = .{ .buf = input };
-// const first = iter.next();
-// try std.testing.expect(first != null);
-// try std.testing.expectEqualStrings("Hello, ", first.?);
-
-// const second = iter.next();
-// try std.testing.expect(second != null);
-// try std.testing.expectEqualStrings(" world", second.?);
-
-// const end = iter.next();
-// try std.testing.expect(end == null);
-// }
-
-// test "LineIterator: CRLF breaks" {
-// const input = "Hello, \r\n world";
-// var iter: LineIterator = .{ .buf = input };
-// const first = iter.next();
-// try std.testing.expect(first != null);
-// try std.testing.expectEqualStrings("Hello, ", first.?);
-
-// const second = iter.next();
-// try std.testing.expect(second != null);
-// try std.testing.expectEqualStrings(" world", second.?);
-
-// const end = iter.next();
-// try std.testing.expect(end == null);
-// }
-
-// test "LineIterator: CRLF breaks with empty line" {
-// const input = "Hello, \r\n\r\n world";
-// var iter: LineIterator = .{ .buf = input };
-// const first = iter.next();
-// try std.testing.expect(first != null);
-// try std.testing.expectEqualStrings("Hello, ", first.?);
-
-// const second = iter.next();
-// try std.testing.expect(second != null);
-// try std.testing.expectEqualStrings("", second.?);
-
-// const third = iter.next();
-// try std.testing.expect(third != null);
-// try std.testing.expectEqualStrings(" world", third.?);
-
-// const end = iter.next();
-// try std.testing.expect(end == null);
-// }
-
-// test Text {
-// var text: Text = .{ .text = "Hello, world" };
-// const text_widget = text.widget();
-
-// var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-// defer arena.deinit();
-// const ucd = try vaxis.Unicode.init(arena.allocator());
-// vxfw.DrawContext.init(&ucd, .unicode);
-
-// // Center expands to the max size. It must therefore have non-null max width and max height.
-// // These values are asserted in draw
-// const ctx: vxfw.DrawContext = .{
-// .arena = arena.allocator(),
-// .min = .{},
-// .max = .{ .width = 7, .height = 2 },
-// .cell_size = .{ .width = 10, .height = 20 },
-// };
-
-// {
-// // Text softwraps by default
-// const surface = try text_widget.draw(ctx);
-// try std.testing.expectEqual(@as(vxfw.Size, .{ .width = 6, .height = 2 }), surface.size);
-// }
-
-// {
-// text.softwrap = false;
-// text.overflow = .ellipsis;
-// const surface = try text_widget.draw(ctx);
-// try std.testing.expectEqual(@as(vxfw.Size, .{ .width = 7, .height = 1 }), surface.size);
-// // The last character will be an ellipsis
-// try std.testing.expectEqualStrings("…", surface.buffer[surface.buffer.len - 1].char.grapheme);
-// }
-// }
-
-// test "refAllDecls" {
-// std.testing.refAllDecls(@This());
-// }

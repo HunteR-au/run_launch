@@ -1,6 +1,8 @@
-// This file captures the methods that can create a process view
-// A process view can be backed by various structs
-// including a raw stdout/stderr read/write loop OR a list of parent process_buffers
+// This file captures the methods that create and look up process views (widgets).
+//
+// Buffers are created by the pump (see pipeline/ingeststore.zig); the UI thread creates the
+// widget for a buffer when the pump announces it through the inbox. Everything here runs on
+// the UI thread only.
 
 const std = @import("std");
 const Io = std.Io;
@@ -11,96 +13,43 @@ const OutputView = @import("outputview.zig").OutputView;
 const utils = @import("utils");
 
 const View = AppModel.View;
-const BufferMgr = AppModel.BufferMgr;
-const PBufferAndId = AppModel.PBufferAndId;
-const UiConfig = AppModel.UiConfig;
+const ProcessBuffer = AppModel.ProcessBuffer;
 
 const uuid = utils.uuid;
 
-pub const ViewType = enum { process, virtual };
+pub const PBufferAndId = struct {
+    id: uuid.UUID,
+    buffer: *ProcessBuffer,
+};
 
 const StrIdCounter = struct {
-    m: std.Io.Mutex = .init,
     counter: usize = 0,
 
-    pub fn new_id(self: *StrIdCounter, io: Io) usize {
-        self.m.lockUncancelable(io);
+    pub fn new_id(self: *StrIdCounter) usize {
         const id = self.counter;
-        self.counter = self.counter + 1;
-        self.m.unlock(io);
+        self.counter += 1;
         return id;
     }
 };
 
 var counter = StrIdCounter{};
 
-pub fn create_process_view(
-    io: Io,
-    alloc: Allocator,
-    app_model: *AppModel,
-    processname: []const u8,
-) !uuid.UUID {
-    // Create the ProcesssBuffer
-    const buffer_tuple = try app_model
-        .buffers
-        .create_process_buffer(io, alloc);
-    errdefer {
-        app_model.buffers.remove_buffer(io, buffer_tuple.id);
-    }
-
-    try create_processview(
-        io,
-        alloc,
-        app_model,
-        processname,
-        buffer_tuple,
-    );
-    return buffer_tuple.id;
-}
-
-// TODO: we should have errdefers for removing processviews
-
-pub fn create_virtual_process_view(
-    io: Io,
-    alloc: Allocator,
-    app_model: *AppModel,
-    view_name: []const u8,
-    parents: []uuid.UUID,
-) !void {
-    const buffer_tuple = try app_model
-        .buffers
-        .create_virtual_process_buffer(io, alloc, parents);
-    errdefer {
-        app_model.buffers.remove_buffer(io, buffer_tuple.id);
-    }
-
-    try create_processview(
-        io,
-        alloc,
-        app_model,
-        view_name,
-        buffer_tuple,
-    );
-}
-
-fn create_processview(
+/// Creates the widget for an announced buffer and adds it to the first output view.
+pub fn create_processview(
     io: Io,
     alloc: Allocator,
     app_model: *AppModel,
     name: []const u8,
     buffer_tuple: PBufferAndId,
-) !void {
-    // This function is called from main when the program is spooling up. From then
-    // on it is expected to only be called in the TUI thread. It isn't threadsafe
-    // and should be protected by a mutex
-
+) !*OutputWidget {
     const p_output = try OutputWidget.init(
         alloc,
         name,
         buffer_tuple.id,
         buffer_tuple.buffer,
+        app_model.store,
     );
-    p_output.strid = counter.new_id(io);
+    p_output.strid = counter.new_id();
 
     errdefer p_output.deinit(io);
 
@@ -125,13 +74,14 @@ fn create_processview(
             },
             error.InvalidArg, error.OutputNotFound => |e| {
                 // we currently don't support returning other errors, so just panic!
-                std.debug.panic("createProcessView critically failed.\n error: {any}", .{e});
+                std.debug.panic("create_processview critically failed.\n error: {any}", .{e});
             },
         };
     }
 
     // we can assume there is at least one active view
     try app_model.model_view.outputviews.items[0].add_output(p_output);
+    return p_output;
 }
 
 pub fn parse_strid(strid: []const u8) !usize {
@@ -153,6 +103,18 @@ pub fn get_via_strid(app_model: *AppModel, strid: []const u8) ?*OutputWidget {
         }
     }
 
+    return null;
+}
+
+pub const Located = struct { view: *OutputView, widget: *OutputWidget };
+
+/// Finds the widget showing buffer `id` and the output view containing it.
+pub fn find_by_buffer_id(app_model: *AppModel, id: uuid.UUID) ?Located {
+    for (app_model.model_view.outputviews.items) |ov| {
+        for (ov.outputs.items) |ow| {
+            if (std.meta.eql(ow.id, id)) return .{ .view = ov, .widget = ow };
+        }
+    }
     return null;
 }
 

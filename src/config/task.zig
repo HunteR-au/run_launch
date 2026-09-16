@@ -3,8 +3,6 @@ const Io = std.Io;
 const utils = @import("utils");
 const expand = @import("expand.zig");
 
-const uuid = utils.uuid;
-
 pub const TaskPresentation = struct {
     reveal: ?[]const u8,
 };
@@ -35,54 +33,16 @@ pub const Task = struct {
         }
     }
 
-    pub fn run_task(self: *const Task, io: Io, alloc: std.mem.Allocator, id: uuid.UUID, pushfn: *const utils.PushFnProto) !std.process.Child {
-        var argv: [][]const u8 = undefined;
-        if (self.args != null) {
-            argv = try alloc.alloc([]const u8, self.args.?.len + 1);
-        } else {
-            argv = try alloc.alloc([]const u8, 1);
-        }
+    /// Builds `argv` (command followed by args). The caller owns the returned slice; the
+    /// strings inside are borrowed from the task.
+    pub fn buildArgv(self: *const Task, alloc: std.mem.Allocator) ![]const []const u8 {
+        const command = self.command orelse return error.MissingCommand;
+        const args: []const []const u8 = self.args orelse &.{};
 
-        defer alloc.free(argv);
-        argv[0] = self.command.?;
-        if (self.args) |args| {
-            for (args, 1..) |arg, i| {
-                argv[i] = arg;
-            }
-        }
-
-        const child = try std.process.spawn(io, .{
-            .argv = argv,
-            .stdin = .ignore,
-            .stdout = .pipe,
-            .stderr = .pipe,
-        });
-        //var child = std.process.Child.init(argv, alloc);
-
-        // child.stdout_behavior = std.process.Child.StdIo.Pipe;
-        // child.stderr_behavior = std.process.Child.StdIo.Pipe;
-        // child.stdin_behavior = .Ignore;
-        // child.spawn() catch |e| {
-        //     //std.debug.print("Spawning task {any} failed.\n", .{e});
-        //     return e;
-        // };
-
-        // TODO: either pass child OR return it: DON"T DO BOTH WITHOUT MUTEX
-        _ = try std.Thread.spawn(.{}, utils.pullpushLoop, .{ io, alloc, pushfn, child, id });
-
-        // TODO: BUG BUG BUG - child.wait will clean up and remove pipes. We probably only want to remove pipes once process ends AND
-        // we have confirmed the pipe is drained
-
-        // Q: should we leave the process clean up in the pullpushloop
-        // A: probably not, less control there
-        // Q: should we check on process status in pullpushloop...
-        // A: I think it would be nice to push pipe status / something when process fails
-
-        //_ = child.wait() catch |e| {
-        //    //std.debug.print("Spawning module {any} failed.\n", .{e});
-        //    return e;
-        //};
-        return child;
+        const argv = try alloc.alloc([]const u8, args.len + 1);
+        argv[0] = command;
+        @memcpy(argv[1..], args);
+        return argv;
     }
 };
 

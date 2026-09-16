@@ -1,62 +1,41 @@
+//! Debug-only diagnostics view. Messages are pushed through the pump like any other
+//! process output, into a buffer named `__debug`. Never blocks: a print from inside a UI
+//! draw drops the message rather than waiting on backpressure.
 const std = @import("std");
 const Io = std.Io;
 const builtin = @import("builtin");
 const utils = @import("utils");
-const ringbuffer_ = @import("ringbuffer.zig");
-const RingBuffer = ringbuffer_.RingBuffer(.{});
+const pump_ = @import("pump");
 
-var keep_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
-var buffer: [4096]u8 = [_]u8{0} ** 4096;
-var dest: [4096]u8 = [_]u8{0} ** 4096;
-var rbuf: RingBuffer = RingBuffer.init(&buffer);
-var __io: Io = undefined;
+const Pump = pump_.Pump;
 
-var debug_id: utils.uuid.UUID = undefined;
+var g_pump: ?*Pump = null;
+var g_io: Io = undefined;
+var g_id: utils.uuid.UUID = undefined;
 
-pub fn start_debuginfo(
-    io: Io,
-    alloc: std.mem.Allocator,
-    createviewprocessfn: fn (Io, std.mem.Allocator, []const u8) std.mem.Allocator.Error!utils.uuid.UUID,
-    pushfn: utils.PushFnProto,
-) !void {
-    if (builtin.mode == .Debug) {
-        keep_running.store(true, .monotonic);
-        debug_id = try createviewprocessfn(io, alloc, "__debug");
-        __io = io;
-        _ = try std.Thread.spawn(.{}, read_loop, .{ io, alloc, pushfn });
-    }
+pub fn init(io: Io, pump: *Pump) !void {
+    if (builtin.mode != .Debug) return;
+    g_io = io;
+    g_id = utils.uuid.newV4(io);
+    const name = try pump.alloc.dupe(u8, "__debug");
+    pump.submit(io, .{ .create_buffer = .{ .id = g_id, .name = name } }) catch |err| {
+        pump.alloc.free(name);
+        return err;
+    };
+    g_pump = pump;
 }
 
-pub fn stop_debuginfo() void {
-    if (builtin.mode == .Debug) {
-        keep_running.store(false, .monotonic);
-    }
-}
-
-fn read_loop(io: Io, alloc: std.mem.Allocator, pushfn: utils.PushFnProto) !void {
-    if (builtin.mode == .Debug) {
-        while (keep_running.load(.monotonic)) {
-            if (rbuf.used > 0) {
-                var writer: std.Io.Writer = .fixed(&dest);
-                try rbuf.flushEverythingToWriter(io, &writer);
-                if (writer.end > 0) {
-                    try pushfn(io, alloc, debug_id, dest[0..writer.end]);
-                }
-
-                //var stream = std.io.fixedBufferStream(&dest);
-                //try rbuf.flushEverythingToWriter(stream.writer());
-                // if (stream.pos > 0) {
-                //     try pushfn(alloc, debug_id, dest[0..stream.pos]);
-                // }
-            }
-        }
-    }
+pub fn deinit() void {
+    g_pump = null;
 }
 
 pub fn print(comptime format: []const u8, args: anytype) !void {
-    if (builtin.mode == .Debug) {
-        var buf: [128]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&buf, format, args);
-        try rbuf.writeAll(__io, msg);
-    }
+    if (builtin.mode != .Debug) return;
+    const pump = g_pump orelse return;
+
+    var buf: [512]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, format, args) catch buf[0..];
+    const copy = try pump.alloc.dupe(u8, text);
+    const accepted = pump.trySubmit(g_io, .{ .bytes = .{ .id = g_id, .stream = .stdout, .data = copy } }) catch false;
+    if (!accepted) pump.alloc.free(copy);
 }

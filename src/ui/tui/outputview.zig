@@ -195,15 +195,8 @@ pub const OutputView = struct {
 
         switch (event) {
             .init => {
-                try ctx.tick(16, self.widget());
                 try ctx.requestFocus(self.widget());
                 return;
-            },
-            .tick => {
-                // reset tick
-                try ctx.tick(16, self.widget());
-                // can change this to if buffer has been changed
-                ctx.redraw = true;
             },
             .key_press => {},
             .focus_in => {

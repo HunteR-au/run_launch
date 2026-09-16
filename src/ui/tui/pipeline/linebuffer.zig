@@ -15,7 +15,7 @@ pub const LineBuffer = struct {
     }
 
     pub fn fromOwnedSlice(alloc: std.mem.Allocator, buf: []u8) !LineBuffer {
-        var newlines_array: std.ArrayList(usize) = .initCapacity(alloc, 0);
+        var newlines_array: std.ArrayList(usize) = try .initCapacity(alloc, 0);
         for (buf, 0..) |char, idx| {
             if (char == '\n') {
                 try newlines_array.append(alloc, idx);
@@ -143,7 +143,7 @@ pub const LineBuffer = struct {
     pub fn getLineFromOffset(self: *LineBuffer, offset: usize) ?[]u8 {
         if (self.isEmpty()) return null;
 
-        if (offset >= self.tailIndex()) return null;
+        if (offset >= (self.tailIndex() orelse return null)) return null;
         const newline_index = std.sort.lowerBound(
             usize,
             self.newlines.items,
@@ -154,7 +154,7 @@ pub const LineBuffer = struct {
                 }
             }.compare,
         );
-        if (newline_index == self.newlines.len) return null;
+        if (newline_index == self.newlines.items.len) return null;
         return self.getLine(newline_index);
     }
 

@@ -91,6 +91,7 @@ pub fn build(b: *std.Build) !void {
 
     // Modules
     const utils = b.createModule(.{ .root_source_file = b.path("src/utils.zig") });
+    const pump = b.createModule(.{ .root_source_file = b.path("src/pump/pump.zig") });
     const runner = b.createModule(.{ .root_source_file = b.path("src/runner/runner.zig") });
     const debug_ui = b.createModule(.{ .root_source_file = b.path("src/debug/debug.zig") });
     const config = b.createModule(.{ .root_source_file = b.path("src/config/config.zig") });
@@ -105,8 +106,12 @@ pub fn build(b: *std.Build) !void {
     const yaml = yaml_dep.module("yaml");
     const ztracy = ztracy_dep.module("root");
 
+    // Setup pump
+    pump.addImport("utils", utils);
+
     // setup debug_ui
     debug_ui.addImport("utils", utils);
+    debug_ui.addImport("pump", pump);
 
     // Setup uiconfig
     uiconfig.addImport("utils", utils);
@@ -114,6 +119,7 @@ pub fn build(b: *std.Build) !void {
     // Setup runner
     runner.addImport("utils", utils);
     runner.addImport("config", config);
+    runner.addImport("pump", pump);
 
     // Setup config
     config.addImport("utils", utils);
@@ -126,6 +132,7 @@ pub fn build(b: *std.Build) !void {
     tui.addImport("regex", regex);
     tui.addImport("debug_ui", debug_ui);
     tui.addImport("runner", runner);
+    tui.addImport("pump", pump);
 
     // Setup the EXE
     const exe_mod = b.createModule(.{
@@ -161,6 +168,7 @@ pub fn build(b: *std.Build) !void {
     exe_mod.addImport("runner", runner);
     exe_mod.addImport("tui", tui);
     exe_mod.addImport("config", config);
+    exe_mod.addImport("pump", pump);
     exe_mod.addImport("ztracy", ztracy);
 
     exe_mod.linkLibrary(ztracy_dep.artifact("tracy"));
@@ -220,6 +228,7 @@ pub fn build(b: *std.Build) !void {
     output_unit_tests.root_module.addImport("debug_ui", debug_ui);
     output_unit_tests.root_module.addImport("runner", runner);
     output_unit_tests.root_module.addImport("config", config);
+    output_unit_tests.root_module.addImport("pump", pump);
 
     //const output_unit_tests = b.addTest(.{
     //    .root_source_file = b.path("src/ui/tui/output.zig"),
@@ -244,9 +253,22 @@ pub fn build(b: *std.Build) !void {
     exe_unit_tests.root_module.addImport("debug_ui", debug_ui);
     exe_unit_tests.root_module.addImport("runner", runner);
     exe_unit_tests.root_module.addImport("config", config);
+    exe_unit_tests.root_module.addImport("pump", pump);
+
+    // The pump module's tests need their own compilation: tests are only collected from a
+    // compilation's root module.
+    const pump_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pump/pump.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    pump_unit_tests.root_module.addImport("utils", utils);
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     const run_tui_unit_tests = b.addRunArtifact(output_unit_tests);
+    const run_pump_unit_tests = b.addRunArtifact(pump_unit_tests);
 
     // Similar to creating the run step earlier, this exposes a `test` step to
     // the `zig build --help` menu, providing a way for the user to request
@@ -254,4 +276,5 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tui_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
+    test_step.dependOn(&run_pump_unit_tests.step);
 }

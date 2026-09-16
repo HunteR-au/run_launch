@@ -69,19 +69,15 @@ pub fn create_objects(alloc: Allocator, app_model: *AppModel, io: Io) !*Objects 
     }
     objects.views = try view_list.toOwnedSlice(objects.alloc);
 
-    // Parse all ProcesssBuffers to construct the buffer data
+    // The UI mirror of the pump-owned buffers
+    _ = io;
     var buf_list = try std.ArrayList(Objects.Buffer).initCapacity(objects.alloc, 5);
-    {
-        var buf_iter = app_model.buffers.get_view_list_iterator(io);
-        defer buf_iter.deinit();
-
-        while (buf_iter.next()) |tuple| {
-            try buf_list.append(objects.alloc, .{
-                .id = tuple.buffer.strid,
-                .name = "",
-                .guid = tuple.id,
-            });
-        }
+    for (app_model.buffer_infos.items) |info| {
+        try buf_list.append(objects.alloc, .{
+            .id = info.strid,
+            .name = try objects.alloc.dupe(u8, info.name),
+            .guid = info.id,
+        });
     }
     objects.buffers = try buf_list.toOwnedSlice(objects.alloc);
 

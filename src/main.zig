@@ -4,22 +4,16 @@ const clap = @import("clap");
 
 const utils = @import("utils");
 const config_ = @import("config");
-const Launch = config_.Launch;
-const Task = config_.Task;
 const parseConfig = config_.parseConfig;
-//const Launch = @import("config/launch.zig");
-//const Task = @import("config/task.zig");
-const uiview = @import("ui/uiview.zig");
 const tui = @import("tui");
 const runner = @import("runner");
 const ui_debug = @import("debug_ui");
+const pump_ = @import("pump");
 
 const ztracy = @import("ztracy");
 
 const builtin = @import("builtin");
 const debug = (builtin.mode == std.builtin.OptimizeMode.Debug);
-
-const vaxis = @import("dependencies/vaxis");
 
 const RunLaunchErrors = error{
     BadPositionals,
@@ -39,8 +33,11 @@ pub fn initLogger(io: Io, path: []const u8) !void {
 
 pub fn deinitLogger() void {
     if (g_log_file) |file| {
-        file.close(debug_log_io);
+        g_log_mutex.lockUncancelable(debug_log_io);
+        defer g_log_mutex.unlock(debug_log_io);
+        g_log_writer.interface.flush() catch {};
         g_log_file = null;
+        file.close(debug_log_io);
     }
 }
 
@@ -78,7 +75,6 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
     debug_log_io = io;
-    _ = init.minimal.environ;
 
     const tracy_zone = ztracy.ZoneNC(@src(), "Compute Magic", 0x00_ff_00_00);
     defer tracy_zone.End();
@@ -86,19 +82,13 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
-
-    var stderr_buffer: [1024]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
-    _ = &stderr_writer.interface;
+    // Required to push buffered output to the terminal
+    defer stdout.flush() catch {};
 
     if (debug) {
         try initLogger(io, "logs.txt");
     }
-
-    //const writer = std.io.getStdOut().writer();
-    // TODO: make this thread safe!!!
-    // var gpa = std.heap.DebugAllocator(.{}){};
-    // defer _ = gpa.deinit();
+    defer if (debug) deinitLogger();
 
     const alloc = gpa;
 
@@ -106,7 +96,6 @@ pub fn main(init: std.process.Init) !void {
         \\-h, --help                    Display this help and exit
         \\-d, --dry-run                 Print out actions without executing them
         \\-w, --web-ui                  Render the web ui interface
-        //\\-t, --tasks    <str>          The path to the tasks.json file
         \\<str>                         The path to the launch.json file
         \\<str>                         The configuration name to run
     );
@@ -129,46 +118,34 @@ pub fn main(init: std.process.Init) !void {
         try stdout.print("Invalid format: use \"run_launch.exe path name\"\n", .{});
         return RunLaunchErrors.BadPositionals;
     }
-
-    //var tasks: ?Task.TaskJson = null;
-    //defer {
-    //    if (tasks) |t| {
-    //        t.deinit();
-    //    }
-    //}
-    //if (res.args.tasks) |tasks_filepath| {
-    //    tasks = try Task.TaskJson.init(allocator);
-    //    try tasks.?.parse_tasks(tasks_filepath);
-    //}
+    if (res.args.@"web-ui" != 0) {
+        try stdout.print("The web ui is not currently supported\n", .{});
+        return;
+    }
 
     // we have parsed what we need from the arguments...lets go!
     const launchPath = res.positionals[0].?;
     const taskNameToRun: []const u8 = res.positionals[1].?;
 
-    //const launchdata = try Launch.parse_json(allocator, launchPath);
-    //defer launchdata.deinit(allocator);
-
     // parse configuration
     const config = try parseConfig(io, alloc, launchPath);
-    var executor = try runner.ConfiguredRunner.init(
-        alloc,
-        config.launch,
-        config.tasks,
-        .{
-            .notifyNewProcess = &tui.createProcessView,
-            .pushBytes = &tui.pushLogging,
-        },
-    );
+
+    // The store owns every buffer; the pump feeds it; the runner produces; the TUI reads
+    // snapshots and posts commands.
+    const store = try tui.IngestStore.init(alloc, io);
+    defer store.deinit();
+    const pump = try pump_.Pump.init(alloc, io, store.sink(), .{});
+    defer pump.deinit();
+    store.attach(pump);
+
+    const executor = try runner.ConfiguredRunner.init(alloc, config.launch, config.tasks, pump);
     defer executor.deinit(io);
 
     var tui_env_map = try init.environ_map.clone(alloc);
     defer tui_env_map.deinit();
 
-    if (res.args.@"web-ui" != 0) {
-        //try uiview.setupWebUI(alloc);
-    } else {
-        try tui.start_tui(io, alloc, executor, &tui_env_map);
-    }
+    try tui.start_tui(io, alloc, executor, pump, store, &tui_env_map);
+    try pump.start();
 
     std.log.debug("first positional arg: {s}\n", .{res.positionals[0].?});
     std.log.debug("version: {s}\n", .{executor.config.version});
@@ -182,43 +159,34 @@ pub fn main(init: std.process.Init) !void {
     defer if (run_handle) |*h| h.deinit();
     defer if (post_handle) |*h| h.deinit();
 
-    if (res.args.@"web-ui" != 0) {
-        // TODO: this is currently broken as pushLogging now uses a uuid rather than a processname
-        //_ = try runner.run(allocator, taskNameToRun, executor.config, tasks, uiview.createProcessView, uiview.pushLogging);
-    } else {
-        if (@import("builtin").mode == .Debug) {
-            executor.m.lockUncancelable(io);
-            defer executor.m.unlock(io);
-
-            try ui_debug.start_debuginfo(io, alloc, tui.createProcessView, tui.pushLogging);
-        }
-        // Currently waiting will cause the pipes to be killed before being drained properly
-        pre_handle = try executor.runPreTasks(io, taskNameToRun, .nonBlocking);
-        run_handle = try executor.run(io, taskNameToRun, .nonBlocking);
-
-        //_ = try runner.run(allocator, taskNameToRun, executor.config, tasks, tui.createProcessView, tui.pushLogging);
-    }
-
-    if (res.args.@"web-ui" != 0) {
-        //uiview.closeWebUI();
-    } else {
-        try tui.waitForTUIClose(io);
-
-        if (@import("builtin").mode == .Debug) {
-            ui_debug.stop_debuginfo();
-        }
-
-        try executor.killAll(io);
-        post_handle = try executor.runPostTasks(io, taskNameToRun, .blocking);
-        //tui.stop_tui();
-    }
-
     if (debug) {
-        deinitLogger();
+        try ui_debug.init(io, pump);
     }
+    pre_handle = try executor.runPreTasks(io, taskNameToRun, .nonBlocking);
+    run_handle = try executor.run(io, taskNameToRun, .nonBlocking);
 
-    // Required to push buffered output to the terminal
-    try stdout.flush();
+    try tui.waitForTUIClose(io);
+    std.log.info("shutdown: tui closed", .{});
+
+    // Shutdown order:
+    // 1. children are terminated and their readers joined (the model is still alive, so any
+    //    last output is delivered);
+    // 2. post tasks run to completion, their output fully read;
+    // 3. the pump is closed and drained, so nothing can write into the buffers any more;
+    // 4. the TUI thread is joined and the model freed;
+    // 5. deferred: runner, pump, store (frees the buffers), logger.
+    if (debug) ui_debug.deinit();
+
+    try executor.killAll(io);
+    std.log.info("shutdown: children stopped", .{});
+    post_handle = try executor.runPostTasks(io, taskNameToRun, .blocking);
+    if (post_handle) |*h| try h.waitAllDone(io);
+    std.log.info("shutdown: post tasks done", .{});
+
+    pump.stop();
+    std.log.info("shutdown: pump stopped", .{});
+    tui.stop_tui(io);
+    std.log.info("shutdown: tui thread joined", .{});
 }
 
 // https://code.visualstudio.com/docs/editor/debugging#_launchjson-attributes
@@ -263,8 +231,6 @@ pub fn main(init: std.process.Init) !void {
 
 // TODO: BUG - current settings don't apply to non-active outputs (need to refresh)
 // TODO: BUG - there is an extra count in the last fold that shouldn't be there
-// TODO: BUG - there is an issue with cmd.exe /c dir C:\Windows blocking on pipes
-//                something is wrong with pushpull
 // TODO: add grep notifications to the UI with config (pattern, contification color)
 // TODO: add line numbers to each debug view
 // TODO: add the ability to jump to a line via js

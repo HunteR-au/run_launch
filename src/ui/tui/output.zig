@@ -6,6 +6,7 @@ const helpers = @import("helpers.zig");
 const debug_ui = @import("debug_ui");
 
 const process_buffer_mod = @import("pipeline/processbuffer.zig");
+const ingeststore = @import("pipeline/ingeststore.zig");
 const search = @import("pipeline/search.zig");
 const cmd_mod = @import("cmd/cmd.zig");
 const actions = @import("actions/actions.zig");
@@ -18,100 +19,42 @@ const uiconfig_mod = @import("uiconfig");
 pub const UiConfig = uiconfig_mod.UiConfig;
 pub const ProcessConfig = uiconfig_mod.ProcessConfig;
 pub const ColorRule = uiconfig_mod.ColorRule;
-pub const StyleMap = std.HashMap(usize, usize, std.hash_map.AutoContext(usize), std.hash_map.default_max_load_percentage);
-pub const StyleList = std.ArrayList(vaxis.Style);
 
 pub const Output = @This();
 const Regex = @import("regex").Regex;
 pub const ProcessBuffer = process_buffer_mod.ProcessBuffer;
+pub const WindowSnapshot = process_buffer_mod.WindowSnapshot;
+pub const IngestStore = ingeststore.IngestStore;
+pub const PumpCommand = ingeststore.PumpCommand;
 pub const Filter = process_buffer_mod.Filter;
 pub const Pipeline = process_buffer_mod.Pipeline;
 pub const Reviewer = process_buffer_mod.Reviewer;
 pub const Cmd = cmd_mod.Cmd;
 const Handler = cmd_mod.Handler;
 
-const SearchInfo = struct {
-    const ResultCache = struct {
-        result: search.ProcessBufferSearchIterator.Result,
-        cached_style: ?[]?vaxis.Style = null,
-    };
-
-    iterator: search.ProcessBufferSearchIterator,
-    regex: *Regex,
-    result_cache: ?ResultCache = null,
-    highlight_style: vaxis.Style = .{ .bg = .{ .rgb = .{ 255, 255, 255 } } },
-
-    pub fn deinit(self: *SearchInfo, io: Io, alloc: std.mem.Allocator) void {
-        if (self.result_cache) |cache| {
-            alloc.free(cache.result.str);
-            if (cache.cached_style) |style_slice| {
-                alloc.free(style_slice);
-            }
-        }
-        self.regex.deinit();
-        alloc.destroy(self.regex);
-        self.iterator.deinit(io);
-    }
-
-    pub fn setCache(
-        self: *SearchInfo,
-        alloc: std.mem.Allocator,
-        result: *const search.ProcessBufferSearchIterator.Result,
-    ) !void {
-        if (self.result_cache != null) clearCache(self, alloc);
-
-        self.result_cache = .{
-            .result = .{
-                .str = try alloc.dupe(u8, result.str),
-                .lowerBound = result.lowerBound,
-                .upperBound = result.upperBound,
-            },
-        };
-    }
-
-    pub fn clearCache(self: *SearchInfo, alloc: std.mem.Allocator) void {
-        if (self.result_cache == null) return;
-        alloc.free(self.result_cache.?.result.str);
-        if (self.result_cache.?.cached_style) |cached_style| {
-            alloc.free(cached_style);
-        }
-        self.result_cache = null;
-    }
-
-    pub fn cacheStyle(self: *SearchInfo, alloc: std.mem.Allocator, style_map: *const StyleMap, style_list: *const StyleList) !void {
-        if (self.result_cache == null) return;
-
-        const upperBound = self.result_cache.?.result.upperBound;
-        const lowerBound = self.result_cache.?.result.lowerBound;
-
-        // cache the existing styles into a slice using the current result
-        var array = try std.ArrayListUnmanaged(?vaxis.Style).initCapacity(alloc, upperBound - lowerBound);
-        for (lowerBound..upperBound) |i| {
-            const style_idx = style_map.get(i);
-            if (style_idx) |idx| {
-                try array.append(alloc, style_list.items[idx]);
-            } else {
-                try array.append(alloc, null);
-            }
-        }
-        self.result_cache.?.cached_style = try array.toOwnedSlice(alloc);
-    }
+/// Live search state for `find`/`next`/`prev`. The highlight is an overlay applied at draw
+/// time and is only shown while the searcher's copy matches the buffer's version.
+const SearchState = struct {
+    searcher: search.Searcher,
+    current: ?search.Match = null,
+    highlight_style: vaxis.Style = .{ .bg = .{ .rgb = .{ 255, 255, 255 } }, .fg = .{ .rgb = .{ 0, 0, 0 } } },
 };
+
+pub const Highlight = struct { start: usize, end: usize, style: vaxis.Style };
 
 arena: std.heap.ArenaAllocator,
 _alloc: std.mem.Allocator,
+/// pump-owned; read only through snapshots, mutated only via `store` commands
 nonowned_process_buffer: *ProcessBuffer,
+store: *IngestStore,
 cmd_ref: ?*Cmd = null,
 widget_ref: ?*OutputWidget = null,
-search_info: ?SearchInfo = null,
+search_state: ?SearchState = null,
 handlers_ids: std.ArrayList(cmd_mod.HandleId),
 filter_ids: std.ArrayList(Filter.HandleId),
 reviewer_ids: std.ArrayList(Reviewer.HandleId),
 is_focused: bool = false,
 show_lines: bool = true,
-
-style_list: StyleList,
-style_map: StyleMap,
 
 const UnfoldHandlerData = .{
     .event_str = "unfilter",
@@ -184,7 +127,7 @@ const DumpBufferHandlerData = .{
     .handle = handleDumpCmd,
 };
 
-pub fn init(alloc: std.mem.Allocator, process_buf: *ProcessBuffer) !Output {
+pub fn init(alloc: std.mem.Allocator, process_buf: *ProcessBuffer, store: *IngestStore) !Output {
     return .{
         .arena = std.heap.ArenaAllocator.init(alloc),
         ._alloc = alloc,
@@ -192,205 +135,180 @@ pub fn init(alloc: std.mem.Allocator, process_buf: *ProcessBuffer) !Output {
         .filter_ids = try std.ArrayList(Filter.HandleId).initCapacity(alloc, 10),
         .reviewer_ids = try std.ArrayList(Reviewer.HandleId).initCapacity(alloc, 10),
         .nonowned_process_buffer = process_buf,
-        .style_list = try StyleList.initCapacity(alloc, 10),
-        .style_map = StyleMap.init(alloc),
+        .store = store,
     };
 }
 
+/// Posts the removal of every filter/reviewer this output installed. The removals are
+/// queued behind anything already in flight, so they always apply before a later
+/// `remove_buffer`.
 pub fn deinit(self: *Output, io: Io) void {
+    _ = io;
     if (self.cmd_ref != null) {
         self.unsubscribeHandlersFromCmd();
     }
     self.handlers_ids.deinit(self._alloc);
+    const id = self.bufferId();
     for (self.filter_ids.items) |fId| {
-        var filter = self.nonowned_process_buffer.pipeline.removeFilter(io, fId);
-        if (filter) |*f| {
-            f.deinit();
-        }
+        self.store.post(.{ .remove_filter = .{ .id = id, .fid = fId } }) catch {};
     }
     self.filter_ids.deinit(self._alloc);
     for (self.reviewer_ids.items) |rId| {
-        var reviewer = self.nonowned_process_buffer.pipeline.removeReviewer(io, rId);
-        if (reviewer) |*r| {
-            r.deinit();
-        }
-    }
-    if (self.search_info) |*info| {
-        info.deinit(io, self.widget_ref.?.alloc);
+        self.store.post(.{ .remove_reviewer = .{ .id = id, .rid = rId } }) catch {};
     }
     self.reviewer_ids.deinit(self._alloc);
-    self.style_map.deinit();
-    self.style_list.deinit(self._alloc);
+    if (self.search_state) |*s| s.searcher.deinit();
     self.arena.deinit();
+}
+
+fn bufferId(self: *const Output) utils.uuid.UUID {
+    return self.nonowned_process_buffer.id orelse .{ .bytes = [_]u8{0} ** 16 };
+}
+
+/// Compiles every argument as a regex into `alloc`; invalid patterns are skipped.
+fn compileRegexList(alloc: std.mem.Allocator, arguments: []const []const u8) std.mem.Allocator.Error![]Regex {
+    var regex_list = try std.ArrayList(Regex).initCapacity(alloc, arguments.len);
+    for (arguments) |arg| {
+        const re = Regex.compile(alloc, arg) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                std.log.warn("ignoring invalid regex \"{s}\": {t}", .{ arg, err });
+                continue;
+            },
+        };
+        try regex_list.append(alloc, re);
+    }
+    return try regex_list.toOwnedSlice(alloc);
+}
+
+fn parseArgs(self: *Output, args: []const u8) std.mem.Allocator.Error![]const []const u8 {
+    return utils.parseArgsLineWithQuoteGroups(self.arena.allocator(), args);
+}
+
+fn freeArgs(self: *Output, arguments: []const []const u8) void {
+    const alloc = self.arena.allocator();
+    for (arguments) |s| alloc.free(s);
+    alloc.free(arguments);
+}
+
+fn installLineFilter(
+    self: *Output,
+    arguments: []const []const u8,
+    transform_fn: Filter.TransformLineFn,
+) std.mem.Allocator.Error!void {
+    var filter = try Filter.init(self._alloc, transform_fn);
+    errdefer filter.deinit();
+    const owned = filter.ownedAllocator();
+
+    const filter_data = try owned.create(transforms.FoldFilterData);
+    filter_data.* = .{ .regexs = try compileRegexList(owned, arguments) };
+    filter.data = filter_data;
+
+    try self.filter_ids.append(self._alloc, filter.id);
+    // ownership of `filter` transfers to the pump (post frees it on failure)
+    self.store.post(.{ .add_filter = .{ .id = self.bufferId(), .filter = filter } }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => std.log.warn("could not install filter: {t}", .{err}),
+    };
 }
 
 fn handleFoldCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-
     if (!self.is_focused) return;
 
-    const alloc = self.arena.allocator();
+    const arguments = try self.parseArgs(args);
+    defer self.freeArgs(arguments);
 
-    // parse the arguments
-    const arguments = try utils.parseArgsLineWithQuoteGroups(alloc, args);
-    defer {
-        for (arguments) |s| alloc.free(s);
-        alloc.free(arguments);
-    }
-
-    // create a list of compiled regex objects
-    var regex_list = try std.ArrayList(Regex).initCapacity(alloc, arguments.len);
-    for (arguments) |arg| {
-        const re = Regex.compile(alloc, arg) catch {
-            continue;
-        };
-        try regex_list.append(alloc, re);
-    }
-
-    const filter_data = try alloc.create(transforms.FoldFilterData);
-    filter_data.* = .{ .regexs = try regex_list.toOwnedSlice(alloc) };
-
-    // we need to recalculate the color styles
-    self.clearStyle();
-
-    // Create the filter and add to the pipeline
-    const filter = try Filter.init(self.arena.allocator(), filter_data, transforms.fold);
-    try self.filter_ids.append(self._alloc, filter.id);
-    try self.nonowned_process_buffer.addFilter(filter);
+    try self.installLineFilter(arguments, transforms.fold);
 }
 
 fn handlePruneCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-
     if (!self.is_focused) return;
 
-    const alloc = self.arena.allocator();
+    const arguments = try self.parseArgs(args);
+    defer self.freeArgs(arguments);
 
-    // parse the arguments
-    const arguments = try utils.parseArgsLineWithQuoteGroups(alloc, args);
-    defer {
-        for (arguments) |s| alloc.free(s);
-        alloc.free(arguments);
-    }
-
-    // create a list of compiled regex objects
-    var regex_list = try std.ArrayList(Regex).initCapacity(alloc, arguments.len);
-    for (arguments) |arg| {
-        const re = Regex.compile(alloc, arg) catch {
-            continue;
-        };
-        try regex_list.append(alloc, re);
-    }
-
-    const filter_data = try alloc.create(transforms.PruneFilterData);
-    filter_data.* = .{ .regexs = try regex_list.toOwnedSlice(alloc) };
-
-    // we need to recalculate the color styles
-    self.clearStyle();
-
-    // Create the filter and add to the pipeline
-    const filter = try Filter.init(self.arena.allocator(), filter_data, transforms.prune);
-    try self.filter_ids.append(self._alloc, filter.id);
-    try self.nonowned_process_buffer.addFilter(filter);
+    try self.installLineFilter(arguments, transforms.prune);
 }
 
 fn handleReplaceCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    const alloc = self.arena.allocator();
-
     if (!self.is_focused) return;
 
-    // parse the arguments for the replace command
-    const arg_array = try utils.parseArgsLineWithQuoteGroups(alloc, args);
-    defer {
-        for (arg_array) |s| alloc.free(s);
-        alloc.free(arg_array);
-    }
+    const arg_array = try self.parseArgs(args);
+    defer self.freeArgs(arg_array);
 
     if (arg_array.len % 2 != 0) {
         // don't parse any arguments if the full line is invalid
         return;
     }
 
+    var filter = try Filter.init(self._alloc, transforms.replace);
+    errdefer filter.deinit();
+    const owned = filter.ownedAllocator();
+
     // each pair comes in the form of `search_str` `replace_str`
-    var replace_patterns = try std.ArrayList(transforms.ReplacePattern).initCapacity(
-        alloc,
-        arg_array.len / 2,
-    );
+    var replace_patterns = try std.ArrayList(transforms.ReplacePattern).initCapacity(owned, arg_array.len / 2);
     for (0..arg_array.len / 2) |i| {
         const search_arg = arg_array[i * 2];
         const replace_arg = arg_array[i * 2 + 1];
 
-        const re = Regex.compile(alloc, search_arg) catch {
-            continue;
+        const re = Regex.compile(owned, search_arg) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                std.log.warn("ignoring invalid regex \"{s}\": {t}", .{ search_arg, err });
+                continue;
+            },
         };
-        try replace_patterns.append(
-            alloc,
-            .{ .regex = re, .replace_str = try alloc.dupe(u8, replace_arg) },
-        );
+        try replace_patterns.append(owned, .{ .regex = re, .replace_str = try owned.dupe(u8, replace_arg) });
     }
 
-    // Create the data object for the replaceReviewer
-    const reviewer_data = try alloc.create(transforms.ReplaceFilterData);
-    reviewer_data.* = .{
-        .replace_patterns = try replace_patterns.toOwnedSlice(alloc),
-    };
+    const filter_data = try owned.create(transforms.ReplaceFilterData);
+    filter_data.* = .{ .replace_patterns = try replace_patterns.toOwnedSlice(owned) };
+    filter.data = filter_data;
 
-    // we need to recalculate the color styles
-    self.clearStyle();
-
-    const filter = try Filter.init(self.arena.allocator(), reviewer_data, transforms.replace);
     try self.filter_ids.append(self._alloc, filter.id);
-    try self.nonowned_process_buffer.addFilter(filter);
+    self.store.post(.{ .add_filter = .{ .id = self.bufferId(), .filter = filter } }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => std.log.warn("could not install filter: {t}", .{err}),
+    };
+}
+
+fn removeAllFilters(self: *Output) std.mem.Allocator.Error!void {
+    self.store.post(.{ .remove_all_filters = .{ .id = self.bufferId() } }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => std.log.warn("could not remove filters: {t}", .{err}),
+    };
+    self.filter_ids.clearAndFree(self._alloc);
 }
 
 fn handleUnfoldCmd(_: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-
     if (!self.is_focused) return;
 
-    // we need to recalculate the color styles
-    self.clearStyle();
-
     // TODO: only remove fold commands
-    try self.nonowned_process_buffer.removeAllFilters();
-    self.filter_ids.clearAndFree(self._alloc);
+    try self.removeAllFilters();
 }
 
 fn handleUnreplaceCmd(_: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-
     if (!self.is_focused) return;
 
-    // we need to recalculate the color styles
-    self.clearStyle();
-
     // TODO: only remove replace commands
-    try self.nonowned_process_buffer.removeAllFilters();
-    self.filter_ids.clearAndFree(self._alloc);
+    try self.removeAllFilters();
 }
 
 fn handleFindCmd(io: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    const alloc = self.arena.allocator();
-
     if (!self.is_focused) return;
 
-    // parse the arguments
-    const arguments = try utils.parseArgsLineWithQuoteGroups(alloc, args);
-    defer {
-        for (arguments) |s| alloc.free(s);
-        alloc.free(arguments);
-    }
+    const arguments = try self.parseArgs(args);
+    defer self.freeArgs(arguments);
 
     if (arguments.len < 1) return;
 
     const start_from_line = self.widget_ref.?.window.last_draw.top_line;
-    //const top_rendered_line_buffer_offset = self.widget_ref.?.get_rendered_line_buffer_offset(.first) catch |e| switch (e) {
-    //    error.NoLinesRendered => return,
-    //    error.LineNotRendered => return,
-    //};
-
     self.searchStr(io, arguments[0], start_from_line) catch return;
 }
 
@@ -424,8 +342,10 @@ fn handleInfoCmd(_: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.E
 fn handleUncolorCmd(_: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
     if (!self.is_focused) return;
-    self.clearStyle();
-    try self.nonowned_process_buffer.removeAllReviewers();
+    self.store.post(.{ .remove_all_reviewers = .{ .id = self.bufferId() } }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => std.log.warn("could not remove reviewers: {t}", .{err}),
+    };
     self.reviewer_ids.clearAndFree(self._alloc);
 }
 
@@ -444,47 +364,19 @@ const Cyan = vaxis.Color{ .rgb = .{ 0, 255, 255 } };
 const White = vaxis.Color{ .rgb = .{ 255, 255, 255 } };
 const Black = vaxis.Color{ .rgb = .{ 0, 0, 0 } };
 fn parseColor(arg: []const u8, ground: ColorGround) !vaxis.Style {
-    if (std.mem.eql(u8, arg, "red")) {
-        return switch (ground) {
-            .Bg => return vaxis.Style{ .bg = Red },
-            .Fg => return vaxis.Style{ .fg = Red },
-        };
-    } else if (std.mem.eql(u8, arg, "green")) {
-        return switch (ground) {
-            .Bg => return vaxis.Style{ .bg = Green },
-            .Fg => return vaxis.Style{ .fg = Green },
-        };
-    } else if (std.mem.eql(u8, arg, "yellow")) {
-        return switch (ground) {
-            .Bg => return vaxis.Style{ .bg = Yellow },
-            .Fg => return vaxis.Style{ .fg = Yellow },
-        };
-    } else if (std.mem.eql(u8, arg, "blue")) {
-        return switch (ground) {
-            .Bg => return vaxis.Style{ .bg = Blue },
-            .Fg => return vaxis.Style{ .fg = Blue },
-        };
-    } else if (std.mem.eql(u8, arg, "magenta")) {
-        return switch (ground) {
-            .Bg => return vaxis.Style{ .bg = Magenta },
-            .Fg => return vaxis.Style{ .fg = Magenta },
-        };
-    } else if (std.mem.eql(u8, arg, "cyan")) {
-        return switch (ground) {
-            .Bg => return vaxis.Style{ .bg = Cyan },
-            .Fg => return vaxis.Style{ .fg = Cyan },
-        };
-    } else if (std.mem.eql(u8, arg, "white")) {
-        return switch (ground) {
-            .Bg => return vaxis.Style{ .bg = White },
-            .Fg => return vaxis.Style{ .fg = White },
-        };
-    } else if (std.mem.eql(u8, arg, "black")) {
-        return switch (ground) {
-            .Bg => return vaxis.Style{ .bg = Black },
-            .Fg => return vaxis.Style{ .fg = Black },
-        };
-    } else {
+    const named: ?vaxis.Color = blk: {
+        if (std.mem.eql(u8, arg, "red")) break :blk Red;
+        if (std.mem.eql(u8, arg, "green")) break :blk Green;
+        if (std.mem.eql(u8, arg, "yellow")) break :blk Yellow;
+        if (std.mem.eql(u8, arg, "blue")) break :blk Blue;
+        if (std.mem.eql(u8, arg, "magenta")) break :blk Magenta;
+        if (std.mem.eql(u8, arg, "cyan")) break :blk Cyan;
+        if (std.mem.eql(u8, arg, "white")) break :blk White;
+        if (std.mem.eql(u8, arg, "black")) break :blk Black;
+        break :blk null;
+    };
+
+    const color: vaxis.Color = named orelse blk: {
         const parts = utils.parseTripleInt(arg) catch {
             // invalid RGB code
             return error.InvalidRGBFormat;
@@ -495,17 +387,17 @@ fn parseColor(arg: []const u8, ground: ColorGround) !vaxis.Style {
             if (part > 255) return error.InvalidRGBFormat;
         }
 
-        const u8_parts: [3]u8 = .{
+        break :blk .{ .rgb = .{
             @intCast(parts[0]),
             @intCast(parts[1]),
             @intCast(parts[2]),
-        };
-        return switch (ground) {
-            .Bg => return vaxis.Style{ .bg = .{ .rgb = u8_parts } },
-            .Fg => return vaxis.Style{ .fg = .{ .rgb = u8_parts } },
-        };
-    }
-    return error.InvalidArgument;
+        } };
+    };
+
+    return switch (ground) {
+        .Bg => vaxis.Style{ .bg = color },
+        .Fg => vaxis.Style{ .fg = color },
+    };
 }
 
 const ArgStateMachine = enum {
@@ -516,7 +408,6 @@ const ArgStateMachine = enum {
 fn createStyleFromArg(arg: []const u8) ?transforms.ColorPattern {
     // fg:color:bg:color:line
 
-    //var state = ArgStateMachine.Empty;
     var parsedBg = false;
     var parsedFg = false;
     var color_line = false;
@@ -569,18 +460,15 @@ fn createStyleFromArg(arg: []const u8) ?transforms.ColorPattern {
                     parsedFg = true;
                     continue :state .Fg;
                 }
-                continue :state .Empty;
             } else if (std.mem.eql(u8, segment.?, "bg")) {
                 if (parsedBg) {
-                    // invalid arg, can't have fg twice
+                    // invalid arg, can't have bg twice
                     return null;
                 } else {
                     parsedBg = true;
                     continue :state .Bg;
                 }
             } else if (std.mem.eql(u8, segment.?, "line") and !is_current_seg_first) {
-                // we need to parse this to make sure it is a valid
-                std.log.debug("print full line\n", .{});
                 color_line = true;
                 continue :state .Empty;
             } else if (is_current_seg_first) {
@@ -589,11 +477,14 @@ fn createStyleFromArg(arg: []const u8) ?transforms.ColorPattern {
                     return null;
                 };
                 if (result_style) |*s| {
-                    s.bg = style.bg;
+                    s.fg = style.fg;
                 } else {
                     result_style = style;
                 }
                 continue :state .Empty;
+            } else {
+                // unknown segment
+                return null;
             }
         },
     }
@@ -602,13 +493,47 @@ fn createStyleFromArg(arg: []const u8) ?transforms.ColorPattern {
     } else return null;
 }
 
+/// Builds a color reviewer from (regex, style) pairs and installs it on the buffer.
+fn installColorReviewer(self: *Output, pairs: []const [2][]const u8) std.mem.Allocator.Error!void {
+    var reviewer = try Reviewer.init(self._alloc, transforms.color);
+    errdefer reviewer.deinit();
+    const owned = reviewer.ownedAllocator();
+
+    var color_patterns = try std.ArrayList(transforms.ColorPattern).initCapacity(owned, pairs.len);
+    for (pairs) |pair| {
+        const re = Regex.compile(owned, pair[0]) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                std.log.warn("ignoring invalid regex \"{s}\": {t}", .{ pair[0], err });
+                continue;
+            },
+        };
+        var color_pattern = createStyleFromArg(pair[1]) orelse {
+            std.log.warn("ignoring invalid style \"{s}\"", .{pair[1]});
+            continue;
+        };
+        color_pattern.regex = re;
+        try color_patterns.append(owned, color_pattern);
+    }
+
+    const reviewer_data = try owned.create(transforms.ColorReviewerData);
+    reviewer_data.* = .{ .style_patterns = try color_patterns.toOwnedSlice(owned) };
+    reviewer.data = reviewer_data;
+
+    try self.reviewer_ids.append(self._alloc, reviewer.id);
+    // ownership of `reviewer` transfers to the pump (post frees it on failure)
+    self.store.post(.{ .add_reviewer = .{ .id = self.bufferId(), .reviewer = reviewer } }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => std.log.warn("could not install color rules: {t}", .{err}),
+    };
+}
+
 pub fn setupViaUiconfig(
     self: *Output,
     config: *UiConfig,
     ui_name: []const u8,
 ) std.mem.Allocator.Error!void {
-    const alloc = self.arena.allocator();
-    var scratch_arena = std.heap.ArenaAllocator.init(alloc);
+    var scratch_arena = std.heap.ArenaAllocator.init(self._alloc);
     defer scratch_arena.deinit();
     const salloc = scratch_arena.allocator();
     const self_config = config.get(ui_name);
@@ -633,142 +558,103 @@ pub fn setupViaUiconfig(
         }
     }
 
-    // parse all color rules
-    var patterns = try std.ArrayList(transforms.ColorPattern).initCapacity(alloc, num_color_rules);
+    // turn every rule into a (pattern, style-arg) pair
+    var pairs = try std.ArrayList([2][]const u8).initCapacity(salloc, num_color_rules);
     for (applied_color_rules.items) |c_rule| {
         if (c_rule.background_color == null and c_rule.foreground_color == null) continue;
         if (c_rule.pattern == null) continue;
 
-        const re = Regex.compile(alloc, c_rule.pattern.?) catch {
-            continue;
-        };
-
-        // create style argument
-        var style_args = try std.ArrayList([]u8).initCapacity(salloc, 2);
+        var style_args = try std.ArrayList([]const u8).initCapacity(salloc, 5);
         if (c_rule.background_color) |bg_str| {
-            try style_args.append(salloc, try salloc.dupe(u8, "bg"));
-            try style_args.append(salloc, try salloc.dupe(u8, bg_str));
+            try style_args.append(salloc, "bg");
+            try style_args.append(salloc, bg_str);
         }
         if (c_rule.foreground_color) |fg_str| {
-            try style_args.append(salloc, try salloc.dupe(u8, "fg"));
-            try style_args.append(salloc, try salloc.dupe(u8, fg_str));
+            try style_args.append(salloc, "fg");
+            try style_args.append(salloc, fg_str);
         }
         if (!c_rule.just_pattern) {
-            try style_args.append(salloc, try salloc.dupe(u8, "line"));
+            try style_args.append(salloc, "line");
         }
         const style_arg = try std.mem.join(salloc, ":", style_args.items);
-
-        var color_pattern = createStyleFromArg(style_arg);
-        if (color_pattern == null) continue;
-
-        color_pattern.?.regex = re;
-        try patterns.append(alloc, color_pattern.?);
+        try pairs.append(salloc, .{ c_rule.pattern.?, style_arg });
     }
 
-    const reviewer_data = try alloc.create(transforms.ColorReviewerData);
-    reviewer_data.* = .{
-        .output = self,
-        .style_patterns = try patterns.toOwnedSlice(alloc),
-    };
-
-    // Create and add the reviewer to the process buffer
-    const reviewer = try Reviewer.init(self.arena.allocator(), reviewer_data, transforms.color);
-    try self.reviewer_ids.append(self._alloc, reviewer.id);
-    try self.nonowned_process_buffer.addReviewer(reviewer);
+    try self.installColorReviewer(pairs.items);
 }
 
 fn handleShowLinesCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    const alloc = self.arena.allocator();
 
-    // parse arguments
-    const arg_array = try utils.parseArgsLineWithQuoteGroups(alloc, args);
+    const arg_array = try self.parseArgs(args);
+    defer self.freeArgs(arg_array);
+
     var b_all_flag = false;
-
-    // check for --all, if so set the correct value and exit
+    var requested: ?bool = null;
     for (arg_array) |arg| {
         if (std.mem.eql(u8, arg, "--all")) {
             b_all_flag = true;
-            continue;
-        }
-        if (b_all_flag == true) {
-            if (std.mem.eql(u8, arg, "on")) {
-                self.show_lines = true;
-                return;
-            } else if (std.mem.eql(u8, arg, "off")) {
-                self.show_lines = false;
-                return;
-            } else {
-                // an invalid argument
-                return;
-            }
+        } else if (std.mem.eql(u8, arg, "on")) {
+            requested = true;
+        } else if (std.mem.eql(u8, arg, "off")) {
+            requested = false;
+        } else {
+            // an invalid argument
+            return;
         }
     }
 
-    // The all flag wasn't set so only proceed if we are focused
-    if (!self.is_focused) return;
+    // Without --all only the focused output changes
+    if (!b_all_flag and !self.is_focused) return;
 
-    // the global flag isn't used, toggle the value
-    self.show_lines = if (self.show_lines) false else true;
-    return;
+    if (requested) |value| {
+        self.show_lines = value;
+    } else {
+        self.show_lines = !self.show_lines;
+    }
 }
 
-fn handleDumpCmd(io: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleDumpCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    const alloc = self.arena.allocator();
 
     var isAll = false;
     var isFiltered = false;
 
-    // parse arguments
-    const arg_array = try utils.parseArgsLineWithQuoteGroups(alloc, args);
+    const arg_array = try self.parseArgs(args);
+    defer self.freeArgs(arg_array);
     for (arg_array) |arg| {
-        if (std.mem.eql(u8, arg, "--all")) {
+        if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "-a")) {
             isAll = true;
-        } else if (std.mem.eql(u8, arg, "-a")) {
-            isAll = true;
-        } else if (std.mem.eql(u8, arg, "--filtered")) {
-            isFiltered = true;
-        } else if (std.mem.eql(u8, arg, "-f")) {
+        } else if (std.mem.eql(u8, arg, "--filtered") or std.mem.eql(u8, arg, "-f")) {
             isFiltered = true;
         }
     }
 
     if (!isAll and !self.is_focused) return;
 
-    // copy the filtered or non-filtered buffer
-    var buffer: ?[]u8 = null;
-    if (isFiltered) {
-        buffer = try self.copyUnfiltedBuffer(alloc);
-    } else {
-        buffer = try self.copyBuffer(alloc);
-    }
-    defer if (buffer) |b| alloc.free(b);
-
-    // dump to disk
-    actions.dumpOutputBuffer(
-        io,
-        alloc,
-        buffer.?,
-        self.widget_ref.?.id,
-        self.widget_ref.?.process_name,
-    ) catch {
-        return;
+    // the pump writes the file from its own copy of the buffer, so the UI never blocks on disk
+    self.dump(if (isFiltered) .Filtered else .Raw, .async) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => std.log.warn("could not dump buffer: {t}", .{err}),
     };
+}
+
+/// Asks the pump to write this output's buffer to disk. `.sync` blocks until the file is
+/// written (used when quitting).
+pub fn dump(self: *Output, backing: ProcessBuffer.BufferBacking, mode: enum { async, sync }) IngestStore.PostError!void {
+    const cmd: PumpCommand = .{ .dump = .{ .id = self.bufferId(), .backing = backing } };
+    switch (mode) {
+        .async => try self.store.post(cmd),
+        .sync => try self.store.call(cmd),
+    }
 }
 
 fn handleColorCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    const alloc = self.arena.allocator();
-
     if (!self.is_focused) return;
 
-    // parse the arguments for the color command
-    const arg_array = try utils.parseArgsLineWithQuoteGroups(alloc, args);
-    defer {
-        for (arg_array) |s| alloc.free(s);
-        alloc.free(arg_array);
-    }
+    const arg_array = try self.parseArgs(args);
+    defer self.freeArgs(arg_array);
 
     if (arg_array.len % 2 != 0) {
         // don't parse any arguments if the full line is invalid
@@ -776,190 +662,102 @@ fn handleColorCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocat
     }
 
     // each pair comes in the form of `regex` `style`
-    // add each pair
-    var color_patterns = try std.ArrayList(transforms.ColorPattern).initCapacity(alloc, arg_array.len / 2);
+    var pairs = try std.ArrayList([2][]const u8).initCapacity(self.arena.allocator(), arg_array.len / 2);
+    defer pairs.deinit(self.arena.allocator());
     for (0..arg_array.len / 2) |i| {
-        const regex_arg = arg_array[i * 2];
-        const style_arg = arg_array[i * 2 + 1];
-
-        const re = Regex.compile(alloc, regex_arg) catch {
-            continue;
-        };
-        var color_pattern = createStyleFromArg(style_arg);
-        if (color_pattern == null) continue;
-
-        color_pattern.?.regex = re;
-        try color_patterns.append(alloc, color_pattern.?);
+        try pairs.append(self.arena.allocator(), .{ arg_array[i * 2], arg_array[i * 2 + 1] });
     }
 
-    // Create the data object for the colorReviewer
-    const reviewer_data = try alloc.create(transforms.ColorReviewerData);
-    reviewer_data.* = .{
-        .output = self,
-        .style_patterns = try color_patterns.toOwnedSlice(alloc),
-    };
-
-    // Create and add the reviewer to the process buffer
-    const reviewer = try Reviewer.init(self.arena.allocator(), reviewer_data, transforms.color);
-    try self.reviewer_ids.append(self._alloc, reviewer.id);
-    try self.nonowned_process_buffer.addReviewer(reviewer);
+    try self.installColorReviewer(pairs.items);
 }
+
+// ------------------------------------------------------------------
+// Search
+// ------------------------------------------------------------------
 
 pub fn removeSearch(self: *Output, io: Io) !void {
-    const alloc = self.widget_ref.?.alloc;
-
-    // unhighlight previous match
-    if (self.search_info) |*sinfo| {
-        if (sinfo.result_cache) |*prev_result| {
-            if (prev_result.cached_style) |style_range| {
-                self.updateStyleWithRange(
-                    style_range,
-                    prev_result.result.lowerBound,
-                ) catch return;
-            }
-        }
-
-        // remove the search info
-        sinfo.deinit(io, alloc);
-        self.search_info = null;
+    _ = io;
+    if (self.search_state) |*s| {
+        s.searcher.deinit();
+        self.search_state = null;
     }
 }
 
-// TODO: handle errors properly
+/// Starts a new search from `start_search_line`, wrapping around to the top of the buffer
+/// if nothing is found below.
 pub fn searchStr(self: *Output, io: Io, search_str: []const u8, start_search_line: usize) !void {
-    var alloc = self.widget_ref.?.alloc;
-
-    // unhighlight and remove previous match
     try self.removeSearch(io);
 
-    // create regex
-    var re = try alloc.create(Regex);
-    re.* = try Regex.compile(alloc, search_str);
-    errdefer alloc.destroy(re);
+    var state: SearchState = .{ .searcher = try search.Searcher.init(self._alloc, search_str) };
+    errdefer state.searcher.deinit();
 
-    // start our two attempts at finding the match starting at the start_serach_line and looping
-    // around to the start of the buffer
-    var secondAttempt = false;
-    while (true) : (secondAttempt = true) {
-        var start_searching_line: usize = 0;
-        if (secondAttempt == false) {
-            start_searching_line = start_search_line;
-        }
+    _ = try state.searcher.refresh(self.nonowned_process_buffer);
+    state.searcher.seekLine(start_search_line);
+    var match = try state.searcher.next();
+    if (match == null and start_search_line > 0) {
+        state.searcher.seekLine(0);
+        match = try state.searcher.next();
+    }
 
-        // if start_searching_line is 0 on our first attempt, we don't search twice
-        if (start_searching_line == 0 and secondAttempt == false) secondAttempt = true;
-
-        var search_iter = search.startSearchFrom(
-            io,
-            alloc,
-            self.nonowned_process_buffer,
-            re,
-            start_searching_line,
-        ) catch return;
-
-        const match = try search_iter.next(io);
-
-        if (match) |*m| {
-            // jump to the line containing the start of the match
-            self.widget_ref.?.jump_output_to_line(
-                //self.nonowned_process_buffer.filtered_buffer.getLineIndexFromOffset(m.lowerBound).?,
-                self.nonowned_process_buffer.getLineIndexFromOffset(.Filtered, m.lowerBound).?,
-            ) catch return;
-
-            // free previous search_info and save new one
-            if (self.search_info) |*info| {
-                info.clearCache(alloc);
-                info.deinit(io, alloc);
-            }
-
-            // cache the new search info
-            self.search_info = .{ .iterator = search_iter, .regex = re };
-            self.search_info.?.setCache(alloc, m) catch return;
-            self.search_info.?.cacheStyle(
-                alloc,
-                &self.style_map,
-                &self.style_list,
-            ) catch return;
-
-            // highlight the found match
-            self.updateStyle(&self.search_info.?.highlight_style, m.lowerBound, m.upperBound) catch return;
-            break;
-        }
-
-        if (secondAttempt) {
-            // We failed to find a match
-            search_iter.deinit(io);
-            re.deinit();
-            alloc.destroy(re);
-            break;
-        }
+    if (match) |m| {
+        state.current = m;
+        self.search_state = state;
+        self.jumpToLine(m.line);
+    } else {
+        // nothing found: keep no state, so `next` does nothing until a new `find`
+        state.searcher.deinit();
     }
 }
 
-// TODO: handle errors properly
+fn searchStep(self: *Output, comptime direction: enum { forward, backward }) void {
+    const state = &(self.search_state orelse return);
+    const refreshed = state.searcher.refresh(self.nonowned_process_buffer) catch return;
+    if (refreshed == .rebuilt) state.current = null;
+
+    const found = switch (direction) {
+        .forward => state.searcher.next(),
+        .backward => state.searcher.prev(),
+    } catch return;
+
+    if (found) |m| {
+        state.current = m;
+        self.jumpToLine(m.line);
+    } else {
+        // ran off the end: step back onto the last match so the next press in the other
+        // direction continues from there
+        _ = switch (direction) {
+            .forward => state.searcher.prev(),
+            .backward => state.searcher.next(),
+        } catch return;
+    }
+}
+
 pub fn searchNext(self: *Output, io: Io) void {
-    if (self.search_info) |*sinfo| {
-        if (sinfo.iterator.next(io) catch return) |*match| {
-            // jump to the line containing the start of the match
-            self.widget_ref.?.jump_output_to_line(
-                //self.nonowned_process_buffer.filtered_buffer.getLineIndexFromOffset(match.lowerBound).?,
-                self.nonowned_process_buffer.getLineIndexFromOffset(.Filtered, match.lowerBound).?,
-            ) catch return;
-
-            // unhighlight previous match
-            if (sinfo.result_cache) |*prev_result| {
-                if (prev_result.cached_style) |style_range| {
-                    self.updateStyleWithRange(
-                        style_range,
-                        prev_result.result.lowerBound,
-                    ) catch return;
-                }
-            }
-
-            // save the search results
-            sinfo.setCache(self.widget_ref.?.alloc, match) catch return;
-            sinfo.cacheStyle(self.widget_ref.?.alloc, &self.style_map, &self.style_list) catch return;
-
-            // highlight new match
-            self.updateStyle(&self.search_info.?.highlight_style, match.lowerBound, match.upperBound) catch return;
-        } else {
-            // the iterator got to the end, attempt to back off to the last match
-            _ = sinfo.iterator.prev(io) catch {};
-        }
-    }
+    _ = io;
+    self.searchStep(.forward);
 }
 
-// TODO: handle errors properly
 pub fn searchPrev(self: *Output, io: Io) void {
-    if (self.search_info) |*sinfo| {
-        if (sinfo.iterator.prev(io) catch return) |*match| {
-            // jump to the line container the  start of the match
-            self.widget_ref.?.jump_output_to_line(
-                //self.nonowned_process_buffer.filtered_buffer.getLineIndexFromOffset(match.lowerBound).?,
-                self.nonowned_process_buffer.getLineIndexFromOffset(.Filtered, match.lowerBound).?,
-            ) catch return;
+    _ = io;
+    self.searchStep(.backward);
+}
 
-            // unhighlight previous match
-            if (sinfo.result_cache) |*prev_result| {
-                if (prev_result.cached_style) |style_range| {
-                    self.updateStyleWithRange(
-                        style_range,
-                        prev_result.result.lowerBound,
-                    ) catch return;
-                }
-            }
+/// Returns the window-relative range to highlight for the current search match, if any.
+/// Nothing is highlighted when the match belongs to an older buffer version.
+pub fn searchHighlight(self: *Output, snap: *const WindowSnapshot) ?Highlight {
+    const state = &(self.search_state orelse return null);
+    const m = state.current orelse return null;
+    const version = state.searcher.index.version orelse return null;
+    if (version != snap.meta.version) return null;
 
-            // save the search results
-            sinfo.setCache(self.widget_ref.?.alloc, match) catch return;
-            sinfo.cacheStyle(self.widget_ref.?.alloc, &self.style_map, &self.style_list) catch return;
+    const window_end = snap.base_offset + snap.text.len;
+    if (m.hi <= snap.base_offset or m.lo >= window_end) return null;
 
-            // highlight new match
-            self.updateStyle(&self.search_info.?.highlight_style, match.lowerBound, match.upperBound) catch return;
-        } else {
-            // the iterator got to the start, attempt to back off to the first match
-            _ = sinfo.iterator.next(io) catch {};
-        }
-    }
+    return .{
+        .start = @max(m.lo, snap.base_offset) - snap.base_offset,
+        .end = @min(m.hi, window_end) - snap.base_offset,
+        .style = state.highlight_style,
+    };
 }
 
 pub fn debuginfo(self: *Output) void {
@@ -975,52 +773,6 @@ pub fn debuginfo(self: *Output) void {
 
 pub fn jumpToLine(self: *Output, line_num: usize) void {
     self.widget_ref.?.jump_output_to_line(line_num) catch return;
-}
-
-pub fn clearStyle(self: *Output) void {
-    self.style_list.clearAndFree(self._alloc);
-    self.style_map.clearAndFree();
-}
-
-/// Update the style structures in the output style_map and style_list
-pub fn updateStyle(self: *Output, style: *const vaxis.Style, begin_offset: usize, end_offset: usize) !void {
-    const style_index = blk: {
-        for (self.style_list.items, 0..) |s, i| {
-            if (std.meta.eql(s, style.*)) {
-                break :blk i;
-            }
-        }
-        try self.style_list.append(self._alloc, style.*);
-        break :blk self.style_list.items.len - 1;
-    };
-    for (begin_offset..end_offset) |i| {
-        try self.style_map.put(i, style_index);
-    }
-}
-
-pub fn updateStyleWithRange(self: *Output, style_range: []?vaxis.Style, begin_offset: usize) !void {
-    const end_offset: usize = begin_offset + style_range.len;
-
-    for (begin_offset..end_offset, 0..) |offset, range_idx| {
-        const current_style = style_range[range_idx];
-
-        // find style offset, create if it doesn't exist
-        if (current_style) |style| {
-            const style_index = blk: {
-                for (self.style_list.items, 0..) |s, i| {
-                    if (std.meta.eql(s, style)) {
-                        break :blk i;
-                    }
-                }
-                try self.style_list.append(self._alloc, style);
-                break :blk self.style_list.items.len - 1;
-            };
-            try self.style_map.put(offset, style_index);
-        } else {
-            // there previously wasn't a style for this index
-            _ = self.style_map.remove(offset);
-        }
-    }
 }
 
 pub fn subscribeHandlersToCmd(self: *Output, cmd: *Cmd) !void {
@@ -1068,27 +820,66 @@ pub fn unsubscribeHandlersFromCmd(self: *Output) void {
     self.cmd_ref = null;
 }
 
-fn copyBuffer(self: *const Output, alloc: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
-    return self.nonowned_process_buffer.copyBuffer(alloc, .Filtered);
-}
+const testing = std.testing;
+const pump_mod = @import("pump");
 
-fn copyUnfiltedBuffer(self: *const Output, alloc: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
-    // TODO
-    return self.nonowned_process_buffer.copyBuffer(alloc, .Raw);
-}
+/// A running pump feeding a store: the Output handlers post commands into it.
+const Harness = struct {
+    store: *IngestStore,
+    pump: *pump_mod.Pump,
+    pb: *ProcessBuffer,
+    id: utils.uuid.UUID,
+
+    fn init(alloc: std.mem.Allocator, io: Io, name: []const u8) !Harness {
+        const store = try IngestStore.init(alloc, io);
+        errdefer store.deinit();
+        const pump = try pump_mod.Pump.init(alloc, io, store.sink(), .{});
+        errdefer pump.deinit();
+        store.attach(pump);
+        try pump.start();
+
+        const id = try store.createBufferAsync(name);
+        var h: Harness = .{ .store = store, .pump = pump, .pb = undefined, .id = id };
+        h.sync();
+        h.pb = store.lookup(id).?;
+        return h;
+    }
+
+    /// Blocks until everything posted so far has been processed (FIFO barrier).
+    fn sync(self: *Harness) void {
+        self.store.call(.{ .remove_all_filters = .{ .id = .{ .bytes = [_]u8{0xff} ** 16 } } }) catch unreachable;
+    }
+
+    fn write(self: *Harness, text: []const u8) void {
+        self.store.writeText(self.id, text) catch unreachable;
+        self.sync();
+    }
+
+    fn filtered(self: *Harness, alloc: std.mem.Allocator) ![]u8 {
+        self.sync();
+        return self.pb.copyBuffer(alloc, .Filtered);
+    }
+
+    fn deinit(self: *Harness) void {
+        self.pump.stop();
+        self.pump.deinit();
+        self.store.deinit();
+    }
+};
 
 test "folding text" {
-    const testing = std.testing;
     const alloc = testing.allocator;
     const io = testing.io;
 
-    var process_buffer = try ProcessBuffer.init(io, alloc);
-    var output = try Output.init(alloc, process_buffer);
-    defer process_buffer.deinit();
-    defer output.deinit();
+    var h = try Harness.init(alloc, io, "t");
+    defer h.deinit();
+    var output = try Output.init(alloc, h.pb, h.store);
+    defer {
+        output.deinit(io);
+        h.sync();
+    }
 
-    std.debug.print("process_buffer.lastNewLine = {d}\n", .{process_buffer.lastNewLine});
-    try process_buffer.append(
+    h.write(
         \\line 1: apples
         \\line 2: carrots
         \\line 3: carrots
@@ -1098,127 +889,106 @@ test "folding text" {
         \\line 7: carrots
         \\
     );
-    std.debug.print("process_buffer.lastNewLine = {d}\n", .{process_buffer.lastNewLine});
 
     // set focus to make sure the command works
     output.is_focused = true;
 
-    const fold_args = "apples";
-    try Output.handleFoldCmd(fold_args, &output);
-    const buffer = try output.copyBuffer(alloc);
+    try Output.handleFoldCmd(io, "apples", &output);
+    const buffer = try h.filtered(alloc);
     defer alloc.free(buffer);
-
-    std.debug.print("process_buffer.lastNewLine = {d}\n", .{process_buffer.lastNewLine});
-
     try testing.expectEqualStrings(
         \\line 1: apples
         \\line 4: apples
         \\line 6: apples
+        \\
     , buffer);
 
     // Add another line to be filtered
-    try process_buffer.append("line 8: carrots\n");
-    std.debug.print("process_buffer.lastNewLine = {d}\n", .{process_buffer.lastNewLine});
-
-    const buffer2 = try output.copyBuffer(alloc);
+    h.write("line 8: carrots\n");
+    const buffer2 = try h.filtered(alloc);
     defer alloc.free(buffer2);
-
     try testing.expectEqualStrings(
         \\line 1: apples
         \\line 4: apples
         \\line 6: apples
+        \\
     , buffer2);
 
-    // BUG: might be due to lastNewLine not being updated....
     // Add another line which should be included
-    try process_buffer.append("line 9: apples\n");
-    std.debug.print("process_buffer.lastNewLine = {d}\n", .{process_buffer.lastNewLine});
-
-    const buffer3 = try output.copyBuffer(alloc);
+    h.write("line 9: apples\n");
+    const buffer3 = try h.filtered(alloc);
     defer alloc.free(buffer3);
-
     try testing.expectEqualStrings(
         \\line 1: apples
         \\line 4: apples
         \\line 6: apples
         \\line 9: apples
+        \\
     , buffer3);
+
+    // removing the filter restores everything
+    try Output.handleUnfoldCmd(io, "", &output);
+    const buffer4 = try h.filtered(alloc);
+    defer alloc.free(buffer4);
+    try testing.expectEqual(9, std.mem.count(u8, buffer4, "\n"));
 }
 
-// TODO test the color arg parsing
-// TODO test using the pipeline with color reviewers
-// TODO test coloring in multistyletext...
-//   there seems to be an off by 1 due to newlines
-
-test "coloring text" {
-    const testing = std.testing;
+test "coloring text produces absolute style ranges" {
     const alloc = testing.allocator;
     const io = testing.io;
 
-    var process_buffer = try ProcessBuffer.init(io, alloc);
-    var output = try Output.init(alloc, process_buffer);
-    defer process_buffer.deinit();
-    defer output.deinit();
-
-    try process_buffer.append(
-        \\line 1: apples
-        \\line 2: carrots
-        \\line 3: carrots
-        \\line 4: apples
-        \\line 5: carrots
-        \\line 6: apples
-        \\line 7: carrots
-    );
-    const apple_len: comptime_int = "apples".len;
-    const apple_line_len: comptime_int = "line 1: apples\n".len;
-    const carrots_line_len: comptime_int = "line 1: carrots\n".len;
-    const prefix_len: comptime_int = "line 1: ".len;
-
-    const color_args = "apples red";
-    try Output.handleColorCmd(color_args, &output);
-    const buffer = try output.copyBuffer(alloc);
-    defer alloc.free(buffer);
-
-    var expected_list = try Output.StyleList.initCapacity(alloc, 7);
-    defer expected_list.deinit(alloc);
-    try expected_list.append(alloc, vaxis.Style{ .fg = .{ .rgb = .{ 255, 0, 0 } } });
-
-    var expected_map = Output.StyleMap.init(alloc);
-    defer expected_map.deinit();
-
-    for (prefix_len..prefix_len + apple_len) |i| {
-        try expected_map.put(i, 0);
+    var h = try Harness.init(alloc, io, "t");
+    defer h.deinit();
+    var output = try Output.init(alloc, h.pb, h.store);
+    defer {
+        output.deinit(io);
+        h.sync();
     }
+    output.is_focused = true;
 
-    const starting_ofs = apple_line_len + carrots_line_len * 2 + prefix_len; // add 3 bytes for newlines
-    for (starting_ofs..starting_ofs + apple_len) |i| {
-        try expected_map.put(i, 0);
-    }
+    // two batches, including an empty line and a CRLF line, to check offsets don't drift
+    h.write("x apples\n\napples\n");
+    try Output.handleColorCmd(io, "apples red", &output);
+    h.write("apples\r\n");
 
-    const starting_ofs2 = apple_line_len * 2 + carrots_line_len * 3 + prefix_len; // add 5 bytes for newlines
-    for (starting_ofs2..starting_ofs2 + apple_len) |i| {
-        try expected_map.put(i, 0);
-    }
+    // the buffer is quiescent after sync(); read the pump-owned index directly
+    const ranges = h.pb.styles.ranges.items;
+    try testing.expectEqual(3, ranges.len);
+    try testing.expectEqual(2, ranges[0].start);
+    try testing.expectEqual(8, ranges[0].end);
+    try testing.expectEqual(10, ranges[1].start);
+    try testing.expectEqual(16, ranges[1].end);
+    try testing.expectEqual(17, ranges[2].start);
+    try testing.expectEqual(23, ranges[2].end);
+    try testing.expectEqual(vaxis.Style{ .fg = Red }, h.pb.styles.palette.items[ranges[0].style]);
 
-    errdefer {
-        std.log.debug("expected...\n", .{});
-        var expected_it = expected_map.iterator();
-        while (expected_it.next()) |entry| {
-            std.log.debug("map key: {d} value: {d}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
-        }
-        std.log.debug("actual...\n", .{});
-        var actual_it = output.style_map.iterator();
-        while (actual_it.next()) |entry| {
-            std.log.debug("map key: {d} value: {d}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
-        }
-    }
+    // a full-line rule paints the whole line
+    try Output.handleColorCmd(io, "^x fg:blue:line", &output);
+    h.sync();
+    const ranges2 = h.pb.styles.ranges.items;
+    try testing.expectEqual(0, ranges2[0].start);
+    try testing.expectEqual(8, ranges2[0].end);
 
-    try testing.expectEqualDeep(expected_list, output.style_list);
+    // uncolor keeps the filtered text but drops the styles, without bumping version
+    const before = h.pb.peek();
+    try Output.handleUncolorCmd(io, "", &output);
+    h.sync();
+    try testing.expectEqual(0, h.pb.styles.ranges.items.len);
+    try testing.expectEqual(before.version, h.pb.peek().version);
+}
 
-    try testing.expectEqual(expected_map.count(), output.style_map.count());
-    var it = expected_map.iterator();
-    while (it.next()) |entry| {
-        const actual_value = output.style_map.get(entry.key_ptr.*) orelse return error.MissingKey;
-        try testing.expectEqual(entry.value_ptr.*, actual_value);
-    }
+test "parse style args" {
+    const p1 = createStyleFromArg("red").?;
+    try testing.expectEqual(vaxis.Style{ .fg = Red }, p1.style);
+    try testing.expect(!p1.full_line);
+
+    const p2 = createStyleFromArg("fg:red:bg:blue:line").?;
+    try testing.expectEqual(vaxis.Style{ .fg = Red, .bg = Blue }, p2.style);
+    try testing.expect(p2.full_line);
+
+    const p3 = createStyleFromArg("bg:1,2,3").?;
+    try testing.expectEqual(vaxis.Style{ .bg = .{ .rgb = .{ 1, 2, 3 } } }, p3.style);
+
+    try testing.expectEqual(null, createStyleFromArg("fg:red:fg:blue"));
+    try testing.expectEqual(null, createStyleFromArg("notacolor"));
 }

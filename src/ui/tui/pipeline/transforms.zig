@@ -1,8 +1,6 @@
 const std = @import("std");
 const Filter = @import("filter.zig");
 const Reviewer = @import("reviewer.zig");
-const Pipeline = @import("pipeline.zig").Pipeline;
-const Output = @import("../output.zig").Output;
 
 const helpers = @import("../helpers.zig");
 const Regex = @import("regex").Regex;
@@ -15,12 +13,7 @@ pub fn fold(_: *Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.Er
     const fold_data: *FoldFilterData = @ptrCast(@alignCast(data));
 
     for (fold_data.regexs) |*re| {
-        std.log.debug("Output:fold() comparing \"{s}\"", .{line});
         if (try re.partialMatch(line) == true) {
-            std.log.debug("MATCH", .{});
-            //std.debug.print("Output:fold -> regex found a match on line {s}\n", .{line});
-
-            // found match
             return Filter.TransformResult{ .line = line };
         }
     }
@@ -46,74 +39,52 @@ pub const ReplaceFilterData = struct { replace_patterns: []ReplacePattern };
 pub fn replace(filter: *Filter, data: *anyopaque, line: []const u8) std.mem.Allocator.Error!Filter.TransformResult {
     if (line.len == 0) return Filter.TransformResult{ .empty = {} };
 
-    const alloc = filter.arena.allocator();
+    const alloc = filter.scratch.allocator();
     const replace_data: *ReplaceFilterData = @ptrCast(@alignCast(data));
 
-    // we need to keep the altered line for the next pattern
-    var final_result = try std.ArrayListUnmanaged(u8).initCapacity(alloc, line.len);
-    try final_result.appendSlice(alloc, line);
-    for (replace_data.replace_patterns) |*patterns| {
-        var result = try std.ArrayListUnmanaged(u8).initCapacity(alloc, final_result.items.len);
+    // Each pattern runs over the output of the previous one (double buffering), and the
+    // copied slices come from the same string the matcher ran over.
+    var current: []const u8 = line;
+    for (replace_data.replace_patterns) |*pattern| {
+        var result = try std.ArrayList(u8).initCapacity(alloc, current.len);
         var start: usize = 0;
-        defer start = 0;
 
-        var iter = helpers.regexMatchAll(&patterns.regex, final_result.items);
+        var iter = helpers.regexMatchAll(&pattern.regex, current);
         while (try iter.next()) |match| {
-            try result.appendSlice(alloc, line[start..match.lowerBound]);
-            try result.appendSlice(alloc, patterns.replace_str);
+            try result.appendSlice(alloc, current[start..match.lowerBound]);
+            try result.appendSlice(alloc, pattern.replace_str);
             start = match.upperBound;
         }
+        try result.appendSlice(alloc, current[start..current.len]);
 
-        // append the end of the line
-        try result.appendSlice(alloc, line[start..line.len]);
-
-        // move over the altered line into the outer array for the
-        // next pattern or to be returned
-        final_result.deinit(alloc);
-        const slice = try result.toOwnedSlice(alloc);
-        final_result = std.ArrayListUnmanaged(u8){
-            .items = slice,
-            .capacity = slice.len,
-        };
+        current = result.items;
     }
 
-    return Filter.TransformResult{
-        .line = try final_result.toOwnedSlice(alloc),
-    };
+    return Filter.TransformResult{ .line = current };
 }
 
 pub const ColorPattern = struct { regex: Regex, style: vaxis.Style, full_line: bool = false };
-pub const ColorReviewerData = struct { style_patterns: []ColorPattern, output: *Output };
+pub const ColorReviewerData = struct { style_patterns: []ColorPattern };
 
-pub fn color(_: *const Reviewer, data: *anyopaque, metadata: Pipeline.MetaData, line: []const u8) std.mem.Allocator.Error!void {
+pub fn color(_: *const Reviewer, data: *anyopaque, sink: *Reviewer.LineSink, line: []const u8) std.mem.Allocator.Error!void {
     const color_data: *ColorReviewerData = @ptrCast(@alignCast(data));
 
-    // first - check for first full_line pattern and apply
+    // first - check for a full_line pattern and apply it to the whole line
     for (color_data.style_patterns) |*pattern| {
         if (pattern.full_line) {
-            // check if there is a regex match in the line
             if (try pattern.regex.partialMatch(line)) {
-                try color_data.output.updateStyle(
-                    &pattern.style,
-                    metadata.bufferOffset,
-                    metadata.bufferOffset + line.len,
-                );
-
-                // now that we have applied a full line pattern, exit
+                try sink.markLine(pattern.style);
                 return;
             }
         }
     }
 
-    // second - if no full_line patterns, apply all other patterns
+    // second - no full_line pattern matched, apply all other patterns to their matches
     for (color_data.style_patterns) |*pattern| {
+        if (pattern.full_line) continue;
         var iter = helpers.regexMatchAll(&pattern.regex, line);
         while (try iter.next()) |match| {
-            try color_data.output.updateStyle(
-                &pattern.style,
-                metadata.bufferOffset + match.lowerBound,
-                metadata.bufferOffset + match.upperBound,
-            );
+            try sink.mark(pattern.style, match.lowerBound, match.upperBound);
         }
     }
 }
