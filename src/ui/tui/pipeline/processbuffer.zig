@@ -615,6 +615,24 @@ pub const ProcessBuffer = struct {
         };
     }
 
+    /// Copies the absolute filtered byte range `[lo, hi)`, clipped to the buffer, and the
+    /// version it was read under (offsets are only meaningful for one version). One lock
+    /// acquisition; the caller owns `bytes`.
+    pub fn copyFilteredRange(self: *ProcessBuffer, alloc: Allocator, lo: usize, hi: usize) Allocator.Error!FilteredCopy {
+        self.m.lockUncancelable(self.io);
+        defer self.m.unlock(self.io);
+
+        const total = self.filtered_buffer.count();
+        const start = @min(lo, total);
+        const end = @max(start, @min(hi, total));
+        return .{
+            .bytes = try alloc.dupe(u8, self.filtered_buffer.buf.items[start..end]),
+            .version = self.published.version.load(.acquire),
+            .total_len = total,
+            .total_lines = self.filtered_buffer.countLines(),
+        };
+    }
+
     /// Copies a whole backing buffer. One lock acquisition.
     pub fn copyBuffer(self: *ProcessBuffer, alloc: Allocator, backing: BufferBacking) Allocator.Error![]u8 {
         self.m.lockUncancelable(self.io);
@@ -744,4 +762,32 @@ test "WindowSnapshot.overlay splits existing ranges" {
     try testing.expectEqual(null, over.styleAt(&cursor, 10));
     // backwards lookup corrects the cursor
     try testing.expectEqual(hi, over.styleAt(&cursor, 3).?);
+}
+
+test "copyFilteredRange clips to the buffer and reports the version" {
+    const alloc = testing.allocator;
+    const pb = try ProcessBuffer.init(testing.io, alloc);
+    defer pb.deinit();
+
+    try pb.append("hello\nworld\n");
+
+    const mid = try pb.copyFilteredRange(alloc, 2, 8);
+    defer alloc.free(mid.bytes);
+    try testing.expectEqualStrings("llo\nwo", mid.bytes);
+    try testing.expectEqual(pb.peek().version, mid.version);
+    try testing.expectEqual(12, mid.total_len);
+
+    // hi past the end is clipped, lo past the end yields nothing
+    const tail = try pb.copyFilteredRange(alloc, 6, 100);
+    defer alloc.free(tail.bytes);
+    try testing.expectEqualStrings("world\n", tail.bytes);
+
+    const none = try pb.copyFilteredRange(alloc, 50, 60);
+    defer alloc.free(none.bytes);
+    try testing.expectEqual(0, none.bytes.len);
+
+    // an inverted range is empty rather than a panic
+    const inverted = try pb.copyFilteredRange(alloc, 8, 2);
+    defer alloc.free(inverted.bytes);
+    try testing.expectEqual(0, inverted.bytes.len);
 }

@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 
 pub const uuid = @import("utils/uuid.zig");
 pub const ringbuffers = @import("utils/ringbuffer.zig");
+pub const clipboard = @import("utils/clipboard.zig");
 
 pub const EnvTuple = struct {
     key: []u8,
@@ -302,4 +303,9 @@ test "parse_config_env: pairs are duped, non-string values are rejected without 
     var bad = try std.json.parseFromSlice(std.json.Value, alloc, "{\"K\": \"v\", \"N\": 1}", .{});
     defer bad.deinit();
     try testing.expectError(error.FieldInvalidType, parse_config_env(alloc, bad.value.object));
+}
+
+test {
+    // make the sub-files' tests part of this module's test compilation
+    _ = clipboard;
 }

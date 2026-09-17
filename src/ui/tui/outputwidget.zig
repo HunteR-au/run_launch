@@ -57,6 +57,99 @@ fn rowEndsLine(map: *const RowMap, row: usize) bool {
     return next.is_start;
 }
 
+/// Style painted over mouse-selected text. It replaces the text's own styles while selected.
+const SelectionStyle: vaxis.Style = .{ .reverse = true };
+
+/// Byte range `[start, end)` of the grapheme under a mouse cell. Past the end of a row's
+/// content both equal the offset of that end (before the line break).
+const TextPoint = struct { start: usize, end: usize };
+
+/// Half-open byte range.
+const ByteRange = struct { lo: usize, hi: usize };
+
+/// A mouse selection over the filtered text, in absolute filtered byte offsets so it survives
+/// scrolling and appends. A change of the buffer `version` (filter/reprocess) drops it.
+const Selection = struct {
+    anchor: TextPoint,
+    head: TextPoint,
+    version: u64,
+    /// true between the left button press and its release
+    dragging: bool = true,
+    /// true once the mouse has been dragged to another cell (a plain click is not a selection)
+    moved: bool = false,
+
+    /// From the earlier grapheme's start through the later grapheme's end, so the cell under
+    /// the mouse is always included.
+    fn range(self: Selection) ByteRange {
+        if (self.head.start >= self.anchor.start) {
+            return .{ .lo = self.anchor.start, .hi = @max(self.head.end, self.anchor.end) };
+        }
+        return .{ .lo = self.head.start, .hi = self.anchor.end };
+    }
+};
+
+/// A rectangle in the output widget's local coordinates.
+const Rect = struct {
+    row: i17,
+    col: i17,
+    width: u16,
+    height: u16,
+
+    fn contains(self: Rect, row: i17, col: i17) bool {
+        return row >= self.row and col >= self.col and
+            row < self.row + @as(i17, self.height) and col < self.col + @as(i17, self.width);
+    }
+};
+
+/// Where the text landed in the last frame, in widget-local coordinates: the scroll view's
+/// viewport (the area that shows text, without border, gutter or scrollbar) and the origin
+/// of the text surface, which is negative once scrolled.
+const Geometry = struct {
+    viewport: Rect,
+    text_origin: vxfw.RelativePoint,
+};
+
+const Located = struct { origin: vxfw.RelativePoint, size: vxfw.Size };
+
+/// Depth-first search of a surface tree for `target`'s surface. The origin is relative to
+/// `surface`.
+fn locateWidget(surface: vxfw.Surface, target: vxfw.Widget) ?Located {
+    if (surface.widget.eql(target)) return .{ .origin = .{ .row = 0, .col = 0 }, .size = surface.size };
+    for (surface.children) |child| {
+        const found = locateWidget(child.surface, target) orelse continue;
+        return .{
+            .origin = .{
+                .row = found.origin.row + child.origin.row,
+                .col = found.origin.col + child.origin.col,
+            },
+            .size = found.size,
+        };
+    }
+    return null;
+}
+
+/// Maps a column on one rendered row to the grapheme drawn there, mirroring how the text
+/// widget lays a row out (tabs are eight cells wide). `row_text` runs from the row's first
+/// grapheme to the next row's first grapheme (or the end of the text); `base` is the offset
+/// of `row_text[0]`, and the result is relative to the same origin as `base`. Columns past
+/// the content map to the content end, before the line break.
+fn cellToOffsets(row_text: []const u8, base: usize, col: usize) TextPoint {
+    const content_len = std.mem.indexOfAny(u8, row_text, "\r\n") orelse row_text.len;
+    const content = row_text[0..content_len];
+    // only the (static) width method is used; no arena or constraints are needed
+    const dctx: vxfw.DrawContext = .{ .arena = undefined, .min = .{}, .max = .{}, .cell_size = .{} };
+
+    var acc: usize = 0;
+    var iter = dctx.graphemeIterator(content);
+    while (iter.next()) |g| {
+        const bytes = g.bytes(content);
+        const width: usize = if (std.mem.eql(u8, bytes, "\t")) 8 else dctx.stringWidth(bytes);
+        if (col < acc + width) return .{ .start = base + g.start, .end = base + g.start + bytes.len };
+        acc += width;
+    }
+    return .{ .start = base + content_len, .end = base + content_len };
+}
+
 pub const OutputWidget = struct {
     alloc: std.mem.Allocator,
     text: MultiStyleText = undefined,
@@ -80,6 +173,12 @@ pub const OutputWidget = struct {
     /// Key: rendered row of the text child (not the viewport), Value: see `RowEntry`.
     row_offsets: RowMap = .empty,
     highest_row: ?usize = null,
+
+    /// The mouse selection, if any. Kept (and drawn) after the release until Escape or the
+    /// next click.
+    selection: ?Selection = null,
+    /// Layout of the last frame, used to map mouse cells to text. Null until the first draw.
+    geom: ?Geometry = null,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -172,6 +271,7 @@ pub const OutputWidget = struct {
     pub fn captureHandler(self: *OutputWidget, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         switch (event) {
             .mouse => |mouse| {
+                if (try self.handleSelectionMouse(ctx, mouse)) return;
                 if (mouse.button == .wheel_up) {
                     // turn of sticky scrolling on mouse wheel up
                     self.stopFollowing();
@@ -201,7 +301,13 @@ pub const OutputWidget = struct {
                 }
                 if (key.matches(vaxis.Key.escape, .{})) {
                     try self.output.removeSearch(ctx.io);
+                    self.selection = null;
                     ctx.consumeAndRedraw();
+                }
+                if (key.matches('y', .{})) {
+                    // yank: copy the current selection again
+                    try self.copySelection(ctx);
+                    ctx.consumeEvent();
                 }
                 if (key.matches(vaxis.Key.down, .{}) or
                     key.matches('j', .{ .ctrl = false }) or
@@ -264,7 +370,14 @@ pub const OutputWidget = struct {
 
     pub fn handleEvent(self: *OutputWidget, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         switch (event) {
-            .mouse_enter, .mouse_leave, .mouse, .key_press => {
+            .mouse => |mouse| {
+                // Over the border or the gutter this widget is the deepest handler, so the
+                // event arrives here (target phase) rather than in `captureHandler`.
+                if (try self.handleSelectionMouse(ctx, mouse)) return;
+                try self.scroll_bars.handleEvent(ctx, event);
+                try self.scroll_bars.scroll_view.handleEvent(ctx, event);
+            },
+            .mouse_enter, .mouse_leave, .key_press => {
                 try self.scroll_bars.handleEvent(ctx, event);
                 try self.scroll_bars.scroll_view.handleEvent(ctx, event);
             },
@@ -354,6 +467,160 @@ pub const OutputWidget = struct {
         self.window.anchor_pending = true;
     }
 
+    /// Left-button press, drag and release over the text drive a selection; the release
+    /// copies it to the clipboard. Returns true when the event was consumed. Events that are
+    /// not part of a selection leave no trace, so being called from both the capture and
+    /// the target phase for one event is harmless.
+    fn handleSelectionMouse(self: *OutputWidget, ctx: *vxfw.EventContext, mouse: vaxis.Mouse) anyerror!bool {
+        const geom = self.geom orelse return false;
+        const row: i17 = mouse.row;
+        const col: i17 = mouse.col;
+        switch (mouse.type) {
+            .press => {
+                if (mouse.button != .left) return false;
+                // presses on the border, gutter or scrollbar are not ours
+                if (!geom.viewport.contains(row, col)) return false;
+                const point = self.pointAtCell(geom, row, col) orelse return false;
+                self.selection = .{ .anchor = point, .head = point, .version = self.frame.meta.version };
+                ctx.consumeAndRedraw();
+                return true;
+            },
+            .drag => {
+                const sel: *Selection = if (self.selection) |*s| s else return false;
+                if (!sel.dragging) return false;
+                self.autoScrollForDrag(geom, row);
+                sel.head = self.pointAtCell(geom, row, col) orelse sel.head;
+                sel.moved = true;
+                ctx.consumeAndRedraw();
+                return true;
+            },
+            .release => {
+                const sel: *Selection = if (self.selection) |*s| s else return false;
+                if (!sel.dragging) return false;
+                // the button may be reported as `none` on release; any release ends the drag
+                sel.head = self.pointAtCell(geom, row, col) orelse sel.head;
+                try self.finishSelection(ctx);
+                ctx.consumeAndRedraw();
+                return true;
+            },
+            .motion => {
+                // motion without a button while "dragging": the button was released outside
+                // this widget, where we get no release event
+                const sel: *Selection = if (self.selection) |*s| s else return false;
+                if (!sel.dragging) return false;
+                try self.finishSelection(ctx);
+                ctx.consumeAndRedraw();
+                return true;
+            },
+        }
+    }
+
+    /// Ends the drag: a plain click clears the selection, a real drag copies it.
+    fn finishSelection(self: *OutputWidget, ctx: *vxfw.EventContext) anyerror!void {
+        const sel: *Selection = if (self.selection) |*s| s else return;
+        sel.dragging = false;
+        const r = sel.range();
+        if (!sel.moved or r.lo >= r.hi) {
+            self.selection = null;
+            return;
+        }
+        try self.copySelection(ctx);
+    }
+
+    /// Dragging onto the border row above or below the viewport scrolls one line per event.
+    fn autoScrollForDrag(self: *OutputWidget, geom: Geometry, row: i17) void {
+        const vp = geom.viewport;
+        if (row < vp.row) {
+            self.stopFollowing();
+            self.moveOutputUpLines(1);
+        } else if (row >= vp.row + @as(i17, vp.height)) {
+            self.moveOutputDownLines(1);
+        }
+    }
+
+    /// Absolute filtered byte range of the grapheme drawn at a widget-local mouse cell. The
+    /// cell is clamped into the viewport, so dragging over the gutter or border selects from
+    /// the first column, and dragging below the text selects to the end of the last row.
+    fn pointAtCell(self: *OutputWidget, geom: Geometry, row: i17, col: i17) ?TextPoint {
+        const highest = self.highest_row orelse return null;
+        const vp = geom.viewport;
+        if (vp.width == 0 or vp.height == 0) return null;
+        const c_row = std.math.clamp(row, vp.row, vp.row + @as(i17, vp.height) - 1);
+        const c_col = std.math.clamp(col, vp.col, vp.col + @as(i17, vp.width) - 1);
+
+        // text-surface coordinates (the surface origin is negative when scrolled)
+        const text_row: i17 = c_row - geom.text_origin.row;
+        const text_col: i17 = c_col - geom.text_origin.col;
+        var trow: usize = @intCast(@max(text_row, 0));
+        var tcol: usize = @intCast(@max(text_col, 0));
+        if (trow > highest) {
+            // below the last rendered row: the end of the last row
+            trow = highest;
+            tcol = std.math.maxInt(usize);
+        }
+
+        const entry = self.row_offsets.get(trow) orelse return null;
+        const row_end = if (self.row_offsets.get(trow + 1)) |next| next.ofs else self.frame.text.len;
+        if (entry.ofs > row_end or row_end > self.frame.text.len) return null;
+        const p = cellToOffsets(self.frame.text[entry.ofs..row_end], entry.ofs, tcol);
+        return .{ .start = p.start + self.frame.base_offset, .end = p.end + self.frame.base_offset };
+    }
+
+    /// Copies the selected bytes to the system clipboard (OSC 52). Nothing is copied when the
+    /// buffer was reprocessed since the selection was made, as its offsets no longer apply.
+    pub fn copySelection(self: *OutputWidget, ctx: *vxfw.EventContext) anyerror!void {
+        const sel = self.selection orelse return;
+        const r = sel.range();
+        if (r.lo >= r.hi) return;
+        const copy = try self.output.nonowned_process_buffer.copyFilteredRange(self.alloc, r.lo, r.hi);
+        defer self.alloc.free(copy.bytes);
+        if (copy.version != sel.version or copy.bytes.len == 0) return;
+        if (builtin.os.tag == .windows) {
+            // OSC 52 makes Windows Terminal block on the system clipboard for seconds, during
+            // which it delivers no input; write the Win32 clipboard directly instead.
+            utils.clipboard.setText(self.alloc, copy.bytes) catch |err| {
+                std.log.warn("clipboard: could not copy the selection: {t}", .{err});
+            };
+        } else {
+            try ctx.copyToClipboard(copy.bytes);
+        }
+    }
+
+    /// Window-relative range of the selection inside `snap`, if it is visible. A selection
+    /// made on another buffer version is dropped here.
+    fn selectionHighlight(self: *OutputWidget, snap: *const WindowSnapshot) ?ByteRange {
+        const sel = self.selection orelse return null;
+        if (sel.version != snap.meta.version) {
+            self.selection = null;
+            return null;
+        }
+        const r = sel.range();
+        const window_end = snap.base_offset + snap.text.len;
+        if (r.hi <= snap.base_offset or r.lo >= window_end) return null;
+        return .{
+            .lo = @max(r.lo, snap.base_offset) - snap.base_offset,
+            .hi = @min(r.hi, window_end) - snap.base_offset,
+        };
+    }
+
+    /// Finds the scroll view's viewport and the text surface's origin in the frame just drawn.
+    fn locateGeometry(self: *OutputWidget, root: vxfw.SubSurface) ?Geometry {
+        const vp = locateWidget(root.surface, self.scroll_bars.scroll_view.widget()) orelse return null;
+        const text = locateWidget(root.surface, self.text.widget()) orelse return null;
+        return .{
+            .viewport = .{
+                .row = vp.origin.row + root.origin.row,
+                .col = vp.origin.col + root.origin.col,
+                .width = vp.size.width,
+                .height = vp.size.height,
+            },
+            .text_origin = .{
+                .row = text.origin.row + root.origin.row,
+                .col = text.origin.col + root.origin.col,
+            },
+        };
+    }
+
     /// Called by the text widget for every rendered row with the window-relative byte
     /// offset of the row's first grapheme.
     fn save_rendered_buffer_offset(ptr: *anyopaque, row: usize, offset: usize) std.mem.Allocator.Error!void {
@@ -411,6 +678,9 @@ pub const OutputWidget = struct {
 
         if (self.output.searchHighlight(&snap)) |h| {
             snap = try snap.overlay(ctx.arena, h.start, h.end, h.style);
+        }
+        if (self.selectionHighlight(&snap)) |s| {
+            snap = try snap.overlay(ctx.arena, s.lo, s.hi, SelectionStyle);
         }
         self.frame = snap;
         self.last_drawn_change = snap.meta.change;
@@ -489,6 +759,7 @@ pub const OutputWidget = struct {
         }
 
         self.window.updateWindowPostRender(self, border_child.surface.size.height);
+        self.geom = self.locateGeometry(border_child);
 
         const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
         children[0] = border_child;
@@ -675,6 +946,90 @@ const Window = struct {
         self.pending_lines = 0;
     }
 };
+
+test "cellToOffsets maps columns to graphemes, tabs are eight cells, past-end is the content end" {
+    const testing = std.testing;
+    vxfw.DrawContext.init(.unicode);
+    // h(1) é(2) l l o (3) \t (1) x (1) = 8 content bytes, then the line break
+    const row = "héllo\tx\n";
+    const base: usize = 100;
+
+    try testing.expectEqual(TextPoint{ .start = 100, .end = 101 }, cellToOffsets(row, base, 0));
+    try testing.expectEqual(TextPoint{ .start = 101, .end = 103 }, cellToOffsets(row, base, 1)); // é
+    try testing.expectEqual(TextPoint{ .start = 105, .end = 106 }, cellToOffsets(row, base, 4)); // o
+    try testing.expectEqual(TextPoint{ .start = 106, .end = 107 }, cellToOffsets(row, base, 5)); // tab, first cell
+    try testing.expectEqual(TextPoint{ .start = 106, .end = 107 }, cellToOffsets(row, base, 12)); // tab, last cell
+    try testing.expectEqual(TextPoint{ .start = 107, .end = 108 }, cellToOffsets(row, base, 13)); // x
+    try testing.expectEqual(TextPoint{ .start = 108, .end = 108 }, cellToOffsets(row, base, 14)); // past the content
+    try testing.expectEqual(TextPoint{ .start = 108, .end = 108 }, cellToOffsets(row, base, std.math.maxInt(usize)));
+
+    // double-width graphemes occupy two cells each
+    try testing.expectEqual(TextPoint{ .start = 0, .end = 3 }, cellToOffsets("漢字", 0, 1));
+    try testing.expectEqual(TextPoint{ .start = 3, .end = 6 }, cellToOffsets("漢字", 0, 2));
+
+    // an empty row (just the line break) always maps to its start
+    try testing.expectEqual(TextPoint{ .start = 7, .end = 7 }, cellToOffsets("\n", 7, 3));
+    // a wrapped continuation row has no line break; past its content is the next row's start
+    try testing.expectEqual(TextPoint{ .start = 9, .end = 9 }, cellToOffsets("ab ", 6, 3));
+}
+
+test "Selection.range includes the grapheme under the head in both directions" {
+    const testing = std.testing;
+    const a: TextPoint = .{ .start = 10, .end = 11 };
+    const b: TextPoint = .{ .start = 20, .end = 23 };
+
+    const forward: Selection = .{ .anchor = a, .head = b, .version = 0 };
+    try testing.expectEqual(ByteRange{ .lo = 10, .hi = 23 }, forward.range());
+
+    const backward: Selection = .{ .anchor = b, .head = a, .version = 0 };
+    try testing.expectEqual(ByteRange{ .lo = 10, .hi = 23 }, backward.range());
+
+    const same: Selection = .{ .anchor = a, .head = a, .version = 0 };
+    try testing.expectEqual(ByteRange{ .lo = 10, .hi = 11 }, same.range());
+
+    // head past the end of a row (empty point) after the anchor: up to that end
+    const to_end: Selection = .{ .anchor = a, .head = .{ .start = 30, .end = 30 }, .version = 0 };
+    try testing.expectEqual(ByteRange{ .lo = 10, .hi = 30 }, to_end.range());
+}
+
+test "locateWidget accumulates origins through nested surfaces" {
+    const testing = std.testing;
+    const Dummy = struct {
+        fn draw(_: *anyopaque, _: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            unreachable;
+        }
+    };
+    var a: u8 = 0;
+    var b: u8 = 0;
+    var c: u8 = 0;
+    const wa: vxfw.Widget = .{ .userdata = &a, .drawFn = Dummy.draw };
+    const wb: vxfw.Widget = .{ .userdata = &b, .drawFn = Dummy.draw };
+    const wc: vxfw.Widget = .{ .userdata = &c, .drawFn = Dummy.draw };
+
+    var inner = [_]vxfw.SubSurface{.{
+        .origin = .{ .row = -3, .col = 4 },
+        .surface = .{ .size = .{ .width = 7, .height = 9 }, .widget = wc, .buffer = &.{}, .children = &.{} },
+    }};
+    var outer = [_]vxfw.SubSurface{.{
+        .origin = .{ .row = 1, .col = 1 },
+        .surface = .{ .size = .{ .width = 20, .height = 10 }, .widget = wb, .buffer = &.{}, .children = &inner },
+    }};
+    const root: vxfw.Surface = .{ .size = .{ .width = 30, .height = 12 }, .widget = wa, .buffer = &.{}, .children = &outer };
+
+    const found_b = locateWidget(root, wb).?;
+    try testing.expectEqual(1, found_b.origin.row);
+    try testing.expectEqual(1, found_b.origin.col);
+    try testing.expectEqual(20, found_b.size.width);
+
+    const found_c = locateWidget(root, wc).?;
+    try testing.expectEqual(-2, found_c.origin.row);
+    try testing.expectEqual(5, found_c.origin.col);
+    try testing.expectEqual(9, found_c.size.height);
+
+    var d: u8 = 0;
+    const wd: vxfw.Widget = .{ .userdata = &d, .drawFn = Dummy.draw };
+    try testing.expect(locateWidget(root, wd) == null);
+}
 
 test "row map helpers: rows into a wrapped line and line completeness" {
     const testing = std.testing;

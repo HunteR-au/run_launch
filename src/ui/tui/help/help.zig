@@ -24,6 +24,9 @@ pub fn getHelpString() []const u8 {
     \\K or up arrow         ---> Scroll up 1
     \\J+Ctrl                ---> Scroll down 5
     \\K+Ctrl                ---> Scroll up 5
+    \\Mouse drag            ---> Select output text (copied on release, line numbers excluded)
+    \\Y                     ---> Copy the selection again
+    \\Esc                   ---> Clear the selection / search
     \\
     \\      ==========
     \\      =Commands=
