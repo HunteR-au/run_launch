@@ -1,7 +1,9 @@
 //! Pump-owned style storage for a ProcessBuffer.
 //!
-//! Reviewers produce `Pending` marks (absolute filtered-buffer byte offsets, style by value)
-//! while the pipeline runs. The results are folded into a sorted, non-overlapping list of
+//! The terminal stage (the program's own SGR colours) and the reviewers (the user's colour
+//! rules) produce `Pending` marks (absolute filtered-buffer byte offsets, style by value)
+//! while the pipeline runs; reviewer marks come later in a batch and so win where they
+//! overlap. The results are folded into a sorted, non-overlapping list of
 //! `StyleRange`s whose `style` indexes a small deduplicated palette. The UI never reads this
 //! directly: `ProcessBuffer.snapshotWindow` copies the ranges intersecting the visible window
 //! into the frame arena under the buffer lock.

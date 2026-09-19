@@ -5,6 +5,7 @@ comptime {
     _ = @import("ui/tui/pipeline/processbuffer.zig");
     _ = @import("ui/tui/pipeline/styleindex.zig");
     _ = @import("ui/tui/pipeline/linebuffer.zig");
+    _ = @import("ui/tui/pipeline/terminal.zig");
     _ = @import("ui/tui/pipeline/search.zig");
     _ = @import("ui/tui/pipeline/ingeststore.zig");
     _ = @import("ui/tui/pipeline/buffer/merge.zig");

@@ -21,7 +21,8 @@ const process_buffer_mod = @import("pipeline/processbuffer.zig");
 pub const ProcessBuffer = process_buffer_mod.ProcessBuffer;
 pub const WindowSnapshot = process_buffer_mod.WindowSnapshot;
 pub const BufferSnapshot = process_buffer_mod.BufferSnapshot;
-const MultiStyleText = @import("widgets/mutistyletext.zig").MultiStyleText(WindowSnapshot);
+const mutistyletext = @import("widgets/mutistyletext.zig");
+const MultiStyleText = mutistyletext.MultiStyleText(WindowSnapshot);
 
 const FocusedBorder: vaxis.Style = .{ .fg = .{ .rgb = .{ 255, 255, 0 } } };
 const UnfocusedBorder: vaxis.Style = .{ .fg = .{ .rgb = .{ 255, 255, 255 } } };
@@ -129,12 +130,13 @@ fn locateWidget(surface: vxfw.Surface, target: vxfw.Widget) ?Located {
 }
 
 /// Maps a column on one rendered row to the grapheme drawn there, mirroring how the text
-/// widget lays a row out (tabs are eight cells wide). `row_text` runs from the row's first
-/// grapheme to the next row's first grapheme (or the end of the text); `base` is the offset
-/// of `row_text[0]`, and the result is relative to the same origin as `base`. Columns past
-/// the content map to the content end, before the line break.
-fn cellToOffsets(row_text: []const u8, base: usize, col: usize) TextPoint {
-    const content_len = std.mem.indexOfAny(u8, row_text, "\r\n") orelse row_text.len;
+/// widget lays a row out in `mode` (control bytes and invalid UTF-8 take several cells in
+/// raw mode). `row_text` runs from the row's first grapheme to the next row's first grapheme
+/// (or the end of the text); `base` is the offset of `row_text[0]`, and the result is
+/// relative to the same origin as `base`. Columns past the content map to the content end,
+/// before the line break.
+fn cellToOffsets(row_text: []const u8, base: usize, col: usize, mode: mutistyletext.Mode) TextPoint {
+    const content_len = std.mem.indexOfScalar(u8, row_text, '\n') orelse row_text.len;
     const content = row_text[0..content_len];
     // only the (static) width method is used; no arena or constraints are needed
     const dctx: vxfw.DrawContext = .{ .arena = undefined, .min = .{}, .max = .{}, .cell_size = .{} };
@@ -143,11 +145,19 @@ fn cellToOffsets(row_text: []const u8, base: usize, col: usize) TextPoint {
     var iter = dctx.graphemeIterator(content);
     while (iter.next()) |g| {
         const bytes = g.bytes(content);
-        const width: usize = if (std.mem.eql(u8, bytes, "\t")) 8 else dctx.stringWidth(bytes);
+        const width = mutistyletext.displayWidth(mode, bytes, dctx);
         if (col < acc + width) return .{ .start = base + g.start, .end = base + g.start + bytes.len };
         acc += width;
     }
     return .{ .start = base + content_len, .end = base + content_len };
+}
+
+/// The text widget mode for the output's render mode.
+fn textMode(render_mode: Output.RenderMode) mutistyletext.Mode {
+    return switch (render_mode) {
+        .terminal => .plain,
+        .raw => .raw,
+    };
 }
 
 pub const OutputWidget = struct {
@@ -467,6 +477,17 @@ pub const OutputWidget = struct {
         self.window.anchor_pending = true;
     }
 
+    /// Called when the render mode switches between the terminal and raw views. The two views
+    /// read different buffers with different line numbering, so no position is carried over:
+    /// the view simply follows the bottom again. Any selection belonged to the other buffer.
+    pub fn onRenderModeChanged(self: *OutputWidget) void {
+        self.scroll_bars.scroll_view.scroll.left = 0;
+        self.removePendingLines();
+        self.selection = null;
+        self.window.is_sticky = true;
+        self.window.anchor_pending = true;
+    }
+
     /// Left-button press, drag and release over the text drive a selection; the release
     /// copies it to the clipboard. Returns true when the event was consumed. Events that are
     /// not part of a selection leave no trace, so being called from both the capture and
@@ -562,7 +583,7 @@ pub const OutputWidget = struct {
         const entry = self.row_offsets.get(trow) orelse return null;
         const row_end = if (self.row_offsets.get(trow + 1)) |next| next.ofs else self.frame.text.len;
         if (entry.ofs > row_end or row_end > self.frame.text.len) return null;
-        const p = cellToOffsets(self.frame.text[entry.ofs..row_end], entry.ofs, tcol);
+        const p = cellToOffsets(self.frame.text[entry.ofs..row_end], entry.ofs, tcol, textMode(self.output.render_mode));
         return .{ .start = p.start + self.frame.base_offset, .end = p.end + self.frame.base_offset };
     }
 
@@ -572,7 +593,7 @@ pub const OutputWidget = struct {
         const sel = self.selection orelse return;
         const r = sel.range();
         if (r.lo >= r.hi) return;
-        const copy = try self.output.nonowned_process_buffer.copyFilteredRange(self.alloc, r.lo, r.hi);
+        const copy = try self.output.nonowned_process_buffer.copyRange(self.alloc, self.output.viewBacking(), r.lo, r.hi);
         defer self.alloc.free(copy.bytes);
         if (copy.version != sel.version or copy.bytes.len == 0) return;
         if (builtin.os.tag == .windows) {
@@ -623,7 +644,7 @@ pub const OutputWidget = struct {
 
     /// Called by the text widget for every rendered row with the window-relative byte
     /// offset of the row's first grapheme.
-    fn save_rendered_buffer_offset(ptr: *anyopaque, row: usize, offset: usize) std.mem.Allocator.Error!void {
+    fn save_rendered_buffer_offset(ptr: *anyopaque, row: usize, offset: usize, is_start: bool) std.mem.Allocator.Error!void {
         const self: *OutputWidget = @ptrCast(@alignCast(ptr));
 
         if (self.highest_row == null or self.highest_row.? < row) {
@@ -631,7 +652,7 @@ pub const OutputWidget = struct {
         }
         try self.row_offsets.put(self.alloc, row, .{
             .ofs = offset,
-            .is_start = self.frame.isLineStart(offset),
+            .is_start = is_start,
         });
     }
 
@@ -670,11 +691,12 @@ pub const OutputWidget = struct {
             .top_line = self.window.top_line,
             .max_lines = self.window.num_lines,
             .follow_bottom = self.window.is_sticky,
+            .backing = self.output.viewBacking(),
         });
         // the buffer may have changed between peek() and the lock; trust the snapshot
         self.window.top_line = snap.top_line;
-        self.window.last_draw.process_buffer_len = snap.meta.filtered_len;
-        self.window.last_draw.process_buffer_num_lines = snap.meta.filtered_lines;
+        self.window.last_draw.process_buffer_len = snap.viewLen();
+        self.window.last_draw.process_buffer_num_lines = snap.viewLines();
 
         if (self.output.searchHighlight(&snap)) |h| {
             snap = try snap.overlay(ctx.arena, h.start, h.end, h.style);
@@ -698,7 +720,7 @@ pub const OutputWidget = struct {
         self.highest_row = null;
 
         // Pre-calculate gutter width
-        const gutter_width = self.lines_widget.calculateGutterWidth(snap.meta.filtered_lines);
+        const gutter_width = self.lines_widget.calculateGutterWidth(snap.viewLines());
 
         // build the MultiStyleText structure
         const wrap = self.output.wrap_lines;
@@ -709,6 +731,7 @@ pub const OutputWidget = struct {
             .cb_buffer_offset_at_row = save_rendered_buffer_offset,
             .softwrap = wrap,
             .max_rows = if (wrap) wrapped_row_cap else std.math.maxInt(u16),
+            .mode = textMode(self.output.render_mode),
         };
         // wrapped text never needs the horizontal scrollbar row: reclaim it (gutter included)
         self.scroll_bars.draw_horizontal_scrollbar = !wrap;
@@ -836,11 +859,12 @@ const Window = struct {
             self.is_sticky = true;
         }
 
-        self.last_draw.process_buffer_len = meta.filtered_len;
-        self.last_draw.process_buffer_num_lines = meta.filtered_lines;
+        const backing = self.output.viewBacking();
+        self.last_draw.process_buffer_len = meta.lenOf(backing);
+        self.last_draw.process_buffer_num_lines = meta.linesOf(backing);
 
         // never point past the end of the buffer (a filter may have shrunk it)
-        self.top_line = @min(self.top_line, meta.filtered_lines -| 1);
+        self.top_line = @min(self.top_line, meta.linesOf(backing) -| 1);
     }
 
     /// Records which lines ended up visible. Derived from what was actually rendered (the
@@ -947,30 +971,40 @@ const Window = struct {
     }
 };
 
-test "cellToOffsets maps columns to graphemes, tabs are eight cells, past-end is the content end" {
+test "cellToOffsets maps columns to graphemes the way each render mode draws them" {
     const testing = std.testing;
     vxfw.DrawContext.init(.unicode);
     // h(1) é(2) l l o (3) \t (1) x (1) = 8 content bytes, then the line break
     const row = "héllo\tx\n";
     const base: usize = 100;
 
-    try testing.expectEqual(TextPoint{ .start = 100, .end = 101 }, cellToOffsets(row, base, 0));
-    try testing.expectEqual(TextPoint{ .start = 101, .end = 103 }, cellToOffsets(row, base, 1)); // é
-    try testing.expectEqual(TextPoint{ .start = 105, .end = 106 }, cellToOffsets(row, base, 4)); // o
-    try testing.expectEqual(TextPoint{ .start = 106, .end = 107 }, cellToOffsets(row, base, 5)); // tab, first cell
-    try testing.expectEqual(TextPoint{ .start = 106, .end = 107 }, cellToOffsets(row, base, 12)); // tab, last cell
-    try testing.expectEqual(TextPoint{ .start = 107, .end = 108 }, cellToOffsets(row, base, 13)); // x
-    try testing.expectEqual(TextPoint{ .start = 108, .end = 108 }, cellToOffsets(row, base, 14)); // past the content
-    try testing.expectEqual(TextPoint{ .start = 108, .end = 108 }, cellToOffsets(row, base, std.math.maxInt(usize)));
+    // plain mode: a stray control byte is one replacement cell
+    try testing.expectEqual(TextPoint{ .start = 100, .end = 101 }, cellToOffsets(row, base, 0, .plain));
+    try testing.expectEqual(TextPoint{ .start = 101, .end = 103 }, cellToOffsets(row, base, 1, .plain)); // é
+    try testing.expectEqual(TextPoint{ .start = 105, .end = 106 }, cellToOffsets(row, base, 4, .plain)); // o
+    try testing.expectEqual(TextPoint{ .start = 106, .end = 107 }, cellToOffsets(row, base, 5, .plain)); // tab
+    try testing.expectEqual(TextPoint{ .start = 107, .end = 108 }, cellToOffsets(row, base, 6, .plain)); // x
+    try testing.expectEqual(TextPoint{ .start = 108, .end = 108 }, cellToOffsets(row, base, 7, .plain)); // past the content
+    try testing.expectEqual(TextPoint{ .start = 108, .end = 108 }, cellToOffsets(row, base, std.math.maxInt(usize), .plain));
+
+    // raw mode: the tab is drawn as `^I`, two cells
+    try testing.expectEqual(TextPoint{ .start = 106, .end = 107 }, cellToOffsets(row, base, 5, .raw));
+    try testing.expectEqual(TextPoint{ .start = 106, .end = 107 }, cellToOffsets(row, base, 6, .raw));
+    try testing.expectEqual(TextPoint{ .start = 107, .end = 108 }, cellToOffsets(row, base, 7, .raw)); // x
+    // an invalid byte is `\xNN`, four cells
+    try testing.expectEqual(TextPoint{ .start = 1, .end = 2 }, cellToOffsets("a\xffb", 0, 4, .raw));
+    try testing.expectEqual(TextPoint{ .start = 2, .end = 3 }, cellToOffsets("a\xffb", 0, 5, .raw));
+    // a bare carriage return is content in raw mode, not a line break
+    try testing.expectEqual(TextPoint{ .start = 1, .end = 2 }, cellToOffsets("a\rb\n", 0, 2, .raw));
 
     // double-width graphemes occupy two cells each
-    try testing.expectEqual(TextPoint{ .start = 0, .end = 3 }, cellToOffsets("漢字", 0, 1));
-    try testing.expectEqual(TextPoint{ .start = 3, .end = 6 }, cellToOffsets("漢字", 0, 2));
+    try testing.expectEqual(TextPoint{ .start = 0, .end = 3 }, cellToOffsets("漢字", 0, 1, .plain));
+    try testing.expectEqual(TextPoint{ .start = 3, .end = 6 }, cellToOffsets("漢字", 0, 2, .plain));
 
     // an empty row (just the line break) always maps to its start
-    try testing.expectEqual(TextPoint{ .start = 7, .end = 7 }, cellToOffsets("\n", 7, 3));
+    try testing.expectEqual(TextPoint{ .start = 7, .end = 7 }, cellToOffsets("\n", 7, 3, .plain));
     // a wrapped continuation row has no line break; past its content is the next row's start
-    try testing.expectEqual(TextPoint{ .start = 9, .end = 9 }, cellToOffsets("ab ", 6, 3));
+    try testing.expectEqual(TextPoint{ .start = 9, .end = 9 }, cellToOffsets("ab ", 6, 3, .plain));
 }
 
 test "Selection.range includes the grapheme under the head in both directions" {

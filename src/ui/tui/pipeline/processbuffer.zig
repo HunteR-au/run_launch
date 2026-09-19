@@ -34,6 +34,8 @@ pub const Published = struct {
     filtered_lines: std.atomic.Value(usize) = .init(0),
     filtered_len: std.atomic.Value(usize) = .init(0),
     raw_lines: std.atomic.Value(usize) = .init(0),
+    /// bytes of complete raw lines
+    raw_len: std.atomic.Value(usize) = .init(0),
 };
 
 /// Pump-thread-only bookkeeping used to emit the end-of-process marker exactly once.
@@ -51,7 +53,29 @@ pub const BufferSnapshot = struct {
     filtered_lines: usize,
     filtered_len: usize,
     raw_lines: usize,
+    raw_len: usize = 0,
+
+    /// Complete lines in the given backing buffer.
+    pub fn linesOf(self: BufferSnapshot, backing: BufferBacking) usize {
+        return switch (backing) {
+            .Raw => self.raw_lines,
+            .Filtered => self.filtered_lines,
+        };
+    }
+
+    /// Bytes of complete lines in the given backing buffer.
+    pub fn lenOf(self: BufferSnapshot, backing: BufferBacking) usize {
+        return switch (backing) {
+            .Raw => self.raw_len,
+            .Filtered => self.filtered_len,
+        };
+    }
 };
+
+/// Which stored copy a view reads. `Filtered` is the interpreted, filtered text the terminal
+/// view shows; `Raw` is the program's output byte for byte (the debugging view).
+const Backing = enum { Raw, Filtered };
+pub const BufferBacking = Backing;
 
 pub const WindowRequest = struct {
     /// desired first line (already resolved from pending scroll by the caller)
@@ -60,6 +84,8 @@ pub const WindowRequest = struct {
     max_lines: usize,
     /// when true the window is anchored to the last `max_lines` lines
     follow_bottom: bool,
+    /// which buffer to copy; styles are only available for `.Filtered`
+    backing: BufferBacking = .Filtered,
 };
 
 /// Everything a single draw needs, copied from the buffer under one lock acquisition.
@@ -78,6 +104,8 @@ pub const WindowSnapshot = struct {
     /// window-relative, sorted, non-overlapping, clipped to [0, text.len)
     styles: []const StyleRange,
     palette: []const vaxis.Style,
+    /// the buffer this window was copied from
+    backing: BufferBacking = .Filtered,
 
     pub const empty: WindowSnapshot = .{
         .meta = .{ .change = 0, .version = 0, .filtered_lines = 0, .filtered_len = 0, .raw_lines = 0 },
@@ -88,6 +116,16 @@ pub const WindowSnapshot = struct {
         .styles = &.{},
         .palette = &.{},
     };
+
+    /// Complete lines in the viewed buffer at snapshot time.
+    pub fn viewLines(self: *const WindowSnapshot) usize {
+        return self.meta.linesOf(self.backing);
+    }
+
+    /// Bytes of complete lines in the viewed buffer at snapshot time.
+    pub fn viewLen(self: *const WindowSnapshot) usize {
+        return self.meta.lenOf(self.backing);
+    }
 
     pub fn lineCount(self: *const WindowSnapshot) usize {
         return self.line_starts.len -| 1;
@@ -203,6 +241,9 @@ pub const ProcessBuffer = struct {
     line_seqs: std.ArrayList(u64) = .empty,
     filtered_buffer: LineBuffer,
     styles: StyleIndex = .empty,
+    /// The program's own SGR colours as absolute filtered-offset marks, kept so a colour
+    /// rule change can rebuild `styles` without re-interpreting the raw buffer.
+    sgr_marks: std.ArrayList(Pipeline.Pending) = .empty,
     lines_processed: usize = 0,
     pipeline: Pipeline,
     published: Published = .{},
@@ -223,7 +264,7 @@ pub const ProcessBuffer = struct {
     /// from the same thread (the pump), which catches accidental UI-thread mutation.
     owner: if (builtin.mode == .Debug) ?std.Thread.Id else void = if (builtin.mode == .Debug) null else {},
 
-    pub const BufferBacking = enum { Raw, Filtered };
+    pub const BufferBacking = Backing; // re-exported for callers
 
     fn assertWriter(self: *ProcessBuffer) void {
         if (builtin.mode != .Debug) return;
@@ -258,6 +299,7 @@ pub const ProcessBuffer = struct {
     pub fn deinit(self: *ProcessBuffer) void {
         self.filtered_buffer.deinit();
         self.styles.deinit(self.alloc);
+        self.sgr_marks.deinit(self.alloc);
         self.pipeline.deinit();
         self.buffer.deinit();
         self.line_seqs.deinit(self.alloc);
@@ -281,6 +323,10 @@ pub const ProcessBuffer = struct {
 
     /// Appends raw bytes, normalising CRLF to LF, and assigns a sequence number to every
     /// newly completed line. Returns the range of new complete lines.
+    ///
+    /// This is the only change ever made to the program's bytes: bare '\r', escape sequences
+    /// and other control bytes are stored as written so the raw view and `dump` stay
+    /// faithful. The pipeline's terminal stage interprets them into the filtered buffer.
     pub fn appendChunk(self: *ProcessBuffer, bytes: []const u8, next_seq: *u64) Allocator.Error!NewLines {
         self.assertWriter();
         // Normalise outside the lock: strip '\r' when it precedes '\n'; hold back a trailing '\r'.
@@ -318,6 +364,7 @@ pub const ProcessBuffer = struct {
             self.line_seqs.appendAssumeCapacity(next_seq.*);
         }
         self.published.raw_lines.store(after, .release);
+        self.published.raw_len.store(self.buffer.count(), .release);
 
         return .{ .first = before, .count = after - before };
     }
@@ -345,6 +392,7 @@ pub const ProcessBuffer = struct {
             self.line_seqs.appendAssumeCapacity(last);
         }
         self.published.raw_lines.store(after, .release);
+        self.published.raw_len.store(self.buffer.count(), .release);
 
         return .{ .first = before, .count = after - before };
     }
@@ -375,6 +423,7 @@ pub const ProcessBuffer = struct {
         self.published.filtered_lines.store(self.filtered_buffer.countLines(), .release);
         self.published.filtered_len.store(self.filtered_buffer.count(), .release);
         self.published.raw_lines.store(self.buffer.countLines(), .release);
+        self.published.raw_len.store(self.buffer.count(), .release);
         if (identity_changed) _ = self.published.version.fetchAdd(1, .release);
         _ = self.published.change.fetchAdd(1, .release);
     }
@@ -399,6 +448,7 @@ pub const ProcessBuffer = struct {
                 self.buffer.getLinesStartingFrom(self.lines_processed).?,
                 self.filtered_buffer.count(),
                 &pending,
+                &self.sgr_marks,
             );
             defer self.alloc.free(new_filtered_lines);
 
@@ -413,18 +463,22 @@ pub const ProcessBuffer = struct {
     fn reprocessPipelineLocked(self: *ProcessBuffer) Allocator.Error!void {
         self.filtered_buffer.clearRetainingCapacity();
         self.styles.clearRetainingCapacity();
+        self.sgr_marks.clearRetainingCapacity();
+        self.pipeline.resetTerminal();
         self.lines_processed = 0;
         try self.processPipelineLocked();
         self.publish(true);
     }
 
-    /// Rebuilds only the styles over the existing filtered buffer. Line identity is unchanged
-    /// so `version` is not bumped. Must be called with `m` held.
+    /// Rebuilds only the styles over the existing filtered buffer: the program's own SGR
+    /// colours first, then the reviewers so they win where they overlap. Line identity is
+    /// unchanged so `version` is not bumped. Must be called with `m` held.
     fn rereviewLocked(self: *ProcessBuffer) Allocator.Error!void {
         self.styles.clearRetainingCapacity();
         var pending: std.ArrayList(Pipeline.Pending) = .empty;
         defer pending.deinit(self.alloc);
 
+        try pending.appendSlice(self.alloc, self.sgr_marks.items);
         if (self.filtered_buffer.getLines()) |lines| {
             try self.pipeline.review(self.alloc, lines, 0, &pending);
             try self.styles.appendPending(self.alloc, pending.items);
@@ -505,7 +559,7 @@ pub const ProcessBuffer = struct {
     }
 
     /// Pump-thread-only view of a whole backing buffer (no copy, no lock).
-    pub fn rawBytes(self: *ProcessBuffer, backing: BufferBacking) []const u8 {
+    pub fn rawBytes(self: *ProcessBuffer, backing: Backing) []const u8 {
         return switch (backing) {
             .Raw => self.buffer.buf.items,
             .Filtered => self.filtered_buffer.buf.items,
@@ -524,16 +578,23 @@ pub const ProcessBuffer = struct {
             .filtered_lines = self.published.filtered_lines.load(.acquire),
             .filtered_len = self.published.filtered_len.load(.acquire),
             .raw_lines = self.published.raw_lines.load(.acquire),
+            .raw_len = self.published.raw_len.load(.acquire),
         };
     }
 
-    /// Copies the requested window of the filtered buffer and its styles into `arena` under
-    /// a single lock acquisition. The lock is held for O(bytes copied).
+    /// Copies the requested window of the filtered buffer and its styles (or of the raw
+    /// buffer, unstyled, for `req.backing == .Raw`) into `arena` under a single lock
+    /// acquisition. The lock is held for O(bytes copied). Reading the raw buffer never
+    /// touches the filtered buffer or its styles, so switching views back and forth leaves
+    /// the terminal view exactly as it was.
     pub fn snapshotWindow(self: *ProcessBuffer, arena: Allocator, req: WindowRequest) Allocator.Error!WindowSnapshot {
         self.m.lockUncancelable(self.io);
         defer self.m.unlock(self.io);
 
-        const fb = &self.filtered_buffer;
+        const fb = switch (req.backing) {
+            .Raw => &self.buffer,
+            .Filtered => &self.filtered_buffer,
+        };
         const lines = fb.countLines();
 
         const top: usize = if (lines == 0)
@@ -548,9 +609,10 @@ pub const ProcessBuffer = struct {
             .meta = .{
                 .change = self.published.change.load(.acquire),
                 .version = self.published.version.load(.acquire),
-                .filtered_lines = lines,
-                .filtered_len = fb.count(),
-                .raw_lines = self.published.raw_lines.load(.acquire),
+                .filtered_lines = self.filtered_buffer.countLines(),
+                .filtered_len = self.filtered_buffer.count(),
+                .raw_lines = self.buffer.countLines(),
+                .raw_len = self.buffer.count(),
             },
             .top_line = top,
             .base_offset = 0,
@@ -558,6 +620,7 @@ pub const ProcessBuffer = struct {
             .line_starts = &.{0},
             .styles = &.{},
             .palette = &.{},
+            .backing = req.backing,
         };
 
         if (end_line > top) {
@@ -574,7 +637,7 @@ pub const ProcessBuffer = struct {
             }
             snap.line_starts = starts;
 
-            const ranges = self.styles.rangesIntersecting(base, end);
+            const ranges = if (req.backing == .Filtered) self.styles.rangesIntersecting(base, end) else &.{};
             if (ranges.len > 0) {
                 const copy = try arena.alloc(StyleRange, ranges.len);
                 for (ranges, 0..) |r, i| {
@@ -619,22 +682,31 @@ pub const ProcessBuffer = struct {
     /// version it was read under (offsets are only meaningful for one version). One lock
     /// acquisition; the caller owns `bytes`.
     pub fn copyFilteredRange(self: *ProcessBuffer, alloc: Allocator, lo: usize, hi: usize) Allocator.Error!FilteredCopy {
+        return self.copyRange(alloc, .Filtered, lo, hi);
+    }
+
+    /// `copyFilteredRange` for either backing buffer.
+    pub fn copyRange(self: *ProcessBuffer, alloc: Allocator, backing: Backing, lo: usize, hi: usize) Allocator.Error!FilteredCopy {
         self.m.lockUncancelable(self.io);
         defer self.m.unlock(self.io);
 
-        const total = self.filtered_buffer.count();
+        const lb = switch (backing) {
+            .Raw => &self.buffer,
+            .Filtered => &self.filtered_buffer,
+        };
+        const total = lb.count();
         const start = @min(lo, total);
         const end = @max(start, @min(hi, total));
         return .{
-            .bytes = try alloc.dupe(u8, self.filtered_buffer.buf.items[start..end]),
+            .bytes = try alloc.dupe(u8, lb.buf.items[start..end]),
             .version = self.published.version.load(.acquire),
             .total_len = total,
-            .total_lines = self.filtered_buffer.countLines(),
+            .total_lines = lb.countLines(),
         };
     }
 
     /// Copies a whole backing buffer. One lock acquisition.
-    pub fn copyBuffer(self: *ProcessBuffer, alloc: Allocator, backing: BufferBacking) Allocator.Error![]u8 {
+    pub fn copyBuffer(self: *ProcessBuffer, alloc: Allocator, backing: Backing) Allocator.Error![]u8 {
         self.m.lockUncancelable(self.io);
         defer self.m.unlock(self.io);
         return try alloc.dupe(u8, self.rawBytes(backing));
@@ -790,4 +862,149 @@ test "copyFilteredRange clips to the buffer and reports the version" {
     const inverted = try pb.copyFilteredRange(alloc, 8, 2);
     defer alloc.free(inverted.bytes);
     try testing.expectEqual(0, inverted.bytes.len);
+}
+
+// ------------------------------------------------------------------
+// Terminal stage: SGR colours, raw view round trip
+// ------------------------------------------------------------------
+
+const transforms = @import("transforms.zig");
+const Regex = @import("regex").Regex;
+
+const test_red: vaxis.Style = .{ .fg = .{ .index = 1 } };
+const test_green: vaxis.Style = .{ .fg = .{ .index = 2 } };
+const test_blue: vaxis.Style = .{ .fg = .{ .index = 4 } };
+
+fn colorReviewer(alloc: Allocator, pattern: []const u8, style: vaxis.Style) !Reviewer {
+    var reviewer = try Reviewer.init(alloc, transforms.color);
+    const owned = reviewer.ownedAllocator();
+    const patterns = try owned.alloc(transforms.ColorPattern, 1);
+    patterns[0] = .{ .regex = try Regex.compile(owned, pattern), .style = style };
+    const data = try owned.create(transforms.ColorReviewerData);
+    data.* = .{ .style_patterns = patterns };
+    reviewer.data = data;
+    return reviewer;
+}
+
+fn replaceFilter(alloc: Allocator, pattern: []const u8, replacement: []const u8) !Filter {
+    var filter = try Filter.init(alloc, transforms.replace);
+    const owned = filter.ownedAllocator();
+    const patterns = try owned.alloc(transforms.ReplacePattern, 1);
+    patterns[0] = .{ .regex = try Regex.compile(owned, pattern), .replace_str = try owned.dupe(u8, replacement) };
+    const data = try owned.create(transforms.ReplaceFilterData);
+    data.* = .{ .replace_patterns = patterns };
+    filter.data = data;
+    return filter;
+}
+
+fn expectRange(pb: *ProcessBuffer, i: usize, start: usize, end: usize, style: vaxis.Style) !void {
+    const r = pb.styles.ranges.items[i];
+    try testing.expectEqual(start, r.start);
+    try testing.expectEqual(end, r.end);
+    try testing.expect(std.meta.eql(style, pb.styles.styleOf(r.style)));
+}
+
+test "the terminal stage turns SGR into styles and leaves the raw bytes alone" {
+    const alloc = testing.allocator;
+    const pb = try ProcessBuffer.init(testing.io, alloc);
+    defer pb.deinit();
+
+    const raw = "\x1b[31mred\x1b[0m plain\nprogress 1\rprogress 2\n\ta\n";
+    try pb.append(raw);
+
+    try testing.expectEqualStrings(raw, pb.buffer.buf.items);
+    try testing.expectEqualStrings("red plain\nprogress 2\n        a\n", pb.filtered_buffer.buf.items);
+    try testing.expectEqual(1, pb.styles.ranges.items.len);
+    try expectRange(pb, 0, 0, 3, test_red);
+
+    const meta = pb.peek();
+    try testing.expectEqual(3, meta.raw_lines);
+    try testing.expectEqual(raw.len, meta.raw_len);
+    try testing.expectEqual(3, meta.filtered_lines);
+    try testing.expectEqual(raw.len, meta.lenOf(.Raw));
+    try testing.expectEqual(pb.filtered_buffer.count(), meta.lenOf(.Filtered));
+}
+
+test "SGR colour carries across lines and a reprocess replays it identically" {
+    const alloc = testing.allocator;
+    const pb = try ProcessBuffer.init(testing.io, alloc);
+    defer pb.deinit();
+
+    try pb.append("\x1b[32mgreen\n");
+    try pb.append("still\x1b[0m\nplain\n");
+    try testing.expectEqualStrings("green\nstill\nplain\n", pb.filtered_buffer.buf.items);
+    try testing.expectEqual(2, pb.styles.ranges.items.len);
+    try expectRange(pb, 0, 0, 5, test_green);
+    try expectRange(pb, 1, 6, 11, test_green);
+
+    // rebuild from raw: the carried state must be replayed from the first line
+    try pb.removeAllFilters();
+    try testing.expectEqual(2, pb.styles.ranges.items.len);
+    try expectRange(pb, 0, 0, 5, test_green);
+    try expectRange(pb, 1, 6, 11, test_green);
+}
+
+test "a replace filter that rewrites a line drops only that line's SGR colours" {
+    const alloc = testing.allocator;
+    const pb = try ProcessBuffer.init(testing.io, alloc);
+    defer pb.deinit();
+
+    try pb.addFilter(try replaceFilter(alloc, "red", "RED"));
+    try pb.append("\x1b[31mred\x1b[0m\n\x1b[31mblue\x1b[0m\n");
+
+    try testing.expectEqualStrings("RED\nblue\n", pb.filtered_buffer.buf.items);
+    try testing.expectEqual(1, pb.styles.ranges.items.len);
+    try expectRange(pb, 0, 4, 8, test_red);
+}
+
+test "a colour rule added later keeps the program's colours and wins where they overlap" {
+    const alloc = testing.allocator;
+    const pb = try ProcessBuffer.init(testing.io, alloc);
+    defer pb.deinit();
+
+    try pb.append("\x1b[31mred word\x1b[0m\n");
+    try expectRange(pb, 0, 0, 8, test_red);
+
+    try pb.addReviewer(try colorReviewer(alloc, "word", test_blue));
+    try testing.expectEqual(2, pb.styles.ranges.items.len);
+    try expectRange(pb, 0, 0, 4, test_red);
+    try expectRange(pb, 1, 4, 8, test_blue);
+
+    // the rule matched the visible text, not the escape bytes
+    try pb.removeAllReviewers();
+    try testing.expectEqual(1, pb.styles.ranges.items.len);
+    try expectRange(pb, 0, 0, 8, test_red);
+}
+
+test "raw view snapshots leave the terminal view untouched" {
+    const alloc = testing.allocator;
+    const pb = try ProcessBuffer.init(testing.io, alloc);
+    defer pb.deinit();
+
+    const raw = "\x1b[31mred\x1b[0m\nprogress 1\rprogress 2\n";
+    try pb.append(raw);
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const before = try pb.snapshotWindow(a, .{ .top_line = 0, .max_lines = 10, .follow_bottom = false });
+    try testing.expectEqualStrings("red\nprogress 2\n", before.text);
+    try testing.expectEqual(1, before.styles.len);
+    try testing.expectEqual(BufferBacking.Filtered, before.backing);
+
+    const raw_view = try pb.snapshotWindow(a, .{ .top_line = 0, .max_lines = 10, .follow_bottom = false, .backing = .Raw });
+    try testing.expectEqualStrings(raw, raw_view.text);
+    try testing.expectEqual(0, raw_view.styles.len);
+    try testing.expectEqual(BufferBacking.Raw, raw_view.backing);
+    try testing.expectEqual(2, raw_view.viewLines());
+    try testing.expectEqual(raw.len, raw_view.viewLen());
+    try testing.expectEqualSlices(usize, &.{ 0, 13, raw.len }, raw_view.line_starts);
+
+    const after = try pb.snapshotWindow(a, .{ .top_line = 0, .max_lines = 10, .follow_bottom = false });
+    try testing.expectEqualStrings(before.text, after.text);
+    try testing.expectEqualSlices(StyleRange, before.styles, after.styles);
+    try testing.expectEqual(before.palette.len, after.palette.len);
+    for (before.palette, after.palette) |x, y| try testing.expect(std.meta.eql(x, y));
+    try testing.expectEqual(before.meta.version, after.meta.version);
 }

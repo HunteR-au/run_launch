@@ -57,6 +57,23 @@ is_focused: bool = false,
 show_lines: bool = true,
 /// soft-wrap long lines at the viewport width (off: horizontal scrolling)
 wrap_lines: bool = false,
+/// which view of the output is shown; see `RenderMode`
+render_mode: RenderMode = .terminal,
+
+/// `terminal` shows the filtered buffer: the program's output interpreted the way a terminal
+/// would show it (colours, `\r` overwrites, tabs), with filters, colour rules and search.
+/// `raw` shows the stored bytes as written, every control byte visible, no filters, no styles,
+/// no search. Switching views never changes either buffer, so the terminal view comes back
+/// exactly as it was.
+pub const RenderMode = enum { terminal, raw };
+
+/// The buffer the current render mode reads.
+pub fn viewBacking(self: *const Output) ProcessBuffer.BufferBacking {
+    return switch (self.render_mode) {
+        .terminal => .Filtered,
+        .raw => .Raw,
+    };
+}
 
 const UnfoldHandlerData = .{
     .event_str = "unfilter",
@@ -127,6 +144,11 @@ const WrapHandlerData = .{
     .event_str = "wrap",
     .arg_description = "{--all on|off}",
     .handle = handleWrapCmd,
+};
+const RenderHandlerData = .{
+    .event_str = "render",
+    .arg_description = "{--all terminal|raw}",
+    .handle = handleRenderCmd,
 };
 const DumpBufferHandlerData = .{
     .event_str = "dump",
@@ -309,6 +331,8 @@ fn handleUnreplaceCmd(_: Io, _: []const u8, listener: *anyopaque) std.mem.Alloca
 fn handleFindCmd(io: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
     if (!self.is_focused) return;
+    // search runs over the filtered buffer, which the raw view does not show
+    if (self.render_mode == .raw) return;
 
     const arguments = try self.parseArgs(args);
     defer self.freeArgs(arguments);
@@ -321,13 +345,13 @@ fn handleFindCmd(io: Io, args: []const u8, listener: *anyopaque) std.mem.Allocat
 
 fn handleFindNextCmd(io: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    if (!self.is_focused) return;
+    if (!self.is_focused or self.render_mode == .raw) return;
     self.searchNext(io);
 }
 
 fn handleFindPrevCmd(io: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    if (!self.is_focused) return;
+    if (!self.is_focused or self.render_mode == .raw) return;
     self.searchPrev(io);
 }
 
@@ -636,6 +660,39 @@ fn handleWrapCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocato
     if (self.widget_ref) |widget| widget.onWrapToggled();
 }
 
+/// `render [--all] [terminal|raw]`: without a mode the view toggles.
+fn handleRenderCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    const self: *Output = @ptrCast(@alignCast(listener));
+
+    const arg_array = try self.parseArgs(args);
+    defer self.freeArgs(arg_array);
+
+    var all = false;
+    var requested: ?RenderMode = null;
+    for (arg_array) |arg| {
+        if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "-a")) {
+            all = true;
+        } else if (std.mem.eql(u8, arg, "terminal")) {
+            requested = .terminal;
+        } else if (std.mem.eql(u8, arg, "raw")) {
+            requested = .raw;
+        } else {
+            return;
+        }
+    }
+
+    // Without --all only the focused output changes
+    if (!all and !self.is_focused) return;
+
+    const mode = requested orelse switch (self.render_mode) {
+        .terminal => RenderMode.raw,
+        .raw => RenderMode.terminal,
+    };
+    if (mode == self.render_mode) return;
+    self.render_mode = mode;
+    if (self.widget_ref) |widget| widget.onRenderModeChanged();
+}
+
 fn handleDumpCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
 
@@ -765,8 +822,10 @@ pub fn searchPrev(self: *Output, io: Io) void {
 }
 
 /// Returns the window-relative range to highlight for the current search match, if any.
-/// Nothing is highlighted when the match belongs to an older buffer version.
+/// Nothing is highlighted when the match belongs to an older buffer version, or in the raw
+/// view (search offsets belong to the filtered buffer).
 pub fn searchHighlight(self: *Output, snap: *const WindowSnapshot) ?Highlight {
+    if (snap.backing != .Filtered) return null;
     const state = &(self.search_state orelse return null);
     const m = state.current orelse return null;
     const version = state.searcher.index.version orelse return null;
@@ -817,6 +876,7 @@ pub fn subscribeHandlersToCmd(self: *Output, cmd: *Cmd) !void {
         &InfoHandlerData,
         &ShowLinesHandlerData,
         &WrapHandlerData,
+        &RenderHandlerData,
         &DumpBufferHandlerData,
     };
 

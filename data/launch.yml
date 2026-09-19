@@ -12,10 +12,17 @@ configurations:
     program: '.\data\printlines.py'
     request: "attach"
     preLaunchTask: "list"
-    connect: 
+    connect:
        host: "remote-machine-name"
        port: 5678
-    
+  - name: "Control"
+    type: "debugpy"
+    program: '.\data\controlchars.py'
+    request: "attach"
+    connect:
+       host: "remote-machine-name"
+       port: 5678
+
 tasks:
   - label: "list"
     type: "shell"

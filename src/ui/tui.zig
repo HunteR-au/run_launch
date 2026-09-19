@@ -892,14 +892,25 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 // TODOs
 
 // ---- priority list for now ----
+
 // 1) update config and config structs to my system
 // 2) wire in the scripting system
-// 3) normalize newlines for merge keep/hide bug (done)
-// 4) wrapped line mode (done)
 // 5) match line mode where waits for some process condition (exit 0) or string match on last line or any line and exits if success
 // 6) be able to remove merged views,
+//      - needs to be expressed via the !n notation (ie kill !0)
 // 7) kill/hide views backed by a process
-// 8) consider what to do about character controls....not sure atm but I need to do something. They can kill the program!!!!
+//      - I want a cmd called stop which stops the child process
+//      - I want a cmd called del which deletes the view (and if a non-merged view, stops the child process)
+
+// 3) normalize newlines for merge keep/hide bug (done)
+// 4) wrapped line mode (done)
+// 0) consider what to do about character controls....not sure atm but I need to do something. They can kill the program!!!! (done)
+//  - I want the stored data in ingest to store the original input
+//  - I want to have a mode to see the raw data to help with debugging
+//  - I want to have a default that is pretty and respects what the program wanted the user to see
+//      - This adds some complications in how flipping states from raw to terminal will work
+//      - It will also impact how features that use regex over the ingest data work. Pattern matching over hidden data is a problem
+//          - Ideally a user would write regexes over what they see and it matches
 
 // think about workflows. this should be quick to turn on/off and powerfull with configuration set up
 
@@ -1009,6 +1020,7 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 // split into virtual buffers
 //  split (ie if in rule b1 else b2)
 // OR tee (ie if in rule b1 and b2 ELSE b1)
+// counter for a regex match
 
 // how do to splitting -- not sure
 // need childProcessBuffers which use the same base buffer

@@ -96,6 +96,16 @@ pub fn getHelpString() []const u8 {
     \\
     \\      - toggle soft wrapping of long lines for the focused output OR
     \\          set for all outputs
+    \\
+    \\render {--all terminal|raw}
+    \\
+    \\      - toggle the view of the focused output OR set for all outputs
+    \\          terminal: output as a terminal would show it (colours, \r
+    \\                    overwrites, tabs); filters, color and find apply
+    \\          raw:      the stored bytes as written, every control byte
+    \\                    visible (^[[31m, ^M, ^G, \xFF); no filters, styles
+    \\                    or find. Switching back leaves the terminal view intact
+    \\
     \\merge view_name { --all | { ~m ... ~n } }
     \\
     \\      - merge the text of multiple views together sorted via the 
