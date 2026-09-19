@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const debugpy = @import("pydebug.zig");
 const native = @import("native.zig");
@@ -183,6 +184,23 @@ pub const ConfiguredRunner = struct {
         return try pump_.reader.launch(io, self._alloc, self.pump, taskname, argv, null);
     }
 
+    /// Asks the OS to kill the process whose output buffer is `id` (the `stop` command).
+    /// Signal only, never blocks: the process' waiter task reaps it and its readers drain
+    /// the pipes as usual. Returns false when no launched process owns that buffer (a
+    /// merged/help buffer) - nothing to do then.
+    pub fn terminateProcess(self: *ConfiguredRunner, io: Io, id: uuid.UUID) bool {
+        self.m.lockUncancelable(io);
+        defer self.m.unlock(io);
+
+        for (self._context.procs.items) |ing| {
+            if (std.meta.eql(ing.id, id)) {
+                ing.terminate();
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// Terminates every launched process and joins its reader/waiter tasks. Never hangs.
     pub fn killAll(self: *ConfiguredRunner, io: Io) !void {
         self.m.lockUncancelable(io);
@@ -217,4 +235,82 @@ fn launchConfig(
         .debugpy, .python => debugpy.launch(io, alloc, pump, config),
         .cppdbg, .cppvsdbg => native.launch(io, alloc, pump, config),
     };
+}
+
+// ------------------------------------------------------------------
+// Tests
+// ------------------------------------------------------------------
+
+const testing = std.testing;
+
+/// The runner only produces; for these tests the pump can drop everything.
+const NullSink = struct {
+    fn sink(self: *NullSink) pump_.Sink {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+    const vtable: pump_.Sink.VTable = .{
+        .createBuffer = struct {
+            fn f(_: *anyopaque, _: uuid.UUID, _: []const u8) void {}
+        }.f,
+        .bytes = struct {
+            fn f(_: *anyopaque, _: uuid.UUID, _: pump_.Stream, _: []const u8) void {}
+        }.f,
+        .streamEof = struct {
+            fn f(_: *anyopaque, _: uuid.UUID, _: pump_.Stream, _: ?anyerror) void {}
+        }.f,
+        .processExited = struct {
+            fn f(_: *anyopaque, _: uuid.UUID, _: ?Term) void {}
+        }.f,
+        .endBatch = struct {
+            fn f(_: *anyopaque) void {}
+        }.f,
+        .shutdown = struct {
+            fn f(_: *anyopaque) void {}
+        }.f,
+    };
+};
+
+test "terminateProcess: kills the process behind a buffer id promptly, ignores unknown ids" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var sink: NullSink = .{};
+    const pump = try Pump.init(alloc, io, sink.sink(), .{});
+    defer pump.deinit();
+    try pump.start();
+
+    // A runner with no configuration: `terminateProcess` only looks at the launched processes.
+    var runner: ConfiguredRunner = .{
+        ._alloc = alloc,
+        ._context = .{ .procs = .empty },
+        .pump = pump,
+        .config = undefined,
+    };
+    defer runner._context.procs.deinit(alloc);
+
+    // No shell in between: the killed process is the one holding the pipes, so the readers
+    // see EOF right away (what `stop` relies on for a launched program).
+    const argv: []const []const u8 = switch (builtin.os.tag) {
+        .windows => &.{ "ping", "-n", "30", "127.0.0.1" },
+        else => &.{ "sleep", "30" },
+    };
+    const ing = try pump_.reader.launch(io, alloc, pump, "sleeper", argv, null);
+    defer ing.destroy();
+    try runner._context.procs.append(alloc, ing);
+
+    const unknown: uuid.UUID = .{ .bytes = [_]u8{0xAB} ** 16 };
+    try testing.expect(!runner.terminateProcess(io, unknown));
+    try testing.expect(!ing.exited.isSet());
+
+    const start = Io.Timestamp.now(io, .awake);
+    try testing.expect(runner.terminateProcess(io, ing.id));
+    try ing.all_done.wait(io);
+    const elapsed = start.durationTo(Io.Timestamp.now(io, .awake));
+    try testing.expect(elapsed.toSeconds() < 5);
+    try testing.expect(ing.exited.isSet());
+
+    // idempotent once the process is gone
+    try testing.expect(runner.terminateProcess(io, ing.id));
+
+    pump.stop();
 }

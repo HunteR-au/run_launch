@@ -110,5 +110,16 @@ pub fn getHelpString() []const u8 {
     \\
     \\      - merge the text of multiple views together sorted via the 
     \\          timestamp of each line into a new view called view_name
+    \\
+    \\stop { ~n | !n } ...
+    \\
+    \\      - titles can repeat, so only these ids are accepted (F1 lists them)
+    \\          ~n: remove view n and its buffer; a view backed by a child
+    \\              process also kills that process; a merged view is unlinked
+    \\              and merges built on it keep their lines
+    \\          !n: kill the child process behind buffer n, keep the view; the
+    \\              process-exited marker appears at the end of the output
+    \\              (merged/help buffers have no process: nothing happens)
+    \\          with no views left the app keeps running: start something or q
     ;
 }

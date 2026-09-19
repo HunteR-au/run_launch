@@ -96,6 +96,10 @@ pub const IngestStore = struct {
     /// Guards `map` for the UI's `lookup`; everything else is pump-thread-only.
     m: std.Io.Mutex = .init,
     map: std.AutoHashMapUnmanaged(UUID, *ProcessBuffer) = .empty,
+    /// Ids of buffers removed through `remove_buffer`. A stopped child's readers and waiter
+    /// can still deliver bytes/EOF/exit for a while; without this `getOrCreate` would
+    /// resurrect the buffer as an anonymous "?" view.
+    removed: std.AutoHashMapUnmanaged(UUID, void) = .empty,
     graph: BufferGraph,
     next_seq: u64 = 0,
     strid_counter: usize = 0,
@@ -119,6 +123,7 @@ pub const IngestStore = struct {
         var it = self.map.valueIterator();
         while (it.next()) |pb| pb.*.deinit();
         self.map.deinit(self.alloc);
+        self.removed.deinit(self.alloc);
         self.graph.deinit();
         self.inbox.deinit();
         self.alloc.destroy(self);
@@ -231,6 +236,7 @@ pub const IngestStore = struct {
             pb.setName(name) catch {};
             return;
         }
+        if (self.removed.contains(id)) return;
         _ = self.createBuffer(id, name) catch |err| {
             std.log.err("could not create buffer \"{s}\": {t}", .{ name, err });
         };
@@ -296,6 +302,7 @@ pub const IngestStore = struct {
 
     fn getOrCreate(self: *IngestStore, id: UUID) ?*ProcessBuffer {
         if (self.map.get(id)) |pb| return pb;
+        if (self.removed.contains(id)) return null; // late output of a stopped process
         return self.createBuffer(id, "?") catch |err| {
             std.log.err("could not create buffer for unknown id: {t}", .{err});
             return null;
@@ -419,6 +426,9 @@ pub const IngestStore = struct {
         };
         if (pb.handle) |h| self.graph.removeNode(h);
         pb.deinit();
+        self.removed.put(self.alloc, id, {}) catch {
+            // worst case a late chunk creates an anonymous buffer
+        };
         self.inbox.push(.{ .buffer_removed = .{ .id = id } });
     }
 
@@ -560,6 +570,36 @@ test "store: merge orders by sequence, follows live parents and survives parent 
     try store.execute(.{ .create_merge = .{ .id = idFrom(10), .name = name2, .parents = parents2 } });
     try testing.expect(store.map.get(idFrom(10)) != null);
     _ = drainAndFree(store);
+}
+
+test "store: output arriving after remove_buffer is dropped instead of resurrecting the buffer" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    const store = try IngestStore.init(alloc, io);
+    defer store.deinit();
+    const s = store.sink();
+
+    s.vtable.createBuffer(s.ctx, idFrom(1), "proc");
+    s.vtable.bytes(s.ctx, idFrom(1), .stdout, "hello\n");
+    try testing.expectEqual(1, drainAndFree(store));
+
+    // the UI stopped the view: the process is being killed while its pipes still hold data
+    try store.execute(.{ .remove_buffer = .{ .id = idFrom(1) } });
+    try testing.expectEqual(null, store.map.get(idFrom(1)));
+    try testing.expectEqual(1, drainAndFree(store)); // buffer_removed
+
+    s.vtable.bytes(s.ctx, idFrom(1), .stdout, "late\n");
+    s.vtable.streamEof(s.ctx, idFrom(1), .stdout, null);
+    s.vtable.streamEof(s.ctx, idFrom(1), .stderr, null);
+    s.vtable.processExited(s.ctx, idFrom(1), .{ .exited = 1 });
+    s.vtable.createBuffer(s.ctx, idFrom(1), "proc");
+    try testing.expectEqual(0, store.map.count());
+    try testing.expectEqual(0, drainAndFree(store)); // no phantom buffer_created
+
+    // an unrelated id still gets the anonymous-buffer treatment
+    s.vtable.bytes(s.ctx, idFrom(2), .stdout, "new\n");
+    try testing.expectEqual(1, store.map.count());
+    try testing.expectEqual(1, drainAndFree(store));
 }
 
 test "store: unknown parent in merge reports a failure event and creates nothing" {

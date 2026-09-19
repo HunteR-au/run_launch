@@ -20,8 +20,9 @@ pub const Objects = struct {
         guid: UUID,
         parent: ?UUID = null,
 
+        /// `~N`: the notation `merge`/`stop` accept for a view
         pub fn to_string(self: *const View, alloc: Allocator) ![]u8 {
-            return try std.fmt.allocPrint(alloc, "!{d}: {s}", .{ self.id, self.name });
+            return try std.fmt.allocPrint(alloc, "~{d}: {s}", .{ self.id, self.name });
         }
     };
 
@@ -30,8 +31,9 @@ pub const Objects = struct {
         name: []const u8,
         guid: UUID,
 
+        /// `!N`: the notation `merge`/`stop` accept for a buffer
         pub fn to_string(self: *const Buffer, alloc: Allocator) ![]u8 {
-            return try std.fmt.allocPrint(alloc, "~{d}: {s}", .{ self.id, self.name });
+            return try std.fmt.allocPrint(alloc, "!{d}: {s}", .{ self.id, self.name });
         }
     };
 

@@ -105,6 +105,10 @@ const TuiApp = struct {
     help_id: ?uuid.UUID = null,
     /// buffer whose view should take focus as soon as the pump announces it
     pending_focus_id: ?uuid.UUID = null,
+    /// Views taken off the screen by `stop`, freed on the next tick. vaxis hit-tests mouse
+    /// events against the previous frame, so a widget must survive until a redraw has
+    /// happened without it (`actions.stop.finish` also posts the buffer removal).
+    retired: std.ArrayList(actions.stop.Detached) = .empty,
     mode: ModelState = .main,
     prev_mode: ModelState = .main,
     start_script: ?[]const u8 = null,
@@ -144,6 +148,71 @@ const TuiApp = struct {
         found.view.focus_output(found.widget);
         try ctx.requestFocus(found.widget.widget());
         return true;
+    }
+
+    /// Frees the views `stop` detached during the previous frame and removes their buffers
+    /// from the pump. Safe now: the frame drawn since then no longer references them.
+    fn flushRetired(self: *TuiApp, io: Io) void {
+        for (self.retired.items) |d| actions.stop.finish(io, &self.app_model, d);
+        self.retired.clearRetainingCapacity();
+    }
+
+    /// `stop {~N | !N}...`: `~N` takes view N off the screen (killing its child process when
+    /// it has one); `!N` only kills the child process behind buffer N, the view stays.
+    /// Errors are per argument: a bad id does not stop the others.
+    fn stopViews(self: *TuiApp, ctx: *vxfw.EventContext, args: []const []const u8) !void {
+        if (args.len == 0) {
+            std.log.warn("stop: expected a view (~N) or buffer (!N) id", .{});
+            return;
+        }
+        for (args) |arg| {
+            const target = actions.stop.parseTarget(arg) catch {
+                std.log.warn("stop {s}: not a view (~N) or buffer (!N) id", .{arg});
+                continue;
+            };
+            switch (target) {
+                .view => |strid| {
+                    const detached = actions.stop.stopView(ctx.io, &self.app_model, strid) catch |err| switch (err) {
+                        error.NoSuchView => {
+                            std.log.warn("stop {s}: no such view", .{arg});
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    std.log.info("stop {s}: removed \"{s}\"{s}", .{
+                        arg,
+                        detached.widget.process_name,
+                        if (detached.process_terminated) ", process terminated" else "",
+                    });
+                    if (self.help_id) |h| {
+                        // F2 recreates the help view after it has been stopped
+                        if (std.meta.eql(h, detached.id)) self.help_id = null;
+                    }
+                    if (self.pending_focus_id) |p| {
+                        if (std.meta.eql(p, detached.id)) self.pending_focus_id = null;
+                    }
+                    try self.retired.append(self._alloc, detached);
+                },
+                .buffer => |strid| {
+                    const terminated = actions.stop.stopProcess(ctx.io, &self.app_model, strid) catch |err| switch (err) {
+                        error.NoSuchBuffer => {
+                            std.log.warn("stop {s}: no such buffer", .{arg});
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    if (terminated) {
+                        std.log.info("stop {s}: process terminated, view kept", .{arg});
+                    } else {
+                        std.log.warn("stop {s}: no child process backs this buffer (merged view, help, or already exited)", .{arg});
+                    }
+                },
+            }
+        }
+        // The command bar keeps the focus while it is open; otherwise land on whatever is
+        // left (the root widget when nothing is - the app keeps running until `q`).
+        if (self.mode == .main) try self.focus_on_main(ctx);
+        ctx.redraw = true;
     }
 
     /// Applies what the pump reported since the last tick: creates widgets for new buffers,
@@ -248,7 +317,9 @@ const TuiApp = struct {
                                 },
                                 else => unreachable,
                             }
-                            return ctx.consumeEvent();
+                            // The mode changed, so the frame must change: without this the
+                            // overlay stays until a child writes output or another key arrives.
+                            return ctx.consumeAndRedraw();
                         }
                     },
                     .ShowHelp => {
@@ -340,6 +411,7 @@ const TuiApp = struct {
             },
             .tick => {
                 try ctx.tick(tick_ms, self.widget());
+                self.flushRetired(ctx.io);
                 try self.drainInbox(ctx);
                 if (self.anyOutputChanged()) ctx.redraw = true;
             },
@@ -494,15 +566,9 @@ const TuiApp = struct {
                                 error.MergeCmdNotEnoughArgs => {},
                                 else => return err,
                             };
-
-                            // TODO:
-                            // - match args to process views
-                            // - create a list of UUID of parent process views
-                            // - create name of merged view
-                            // - merge view1 p1 p2 p3
-
-                            // TESTING CODE
-                            // for now - just merge all views
+                        } else if (std.mem.eql(u8, cmd_name, StopViewData.event_str)) {
+                            const args = cmd.get_args(self._alloc) catch return error.UnexpectedParseError;
+                            try self.stopViews(ctx, args);
                         }
                     },
                     else => {},
@@ -611,7 +677,11 @@ const TuiApp = struct {
         var handle = self.app_model.executor.run(io, args, .nonBlocking) catch {
             return;
         };
-        if (handle) |*h| h.deinit();
+        if (handle) |*h| {
+            // Choose to focus the last ProcItem
+            if (h.children.items.len > 0) self.pending_focus_id = h.children.items[h.children.items.len - 1].id;
+            h.deinit();
+        }
     }
 
     /// Dumps every output's raw buffer to disk. Synchronous: used right before quitting.
@@ -643,6 +713,10 @@ const TuiApp = struct {
         .event_str = "merge",
         .arg_description = "view_name { --all | { !|~m ... !|~m } }",
     };
+    const StopViewData = .{
+        .event_str = "stop",
+        .arg_description = "{ ~n (remove view) | !n (kill process) } ...",
+    };
 
     pub fn subscribeHandlersToCmd(self: *TuiApp) !void {
         const hander_data = comptime .{
@@ -653,6 +727,7 @@ const TuiApp = struct {
             &QuitHandlerData,
             &QuitSaveHandlerData,
             &MergeViewsData,
+            &StopViewData,
         };
 
         inline for (hander_data) |data| {
@@ -826,6 +901,10 @@ fn run_tui(io: Io, alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner,
 /// Frees the model. Called by `stop_tui` after the TUI thread has been joined.
 fn teardownModel(io: Io) void {
     const alloc = model_alloc_root;
+    for (model.retired.items) |d| {
+        d.widget.deinit(io);
+        if (d.emptied_view) |v| v.deinit(io);
+    }
     model.app_model.model_view.deinit(io);
     model.app_model.deinitBufferInfos(alloc);
     model.arena.deinit();
@@ -896,11 +975,11 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 // 1) update config and config structs to my system
 // 2) wire in the scripting system
 // 5) match line mode where waits for some process condition (exit 0) or string match on last line or any line and exits if success
-// 6) be able to remove merged views,
-//      - needs to be expressed via the !n notation (ie kill !0)
-// 7) kill/hide views backed by a process
-//      - I want a cmd called stop which stops the child process
-//      - I want a cmd called del which deletes the view (and if a non-merged view, stops the child process)
+//  - a list of match rules
+//      - rules can be either process error code OR buffer string regex match
+//      - question: is it an OR or should I express OR/AND statements
+//      - if passes then ACTION runs which should be a script (ie wq or q)
+//          - maybe have a fail script as well ???
 
 // 3) normalize newlines for merge keep/hide bug (done)
 // 4) wrapped line mode (done)
@@ -911,6 +990,9 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 //      - This adds some complications in how flipping states from raw to terminal will work
 //      - It will also impact how features that use regex over the ingest data work. Pattern matching over hidden data is a problem
 //          - Ideally a user would write regexes over what they see and it matches
+// 6) be able to remove merged views (done: `stop ~n|!n`)
+// 7) kill/hide views backed by a process (done: `stop` removes the view and kills the process)
+//      - maybe later: a cmd that only stops the child process and keeps the view
 
 // think about workflows. this should be quick to turn on/off and powerfull with configuration set up
 

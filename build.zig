@@ -277,6 +277,18 @@ pub fn build(b: *std.Build) !void {
     config_unit_tests.root_module.addImport("utils", utils);
     config_unit_tests.root_module.addImport("yaml", yaml);
 
+    // And the runner module (spawns real short-lived processes).
+    const runner_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/runner/runner.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    runner_unit_tests.root_module.addImport("utils", utils);
+    runner_unit_tests.root_module.addImport("config", config);
+    runner_unit_tests.root_module.addImport("pump", pump);
+
     // And the utils module.
     const utils_unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -291,6 +303,7 @@ pub fn build(b: *std.Build) !void {
     const run_pump_unit_tests = b.addRunArtifact(pump_unit_tests);
     const run_config_unit_tests = b.addRunArtifact(config_unit_tests);
     const run_utils_unit_tests = b.addRunArtifact(utils_unit_tests);
+    const run_runner_unit_tests = b.addRunArtifact(runner_unit_tests);
 
     // Similar to creating the run step earlier, this exposes a `test` step to
     // the `zig build --help` menu, providing a way for the user to request
@@ -301,4 +314,5 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&run_pump_unit_tests.step);
     test_step.dependOn(&run_config_unit_tests.step);
     test_step.dependOn(&run_utils_unit_tests.step);
+    test_step.dependOn(&run_runner_unit_tests.step);
 }

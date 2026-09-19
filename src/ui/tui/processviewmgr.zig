@@ -118,6 +118,34 @@ pub fn find_by_buffer_id(app_model: *AppModel, id: uuid.UUID) ?Located {
     return null;
 }
 
+/// Finds the output view that contains `widget`.
+pub fn locate_widget(app_model: *AppModel, widget: *OutputWidget) ?Located {
+    for (app_model.model_view.outputviews.items) |ov| {
+        for (ov.outputs.items) |ow| {
+            if (ow == widget) return .{ .view = ov, .widget = ow };
+        }
+    }
+    return null;
+}
+
+/// Takes a widget off the screen: it stops receiving commands, leaves its output view and,
+/// when that view is now empty, the view leaves the layout too (focus moves to a neighbour).
+/// Nothing is freed here, so a widget/view still referenced by the current frame is safe to
+/// hit until the caller deinits them after the next redraw. Returns the emptied view, if any.
+pub fn detach_processview(model_view: *View, located: Located) !?*OutputView {
+    if (located.widget.output.cmd_ref != null) located.widget.output.unsubscribeHandlersFromCmd();
+    located.view.remove_output(located.widget);
+    if (located.view.outputs.items.len != 0) return null;
+
+    const pos = try model_view.get_position(located.view);
+    const emptied = model_view.remove_outputview(pos);
+    const remaining = model_view.outputviews.items.len;
+    if (remaining != 0 and model_view.focused_outputview == null) {
+        try model_view.focus_outputview_by_idx(@min(pos, remaining - 1));
+    }
+    return emptied;
+}
+
 const ViewIterator = struct {
     outer: []const *OutputView,
     outer_index: usize = 0,
@@ -141,4 +169,119 @@ pub fn get_view_list_iterator(app_model: *AppModel) ViewIterator {
     return .{
         .outer = app_model.model_view.outputviews.items,
     };
+}
+
+// ------------------------------------------------------------------
+// Tests
+// ------------------------------------------------------------------
+
+const testing = std.testing;
+const pump_mod = @import("pump");
+const IngestStore = AppModel.IngestStore;
+
+/// Widgets need a buffer to point at; a store with a running pump provides real ones.
+const WidgetHarness = struct {
+    store: *IngestStore,
+    pump: *pump_mod.Pump,
+
+    fn init(alloc: Allocator, io: Io) !WidgetHarness {
+        const store = try IngestStore.init(alloc, io);
+        errdefer store.deinit();
+        const pump = try pump_mod.Pump.init(alloc, io, store.sink(), .{});
+        errdefer pump.deinit();
+        store.attach(pump);
+        try pump.start();
+        return .{ .store = store, .pump = pump };
+    }
+
+    fn widget(self: *WidgetHarness, alloc: Allocator, name: []const u8) !*OutputWidget {
+        const id = try self.store.createBufferAsync(name);
+        // FIFO barrier so the buffer exists before we look it up
+        self.store.call(.{ .remove_all_filters = .{ .id = .{ .bytes = [_]u8{0xff} ** 16 } } }) catch unreachable;
+        const pb = self.store.lookup(id).?;
+        const ow = try OutputWidget.init(alloc, name, id, pb, self.store);
+        ow.strid = counter.new_id();
+        return ow;
+    }
+
+    fn deinit(self: *WidgetHarness) void {
+        self.pump.stop();
+        self.pump.deinit();
+        self.store.deinit();
+    }
+};
+
+test "detach_processview: emptied views leave the layout, focus lands on a neighbour, none left is fine" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var h = try WidgetHarness.init(alloc, io);
+    defer h.deinit();
+
+    const model_view = try View.init(alloc);
+    defer model_view.deinit(io);
+
+    // [ ov0: w0 w1 ] [ ov1: w2 ], ov1 focused
+    const ov0 = try OutputView.init(alloc);
+    try model_view.add_outputview(ov0, 0);
+    const w0 = try h.widget(alloc, "a");
+    const w1 = try h.widget(alloc, "a"); // same title on purpose: only ids tell them apart
+    try ov0.add_output(w0);
+    try ov0.add_output(w1);
+    const ov1 = try OutputView.init(alloc);
+    try model_view.add_outputview(ov1, 1);
+    const w2 = try h.widget(alloc, "b");
+    try ov1.add_output(w2);
+    try model_view.focus_outputview_by_idx(1);
+
+    // the strid lookups both helpers rely on
+    try testing.expectEqual(w1, get_via_strid_view(model_view, w1.strid).?);
+    try testing.expectEqual(ov1, locate_in(model_view, w2).?.view);
+
+    // stop w2: ov1 empties and is removed, focus moves to ov0 (the nearest remaining view)
+    const emptied1 = try detach_processview(model_view, .{ .view = ov1, .widget = w2 });
+    try testing.expectEqual(ov1, emptied1.?);
+    try testing.expectEqual(1, model_view.outputviews.items.len);
+    try testing.expectEqual(ov0, model_view.get_focused().?);
+    try testing.expect(ov0.is_focused);
+    emptied1.?.deinit(io);
+    w2.deinit(io);
+
+    // stop the focused w0: ov0 stays with w1 focused
+    try testing.expectEqual(w0, ov0.focused_ow.?);
+    const emptied0 = try detach_processview(model_view, .{ .view = ov0, .widget = w0 });
+    try testing.expectEqual(null, emptied0);
+    try testing.expectEqual(w1, ov0.focused_ow.?);
+    try testing.expect(w1.output.is_focused);
+    w0.deinit(io);
+
+    // stop the last one: no views at all, nothing focused, the View itself still draws
+    const emptied_last = try detach_processview(model_view, .{ .view = ov0, .widget = w1 });
+    try testing.expectEqual(ov0, emptied_last.?);
+    try testing.expectEqual(0, model_view.outputviews.items.len);
+    try testing.expectEqual(0, model_view.flexitems.items.len);
+    try testing.expectEqual(null, model_view.get_focused());
+    try testing.expectEqual(null, model_view.get_focused_output_widget());
+    emptied_last.?.deinit(io);
+    w1.deinit(io);
+
+    // ... and a new view can be added again afterwards (what `start` does through the inbox)
+    const ov_new = try OutputView.init(alloc);
+    try model_view.add_outputview(ov_new, 0);
+    try testing.expectEqual(ov_new, model_view.get_focused().?);
+}
+
+/// Test-only twins of `get_via_strid`/`locate_widget` that take the View directly.
+fn get_via_strid_view(model_view: *View, strid: usize) ?*OutputWidget {
+    for (model_view.outputviews.items) |ov| {
+        for (ov.outputs.items) |ow| if (ow.strid == strid) return ow;
+    }
+    return null;
+}
+
+fn locate_in(model_view: *View, widget: *OutputWidget) ?Located {
+    for (model_view.outputviews.items) |ov| {
+        for (ov.outputs.items) |ow| if (ow == widget) return .{ .view = ov, .widget = ow };
+    }
+    return null;
 }
