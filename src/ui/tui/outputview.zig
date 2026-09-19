@@ -12,6 +12,10 @@ pub const OutputList = std.ArrayList(*OutputWidget);
 pub const OutputView = struct {
     alloc: std.mem.Allocator,
     outputs: OutputList,
+    /// Outputs in the order they were last shown, most recent last. When the displayed
+    /// output leaves the column, the previous entry takes its place. Never longer than
+    /// `outputs`, and `add_output` reserves that much, so `touch` cannot fail.
+    history: OutputList = .empty,
     focused_ow: ?*OutputWidget = null,
     is_focused: bool = false,
 
@@ -41,34 +45,58 @@ pub const OutputView = struct {
             o.deinit(io);
         }
         self.outputs.deinit(self.alloc);
+        self.history.deinit(self.alloc);
         self.alloc.destroy(self);
     }
 
     pub fn add_output(self: *OutputView, output: *OutputWidget) std.mem.Allocator.Error!void {
         // TODO: create a tab for the corresponding output
         try self.outputs.append(self.alloc, output);
+        try self.history.ensureTotalCapacity(self.alloc, self.outputs.items.len);
 
         if (self.outputs.items.len == 1) {
             self.focused_ow = output;
             self.focused_ow.?.output.is_focused = self.is_focused;
+            self.touch(output);
         }
     }
 
     pub fn remove_output(self: *OutputView, output: *OutputWidget) void {
         // TODO: remove the tab for the corresponding output
-        for (self.outputs.items, 0..) |o, i| {
-            if (o == output) {
-                //std.debug.print("ping1 - len {d}\n", .{self.outputs.items.len});
-                output.output.is_focused = false;
-                _ = self.outputs.swapRemove(i);
+        const idx = self.indexOf(output) orelse return;
+        output.output.is_focused = false;
+        // ordered: Tab keeps cycling the remaining outputs in the same order
+        _ = self.outputs.orderedRemove(idx);
+        self.forget(output);
 
-                if (o == self.focused_ow and self.outputs.items.len > 0) {
-                    self.focused_ow = self.outputs.items[0];
-                    self.focused_ow.?.output.is_focused = self.is_focused;
-                } else if (self.outputs.items.len == 0) {
-                    self.focused_ow = null;
-                }
-                break;
+        if (output != self.focused_ow) return;
+        if (self.outputs.items.len == 0) {
+            self.focused_ow = null;
+            return;
+        }
+        // back to what this column showed before `output`
+        self.focused_ow = self.history.getLastOrNull() orelse self.outputs.items[0];
+        self.focused_ow.?.output.is_focused = self.is_focused;
+    }
+
+    fn indexOf(self: *const OutputView, output: *OutputWidget) ?usize {
+        for (self.outputs.items, 0..) |o, i| {
+            if (o == output) return i;
+        }
+        return null;
+    }
+
+    /// Marks `output` as the most recently shown output of this column.
+    fn touch(self: *OutputView, output: *OutputWidget) void {
+        self.forget(output);
+        self.history.appendAssumeCapacity(output);
+    }
+
+    fn forget(self: *OutputView, output: *OutputWidget) void {
+        for (self.history.items, 0..) |o, i| {
+            if (o == output) {
+                _ = self.history.orderedRemove(i);
+                return;
             }
         }
     }
@@ -95,6 +123,7 @@ pub const OutputView = struct {
                 // if the current outputview is focused we want to render
                 // the output as focused
                 self.focused_ow.?.output.is_focused = self.is_focused;
+                self.touch(o);
             }
         }
     }
@@ -127,6 +156,7 @@ pub const OutputView = struct {
         } else if (self.focused_ow == null) {
             self.focused_ow = self.outputs.items[0];
             self.focused_ow.?.output.is_focused = self.is_focused;
+            self.touch(self.focused_ow.?);
             return self.focused_ow;
         }
 
@@ -161,6 +191,7 @@ pub const OutputView = struct {
 
         self.focused_ow = self.outputs.items[idx];
         self.focused_ow.?.output.is_focused = self.is_focused;
+        self.touch(self.focused_ow.?);
         return self.focused_ow;
     }
 

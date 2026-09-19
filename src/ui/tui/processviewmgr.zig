@@ -271,6 +271,58 @@ test "detach_processview: emptied views leave the layout, focus lands on a neigh
     try testing.expectEqual(ov_new, model_view.get_focused().?);
 }
 
+test "OutputView: when the shown output leaves, the column falls back to what it showed before" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var h = try WidgetHarness.init(alloc, io);
+    defer h.deinit();
+
+    const ov = try OutputView.init(alloc);
+    defer ov.deinit(io); // frees whatever is still in the column
+    ov.focus_self();
+
+    const a = try h.widget(alloc, "a");
+    const b = try h.widget(alloc, "b");
+    const c = try h.widget(alloc, "c");
+    try ov.add_output(a);
+    try ov.add_output(b);
+    try ov.add_output(c);
+    try testing.expectEqual(a, ov.focused_ow.?);
+
+    // the user looked at c, then at b, and now moves b to another column
+    ov.focus_output(c);
+    ov.focus_output(b);
+    ov.remove_output(b);
+    try testing.expectEqual(c, ov.focused_ow.?); // not a (index 0)
+    try testing.expect(c.output.is_focused);
+    try testing.expect(!b.output.is_focused);
+    // Tab order is the original order minus b, not shuffled by the removal
+    try testing.expectEqualSlices(*OutputWidget, &.{ a, c }, ov.outputs.items);
+    b.deinit(io);
+
+    // Tab counts as viewing: Tab to a, then remove a -> back to c
+    try testing.expectEqual(a, ov.focus_next().?);
+    ov.remove_output(a);
+    try testing.expectEqual(c, ov.focused_ow.?);
+    a.deinit(io);
+
+    // removing an output that is not on screen changes nothing on screen
+    const d = try h.widget(alloc, "d");
+    try ov.add_output(d);
+    try testing.expectEqual(c, ov.focused_ow.?);
+    ov.remove_output(d);
+    try testing.expectEqual(c, ov.focused_ow.?);
+    d.deinit(io);
+
+    // last one out leaves the column empty
+    ov.remove_output(c);
+    try testing.expectEqual(null, ov.focused_ow);
+    try testing.expectEqual(0, ov.outputs.items.len);
+    try testing.expectEqual(0, ov.history.items.len);
+    c.deinit(io);
+}
+
 /// Test-only twins of `get_via_strid`/`locate_widget` that take the View directly.
 fn get_via_strid_view(model_view: *View, strid: usize) ?*OutputWidget {
     for (model_view.outputviews.items) |ov| {
