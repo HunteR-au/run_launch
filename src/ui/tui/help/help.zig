@@ -1,5 +1,18 @@
+const clipboardkeys = @import("../clipboardkeys.zig");
+
+/// Pads a key name to the width of the key column in the table below.
+fn keyCol(comptime key: []const u8) *const [22]u8 {
+    return key ++ (" " ** (22 - key.len));
+}
+
+// The copy/paste chords differ per platform, so these rows are assembled at comptime.
+const copy_row = keyCol(clipboardkeys.copy_help) ++ "---> Copy the selection again (output views and cmd bar)\n";
+const esc_row = keyCol("Esc") ++ "---> Clear the selection, then the search / close the cmd bar\n";
+const bar_drag_row = keyCol("Cmd bar: mouse drag") ++ "---> Select command text (click moves the cursor, release copies)\n";
+const bar_paste_row = keyCol("Cmd bar: " ++ clipboardkeys.paste_help) ++ "---> Paste the clipboard (also Shift+Insert)\n";
+
 pub fn getHelpString() []const u8 {
-    return 
+    return
     \\      ==========
     \\      =Controls=
     \\      ==========
@@ -25,8 +38,8 @@ pub fn getHelpString() []const u8 {
     \\J+Ctrl                ---> Scroll down 5
     \\K+Ctrl                ---> Scroll up 5
     \\Mouse drag            ---> Select output text (copied on release, line numbers excluded)
-    \\Y                     ---> Copy the selection again
-    \\Esc                   ---> Clear the selection / search
+    \\
+    ++ copy_row ++ esc_row ++ bar_drag_row ++ bar_paste_row ++
     \\
     \\      ==========
     \\      =Commands=

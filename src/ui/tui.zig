@@ -112,6 +112,8 @@ const TuiApp = struct {
     mode: ModelState = .main,
     prev_mode: ModelState = .main,
     start_script: ?[]const u8 = null,
+    /// Screen size on the last draw; locates the cmd overlay for mouse routing.
+    last_size: vxfw.Size = .{},
     // views: vxfw.Surface,
     // views -> view-group -> tab-group && output-group
 
@@ -266,6 +268,26 @@ const TuiApp = struct {
 
     pub fn handleCapture(self: *TuiApp, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         switch (event) {
+            .mouse => |mouse| {
+                // The cmd overlay shares its rows with the output views underneath, and vxfw
+                // hit-tests every overlapping child, so a click on the bar would also start a
+                // selection in the pane below. Route the overlay's rows to the bar first.
+                if (self.mode != .cmdview) return;
+                const cmd_view = &self.app_model.cmd.view;
+                const overlay_top: i32 = @as(i32, self.last_size.height) - 4;
+                if (mouse.row >= overlay_top or cmd_view.isSelecting()) {
+                    if (try cmd_view.handleMouse(ctx, mouse)) return;
+                    // left-button events on the overlay's other rows are nobody's business
+                    if (mouse.row >= overlay_top and
+                        (mouse.button == .left or mouse.type == .release)) return ctx.consumeEvent();
+                }
+            },
+            .paste => |text| {
+                // OSC 52 read-back: vaxis allocates the text with the app allocator
+                defer app.allocator.free(text);
+                if (self.mode == .cmdview) try self.app_model.cmd.view.pasteText(ctx, text);
+                return ctx.consumeAndRedraw();
+            },
             .key_press => |key| {
                 const opt_result = Bindings.matches(key);
                 if (opt_result) |result| switch (result) {
@@ -304,6 +326,10 @@ const TuiApp = struct {
                         }
                     },
                     .Escape => {
+                        // in the cmd bar the first Esc only drops a text selection
+                        if (self.mode == .cmdview and self.app_model.cmd.view.clearSelection()) {
+                            return ctx.consumeAndRedraw();
+                        }
                         if (self.mode == .cmdview or self.mode == .objview) {
                             switch (self.prev_mode) {
                                 .cmdview => {
@@ -594,6 +620,7 @@ const TuiApp = struct {
     fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const self: *TuiApp = @ptrCast(@alignCast(ptr));
         const max_size = ctx.max.size();
+        self.last_size = max_size;
 
         var children: []vxfw.SubSurface = undefined;
 
@@ -1039,7 +1066,6 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 
 // TODO: cmd error feedback
 // TODO color title for selected outputview
-// TODO: report errors when processes die
 //
 // TODO: paste (mouse text selection + copy is done: drag to select, Y re-copies, Esc clears)
 // TODO: be able to grow/shrink outputviews
@@ -1051,12 +1077,6 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 // TODO: dump logs using the configuration name OR the task's label
 
 // TODO: virtual buffers should receive filtered buffer rules (at time of FORK)
-
-// merging buffers
-//  - kill a merged view
-//  - work out how to easily reference other views
-//      - I like how tmux does it - an int for each view
-//  - maybe have a -all flag (done)
 
 // BUGS:
 

@@ -13,6 +13,7 @@ const linenumbers_mod = @import("widgets/linenumbers.zig");
 const LineNumbers = linenumbers_mod.LineNumbersWidget;
 pub const RowInfo = linenumbers_mod.RowInfo;
 const LinesAndTextWidget = @import("widgets/linesandtext.zig").LinesAndTextWidget;
+const clipboardkeys = @import("clipboardkeys.zig");
 const UUID = utils.uuid.UUID;
 
 pub const UiConfig = @import("uiconfig").UiConfig;
@@ -314,8 +315,8 @@ pub const OutputWidget = struct {
                     self.selection = null;
                     ctx.consumeAndRedraw();
                 }
-                if (key.matches('y', .{})) {
-                    // yank: copy the current selection again
+                if (clipboardkeys.isCopy(key)) {
+                    // copy the current selection again (same chord as the cmd bar)
                     try self.copySelection(ctx);
                     ctx.consumeEvent();
                 }

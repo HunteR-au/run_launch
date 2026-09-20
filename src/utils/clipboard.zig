@@ -22,6 +22,19 @@ extern "kernel32" fn GlobalAlloc(uFlags: windows.UINT, dwBytes: usize) callconv(
 extern "kernel32" fn GlobalLock(hMem: windows.HANDLE) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn GlobalUnlock(hMem: windows.HANDLE) callconv(.winapi) windows.BOOL;
 extern "kernel32" fn GlobalFree(hMem: windows.HANDLE) callconv(.winapi) ?windows.HANDLE;
+extern "kernel32" fn GlobalSize(hMem: windows.HANDLE) callconv(.winapi) usize;
+extern "user32" fn GetClipboardData(uFormat: windows.UINT) callconv(.winapi) ?windows.HANDLE;
+extern "user32" fn IsClipboardFormatAvailable(format: windows.UINT) callconv(.winapi) windows.BOOL;
+
+/// The clipboard is shared: another process may hold it open for a moment.
+fn openClipboardWithRetry() bool {
+    var attempt: usize = 0;
+    while (OpenClipboard(null) == .FALSE) : (attempt += 1) {
+        if (attempt >= 20) return false;
+        std.atomic.spinLoopHint();
+    }
+    return true;
+}
 
 /// Puts `text` on the system clipboard as Unicode text. Windows only.
 pub fn setText(alloc: std.mem.Allocator, text: []const u8) Error!void {
@@ -40,14 +53,9 @@ pub fn setText(alloc: std.mem.Allocator, text: []const u8) Error!void {
     @memcpy(@as([*]u8, @ptrCast(dst))[0..bytes.len], bytes);
     _ = GlobalUnlock(hmem);
 
-    // The clipboard is shared: another process may hold it open for a moment.
-    var attempt: usize = 0;
-    while (OpenClipboard(null) == .FALSE) : (attempt += 1) {
-        if (attempt >= 20) {
-            _ = GlobalFree(hmem);
-            return error.ClipboardBusy;
-        }
-        std.atomic.spinLoopHint();
+    if (!openClipboardWithRetry()) {
+        _ = GlobalFree(hmem);
+        return error.ClipboardBusy;
     }
     defer _ = CloseClipboard();
     _ = EmptyClipboard();
@@ -56,6 +64,43 @@ pub fn setText(alloc: std.mem.Allocator, text: []const u8) Error!void {
         return error.ClipboardBusy;
     }
     // success: hmem now belongs to the system
+}
+
+/// Reads the system clipboard as text: null when it holds no text, CRLF normalised to LF.
+/// Windows only; the caller owns the result.
+pub fn getText(alloc: std.mem.Allocator) Error!?[]u8 {
+    if (builtin.os.tag != .windows) return error.Unsupported;
+    if (IsClipboardFormatAvailable(CF_UNICODETEXT) == .FALSE) return null;
+    if (!openClipboardWithRetry()) return error.ClipboardBusy;
+    defer _ = CloseClipboard();
+
+    const hmem = GetClipboardData(CF_UNICODETEXT) orelse return null;
+    const ptr = GlobalLock(hmem) orelse return null;
+    defer _ = GlobalUnlock(hmem);
+
+    // NUL-terminated, but never trust the terminator to exist inside the block
+    const max_units = GlobalSize(hmem) / 2;
+    const wide: [*]const u16 = @ptrCast(@alignCast(ptr));
+    var len: usize = 0;
+    while (len < max_units and wide[len] != 0) : (len += 1) {}
+
+    const utf8 = try std.unicode.wtf16LeToWtf8Alloc(alloc, wide[0..len]);
+    return try normalizeNewlines(alloc, utf8);
+}
+
+/// Turns CRLF into LF in place and shrinks the allocation to fit. Takes ownership of `buf`.
+pub fn normalizeNewlines(alloc: std.mem.Allocator, buf: []u8) error{OutOfMemory}![]u8 {
+    var w: usize = 0;
+    for (buf, 0..) |c, i| {
+        if (c == '\r' and i + 1 < buf.len and buf[i + 1] == '\n') continue;
+        buf[w] = c;
+        w += 1;
+    }
+    if (w == buf.len) return buf;
+    return alloc.realloc(buf, w) catch |err| {
+        alloc.free(buf);
+        return err;
+    };
 }
 
 /// UTF-8 to NUL-terminated UTF-16LE for CF_UNICODETEXT: invalid sequences become U+FFFD
@@ -115,6 +160,17 @@ test "toClipboardUtf16 encodes multi-byte and astral code points" {
     const wide = try toClipboardUtf16(testing.allocator, "é漢😀");
     defer testing.allocator.free(wide);
     try testing.expectEqualSlices(u16, &.{ 0x00E9, 0x6F22, 0xD83D, 0xDE00 }, wide);
+}
+
+test "normalizeNewlines turns CRLF into LF and leaves lone CR and LF alone" {
+    const a = testing.allocator;
+    const mixed = try normalizeNewlines(a, try a.dupe(u8, "a\r\nb\nc\rd\r\n"));
+    defer a.free(mixed);
+    try testing.expectEqualStrings("a\nb\nc\rd\n", mixed);
+
+    const untouched = try normalizeNewlines(a, try a.dupe(u8, "plain"));
+    defer a.free(untouched);
+    try testing.expectEqualStrings("plain", untouched);
 }
 
 test "toClipboardUtf16 replaces invalid bytes instead of failing" {

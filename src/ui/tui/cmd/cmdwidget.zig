@@ -15,6 +15,8 @@ pub const CmdWidget = struct {
     cmdbar_view: *CmdBarWidget,
     history_view: ?HistoryWidget = null,
     hinter_view: *HintWidget,
+    /// Row the cmd bar was drawn at on the last frame (its border's top row).
+    bar_origin_row: i17 = 0,
     //last_history_idx: ?usize = null,
 
     pub fn init(alloc: std.mem.Allocator, cmd: *Cmd.Cmd) std.mem.Allocator.Error!CmdWidget {
@@ -131,11 +133,35 @@ pub const CmdWidget = struct {
         }
     }
 
+    /// Mouse events in the cmd widget's coordinates, forwarded to the bar in its own
+    /// coordinates. Returns true when the bar consumed the event.
+    pub fn handleMouse(self: *CmdWidget, ctx: *vxfw.EventContext, mouse: vaxis.Mouse) anyerror!bool {
+        var local = mouse;
+        local.row = @intCast(@max(@as(i17, mouse.row) - self.bar_origin_row, std.math.minInt(i16)));
+        return self.cmdbar_view.handleMouse(ctx, local);
+    }
+
+    /// True while a mouse selection is being dragged in the bar.
+    pub fn isSelecting(self: *const CmdWidget) bool {
+        return self.cmdbar_view.isSelecting();
+    }
+
+    /// Drops the bar's selection; true when there was one.
+    pub fn clearSelection(self: *CmdWidget) bool {
+        return self.cmdbar_view.clearSelection();
+    }
+
+    /// Inserts pasted text at the bar's cursor.
+    pub fn pasteText(self: *CmdWidget, ctx: *vxfw.EventContext, text: []const u8) anyerror!void {
+        return self.cmdbar_view.pasteText(ctx, text);
+    }
+
     pub fn draw(self: *CmdWidget, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const max_size = ctx.max.size();
 
         // saturating: a terminal shorter than the cmd bar draws it from row 0
         const cmdbar_height_origin: i17 = max_size.height -| 4;
+        self.bar_origin_row = cmdbar_height_origin;
 
         const cmdbar_child: vxfw.SubSurface = .{
             .origin = .{ .row = cmdbar_height_origin, .col = 0 },
