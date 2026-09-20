@@ -23,8 +23,24 @@ pub const BarSelection = struct {
     dragging: bool = true,
     /// true once the mouse was dragged to another cell (a plain click only moves the cursor)
     moved: bool = false,
+    /// For keyboard selection (Shift+arrows): the cursor boundary the selection grows from,
+    /// as a grapheme index in `[0, count]`. Null for a mouse selection.
+    boundary_anchor: ?usize = null,
 
     pub const Range = struct { lo: usize, hi: usize };
+
+    /// A selection between two cursor boundaries, `anchor` and `cursor`; null when they meet.
+    pub fn fromBoundaries(anchor: usize, cursor: usize) ?BarSelection {
+        if (anchor == cursor) return null;
+        // the grapheme fields are inclusive, so the higher boundary steps back by one
+        return .{
+            .anchor = if (cursor > anchor) anchor else anchor - 1,
+            .head = if (cursor > anchor) cursor - 1 else cursor,
+            .dragging = false,
+            .moved = true,
+            .boundary_anchor = anchor,
+        };
+    }
 
     /// Half-open grapheme range, clipped to `count` graphemes.
     pub fn range(self: BarSelection, count: usize) Range {
@@ -324,7 +340,28 @@ pub const CmdBarWidget = struct {
 
     /// Moves the text field's cursor (its gap) to the start of grapheme `idx`.
     fn moveCursorToGrapheme(self: *CmdBarWidget, text: []const u8, idx: usize) void {
-        const target = Layout.byteRange(text, idx, idx + 1).start;
+        self.moveCursorToByte(Layout.byteRange(text, idx, idx + 1).start);
+    }
+
+    /// Deletes the selected text; the cursor ends up where the selection began.
+    fn deleteSelection(self: *CmdBarWidget, ctx: *vxfw.EventContext) anyerror!void {
+        const sel = self.selection orelse return;
+        const text = try self.commandText();
+        defer self.alloc.free(text);
+        const r = sel.range(Layout.graphemeCount(text));
+        const span = Layout.byteRange(text, r.lo, r.hi);
+        self.selection = null;
+        if (span.end <= span.start) return;
+        // same shape as the text field's own word deletion: park the gap at the start of the
+        // range and swallow the bytes after it
+        self.moveCursorToByte(span.start);
+        self.textBox.buf.growGapRight(span.end - span.start);
+        self.last_history_idx = null;
+        try self.checkChanged(ctx);
+    }
+
+    /// Moves the text field's cursor (its gap) to byte offset `target` of the text.
+    fn moveCursorToByte(self: *CmdBarWidget, target: usize) void {
         const cursor = self.textBox.buf.cursor;
         if (target < cursor) {
             self.textBox.buf.moveGapLeft(cursor - target);
@@ -380,6 +417,27 @@ pub const CmdBarWidget = struct {
     fn clearSelectionIfEdited(self: *CmdBarWidget, before: EditState) void {
         const now = self.editState();
         if (now.cursor != before.cursor or now.len != before.len) self.selection = null;
+    }
+
+    /// Moves the cursor one grapheme (or one word) and selects everything between the
+    /// anchor boundary and the cursor. The anchor is where the cursor stood when the
+    /// keyboard selection began; a mouse selection is continued from its far end.
+    fn extendSelectionByCursor(self: *CmdBarWidget, direction: enum { left, right }, wordwise: bool) anyerror!void {
+        const cursor_before: usize = self.textBox.graphemesBeforeCursor();
+        const anchor: usize = if (self.selection) |sel| blk: {
+            if (sel.boundary_anchor) |b| break :blk b;
+            const text = try self.commandText();
+            defer self.alloc.free(text);
+            const r = sel.range(Layout.graphemeCount(text));
+            break :blk if (cursor_before <= r.lo) r.hi else r.lo;
+        } else cursor_before;
+
+        switch (direction) {
+            .left => if (wordwise) self.textBox.moveBackwardWordwise() else self.textBox.cursorLeft(),
+            .right => if (wordwise) self.textBox.moveForwardWordwise() else self.textBox.cursorRight(),
+        }
+        const cursor_after: usize = self.textBox.graphemesBeforeCursor();
+        self.selection = BarSelection.fromBoundaries(anchor, cursor_after);
     }
 
     /// Native clipboard on Windows (OSC 52 stalls Windows Terminal), OSC 52 elsewhere.
@@ -484,10 +542,48 @@ pub const CmdBarWidget = struct {
                     try self.pasteText(ctx, " ");
                     return;
                 }
+                // Shift+arrows grow or shrink the selection with the cursor, by word with Ctrl
+                if (key.matches(vaxis.Key.left, .{ .shift = true }) or key.matches(vaxis.Key.left, .{ .shift = true, .ctrl = true })) {
+                    try self.extendSelectionByCursor(.left, key.mods.ctrl);
+                    return ctx.consumeAndRedraw();
+                }
+                if (key.matches(vaxis.Key.right, .{ .shift = true }) or key.matches(vaxis.Key.right, .{ .shift = true, .ctrl = true })) {
+                    try self.extendSelectionByCursor(.right, key.mods.ctrl);
+                    return ctx.consumeAndRedraw();
+                }
+                // Backspace and Delete remove the selection; with Ctrl and nothing selected, a word
+                if (key.matches(vaxis.Key.backspace, .{}) or key.matches(vaxis.Key.backspace, .{ .ctrl = true }) or
+                    key.matches(vaxis.Key.delete, .{}) or key.matches(vaxis.Key.delete, .{ .ctrl = true }))
+                {
+                    if (self.selection != null) {
+                        try self.deleteSelection(ctx);
+                        return ctx.consumeAndRedraw();
+                    }
+                    if (key.mods.ctrl) {
+                        self.last_history_idx = null;
+                        if (key.codepoint == vaxis.Key.backspace) {
+                            self.textBox.deleteWordBefore();
+                        } else {
+                            self.textBox.deleteWordAfter();
+                        }
+                        try self.checkChanged(ctx);
+                        return ctx.consumeAndRedraw();
+                    }
+                    // a plain Backspace/Delete with nothing selected: the text field handles it
+                }
                 // An edit or cursor move invalidates the selection. A key that changes nothing
                 // must not: Windows reports the Ctrl of Ctrl+C as its own key press first.
                 const before = self.editState();
                 defer self.clearSelectionIfEdited(before);
+                // Ctrl+arrows jump by word (the text field itself only binds Alt for this)
+                if (key.matches(vaxis.Key.left, .{ .ctrl = true })) {
+                    self.textBox.moveBackwardWordwise();
+                    return ctx.consumeAndRedraw();
+                }
+                if (key.matches(vaxis.Key.right, .{ .ctrl = true })) {
+                    self.textBox.moveForwardWordwise();
+                    return ctx.consumeAndRedraw();
+                }
                 if (key.matches(vaxis.Key.enter, .{})) {
                     const cmdstr = try self.commandText();
                     try self.runCmd(
@@ -715,6 +811,112 @@ test "a selection survives a modifier-only key press but not a cursor move" {
     bar.selection = .{ .anchor = 0, .head = 3 };
     try testing.expect(bar.clearSelection());
     try testing.expect(bar.selection == null);
+}
+
+test "BarSelection.fromBoundaries builds an inclusive range from cursor boundaries" {
+    try testing.expect(BarSelection.fromBoundaries(4, 4) == null);
+    const grow_right = BarSelection.fromBoundaries(4, 7).?;
+    try testing.expectEqual(BarSelection.Range{ .lo = 4, .hi = 7 }, grow_right.range(10));
+    try testing.expectEqual(4, grow_right.boundary_anchor.?);
+    const grow_left = BarSelection.fromBoundaries(7, 4).?;
+    try testing.expectEqual(BarSelection.Range{ .lo = 4, .hi = 7 }, grow_left.range(10));
+    try testing.expectEqual(7, grow_left.boundary_anchor.?);
+}
+
+test "Shift+arrows select with the cursor and Ctrl+arrows jump by word" {
+    vxfw.DrawContext.init(.unicode);
+    const alloc = testing.allocator;
+    const cmd = try Cmd.Cmd.init(alloc);
+    defer cmd.deinit();
+    const bar = try CmdBarWidget.init(alloc, cmd);
+    defer bar.deinit();
+    var ctx: vxfw.EventContext = .{ .io = testing.io, .alloc = alloc, .cmds = .empty };
+    defer ctx.cmds.deinit(alloc);
+
+    try bar.textBox.insertSliceAtCursor("keep apple");
+    bar.text_width = 40;
+    const text = try bar.commandText();
+    defer alloc.free(text);
+
+    const shift_left: vaxis.Key = .{ .codepoint = vaxis.Key.left, .mods = .{ .shift = true } };
+    const shift_right: vaxis.Key = .{ .codepoint = vaxis.Key.right, .mods = .{ .shift = true } };
+    const ctrl_left: vaxis.Key = .{ .codepoint = vaxis.Key.left, .mods = .{ .ctrl = true } };
+    const ctrl_right: vaxis.Key = .{ .codepoint = vaxis.Key.right, .mods = .{ .ctrl = true } };
+    const ctrl_shift_left: vaxis.Key = .{ .codepoint = vaxis.Key.left, .mods = .{ .ctrl = true, .shift = true } };
+
+    // from the end: two Shift+Left select "le", Shift+Right shrinks to "e", again: empty
+    try bar.eventHandler(&ctx, .{ .key_press = shift_left });
+    try bar.eventHandler(&ctx, .{ .key_press = shift_left });
+    try testing.expectEqualStrings("le", bar.selectedBytes(text).?);
+    try testing.expectEqual(8, bar.textBox.buf.cursor);
+    try bar.eventHandler(&ctx, .{ .key_press = shift_right });
+    try testing.expectEqualStrings("e", bar.selectedBytes(text).?);
+    try bar.eventHandler(&ctx, .{ .key_press = shift_right });
+    try testing.expect(bar.selection == null);
+    try testing.expectEqual(10, bar.textBox.buf.cursor);
+
+    // Ctrl+Left jumps to the start of "apple" and keeps nothing selected
+    try bar.eventHandler(&ctx, .{ .key_press = ctrl_left });
+    try testing.expectEqual(5, bar.textBox.buf.cursor);
+    try testing.expect(bar.selection == null);
+
+    // Ctrl+Shift+Left from there selects the previous word plus the space
+    try bar.eventHandler(&ctx, .{ .key_press = ctrl_shift_left });
+    try testing.expectEqualStrings("keep ", bar.selectedBytes(text).?);
+    try testing.expectEqual(0, bar.textBox.buf.cursor);
+
+    // a plain Ctrl+Right is a cursor move: the selection goes away
+    try bar.eventHandler(&ctx, .{ .key_press = ctrl_right });
+    try testing.expect(bar.selection == null);
+    try testing.expect(bar.textBox.buf.cursor > 0);
+}
+
+test "Backspace deletes the selection, Ctrl+Backspace deletes a word" {
+    vxfw.DrawContext.init(.unicode);
+    const alloc = testing.allocator;
+    const cmd = try Cmd.Cmd.init(alloc);
+    defer cmd.deinit();
+    const bar = try CmdBarWidget.init(alloc, cmd);
+    defer bar.deinit();
+    var ctx: vxfw.EventContext = .{ .io = testing.io, .alloc = alloc, .cmds = .empty };
+    defer ctx.cmds.deinit(alloc);
+
+    const backspace: vaxis.Key = .{ .codepoint = vaxis.Key.backspace };
+    const ctrl_backspace: vaxis.Key = .{ .codepoint = vaxis.Key.backspace, .mods = .{ .ctrl = true } };
+    const delete: vaxis.Key = .{ .codepoint = vaxis.Key.delete };
+    const shift_left: vaxis.Key = .{ .codepoint = vaxis.Key.left, .mods = .{ .shift = true } };
+
+    // Ctrl+Backspace with nothing selected removes the word before the cursor
+    try bar.textBox.insertSliceAtCursor("keep apple");
+    try bar.eventHandler(&ctx, .{ .key_press = ctrl_backspace });
+    {
+        const text = try bar.commandText();
+        defer alloc.free(text);
+        try testing.expectEqualStrings("keep ", text);
+    }
+
+    // select "pear" with the keyboard, then Backspace removes exactly that
+    try bar.textBox.insertSliceAtCursor("pear");
+    for (0..4) |_| try bar.eventHandler(&ctx, .{ .key_press = shift_left });
+    try bar.eventHandler(&ctx, .{ .key_press = backspace });
+    try testing.expect(bar.selection == null);
+    try testing.expectEqual(5, bar.textBox.buf.cursor);
+    {
+        const text = try bar.commandText();
+        defer alloc.free(text);
+        try testing.expectEqualStrings("keep ", text);
+    }
+
+    // a selection in the middle, deleted with Delete, leaves the cursor at its start
+    try bar.textBox.insertSliceAtCursor("apple");
+    bar.selection = BarSelection.fromBoundaries(1, 3); // "ee"
+    try bar.eventHandler(&ctx, .{ .key_press = delete });
+    try testing.expectEqual(1, bar.textBox.buf.cursor);
+    {
+        const text = try bar.commandText();
+        defer alloc.free(text);
+        try testing.expectEqualStrings("kp apple", text);
+    }
 }
 
 // Features:

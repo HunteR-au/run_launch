@@ -40,6 +40,9 @@ pub fn getHelpString() []const u8 {
     \\Mouse drag            ---> Select output text (copied on release, line numbers excluded)
     \\
     ++ copy_row ++ esc_row ++ bar_drag_row ++ bar_paste_row ++
+    \\Cmd bar: Ctrl+arrows  ---> Jump to the previous / next word
+    \\Cmd bar: Shift+arrows ---> Select with the cursor (with Ctrl: by word)
+    \\Cmd bar: Backspace    ---> Delete the selection (with Ctrl and none: the word before)
     \\
     \\      ==========
     \\      =Commands=
