@@ -98,6 +98,17 @@ pub const CmdBarWidget = struct {
         }
     }
 
+    /// The text in the bar as the user sees it. The text field is a gap buffer: the bytes
+    /// after the cursor live at the far end of its storage and the gap in between holds
+    /// stale or uninitialized memory, so the text must be assembled from both halves
+    /// rather than read as `buffer[0..realLength()]`. Caller owns the result.
+    pub fn commandText(self: *CmdBarWidget) std.mem.Allocator.Error![]u8 {
+        return std.mem.concat(self.alloc, u8, &.{
+            self.textBox.buf.firstHalf(),
+            self.textBox.buf.secondHalf(),
+        });
+    }
+
     fn checkChanged(self: *CmdBarWidget, ctx: *vxfw.EventContext) anyerror!void {
         ctx.consumeAndRedraw();
         const new = try self.textBox.buf.dupe();
@@ -150,11 +161,7 @@ pub const CmdBarWidget = struct {
         switch (event) {
             .key_press => |key| {
                 if (key.matches(vaxis.Key.enter, .{})) {
-                    const real_length = self.textBox.buf.realLength();
-                    const cmdstr = try self.alloc.dupe(
-                        u8,
-                        self.textBox.buf.buffer[0..real_length],
-                    );
+                    const cmdstr = try self.commandText();
                     try self.runCmd(
                         ctx.io,
                         cmdstr,
@@ -213,6 +220,41 @@ pub const CmdBarWidget = struct {
         };
     }
 };
+
+// ------------------------------------------------------------------
+// Tests
+// ------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "commandText: editing in the middle of the line submits the whole line, not gap bytes" {
+    const alloc = testing.allocator;
+    const cmd = try Cmd.Cmd.init(alloc);
+    defer cmd.deinit();
+    const bar = try CmdBarWidget.init(alloc, cmd);
+    defer bar.deinit();
+
+    // recall-style fill, then edit: Left x5 puts the gap inside the text
+    try bar.textBox.insertSliceAtCursor("keep apple");
+    for (0..5) |_| bar.textBox.cursorLeft();
+    try bar.textBox.insertSliceAtCursor("s");
+    try testing.expect(bar.textBox.buf.cursor != bar.textBox.buf.realLength());
+
+    const text = try bar.commandText();
+    defer alloc.free(text);
+    try testing.expectEqualStrings("keep sapple", text);
+    try testing.expect(std.unicode.utf8ValidateSlice(text));
+
+    // the old read of buffer[0..realLength] would have returned the gap, not the tail
+    const naive = bar.textBox.buf.buffer[0..bar.textBox.buf.realLength()];
+    try testing.expect(!std.mem.eql(u8, naive, text));
+
+    // deleting across the gap keeps the two halves consistent too
+    bar.textBox.deleteBeforeCursor();
+    const text2 = try bar.commandText();
+    defer alloc.free(text2);
+    try testing.expectEqualStrings("keep apple", text2);
+}
 
 // Features:
 //  --> select a cmdwidget on pressing `/` (done)

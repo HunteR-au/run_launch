@@ -35,7 +35,7 @@ pub const CommandHinter = struct {
     }
 
     pub fn deinit(self: *CommandHinter) void {
-        const iter = self.command_map.iterator();
+        var iter = self.command_map.iterator();
         while (iter.next()) |entry| {
             self.alloc.free(entry.key_ptr.*);
             if (entry.value_ptr.*) |p| self.alloc.free(p);

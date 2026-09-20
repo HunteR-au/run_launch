@@ -60,6 +60,7 @@ pub const Cmd = struct {
     }
 
     pub fn deinit(self: *Cmd) void {
+        self.view.deinit();
         self.hinter.deinit();
         self.handlers.deinit(self.alloc);
         var iter = self.history.iterator();
@@ -150,6 +151,8 @@ pub const Cmd = struct {
     }
 
     pub fn addHistory(self: *Cmd, buffer: []const u8) !void {
+        // the ring overwrites the oldest entry when full; free it first
+        if (self.history.isFull()) self.alloc.free(try self.history.pop());
         try self.history.push(try self.alloc.dupe(u8, buffer), true);
     }
 

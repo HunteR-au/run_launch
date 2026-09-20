@@ -16,6 +16,7 @@ comptime {
     _ = @import("ui/tui/outputwidget.zig");
     _ = @import("ui/tui/processviewmgr.zig");
     _ = @import("ui/tui/actions/stop.zig");
+    _ = @import("ui/tui/cmd/cmdbarwidget.zig");
     // the pump module has its own test compilation in build.zig (tests are only collected
     // from a compilation's root module)
 }
