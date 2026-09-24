@@ -406,7 +406,7 @@ const TuiApp = struct {
                     else => {
                         // This is a HACK since the framework doesn't detect capability correctly
                         // for Ubuntu via WSL
-                        var colorterm = std.posix.getenv("COLORTERM") orelse "";
+                        var colorterm = envGet("COLORTERM");
 
                         if (std.mem.eql(u8, colorterm, "truecolor") or
                             std.mem.eql(u8, colorterm, "24bit"))
@@ -414,7 +414,7 @@ const TuiApp = struct {
                             app.vx.caps.rgb = true;
                         }
 
-                        colorterm = std.posix.getenv("TERM") orelse "";
+                        colorterm = envGet("TERM");
 
                         if (std.mem.eql(u8, colorterm, "xterm-256color") or
                             std.mem.eql(u8, colorterm, "screen"))
@@ -809,6 +809,14 @@ var tui_start_err: ?anyerror = null;
 var tui_loop_exited: std.atomic.Value(bool) = .init(false);
 var thread: ?std.Thread = null;
 var app: vxfw.App = undefined;
+/// The process environment handed to the TUI thread (Zig 0.16 has no global getenv).
+var tui_env: ?*std.process.Environ.Map = null;
+
+/// An environment variable, or "" when unset.
+fn envGet(key: []const u8) []const u8 {
+    const env = tui_env orelse return "";
+    return env.get(key) orelse "";
+}
 
 /// Asks the vaxis event loop to exit. On Windows also starts a helper that wakes the
 /// blocked console reader, see `wakeInputThread`.
@@ -865,7 +873,8 @@ fn run_tui(io: Io, alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner,
         tui_started.set(io);
     }
 
-    ui_config = try uiconfig.parseConfigs(io, alloc);
+    tui_env = env_map;
+    ui_config = try uiconfig.parseConfigs(io, alloc, env_map);
 
     var buffer: [1024]u8 = undefined;
     app = try vxfw.App.init(io, alloc, env_map, &buffer);

@@ -83,7 +83,11 @@ pub fn build(b: *std.Build) !void {
     const regex_dep = b.dependency("regex", .{});
     const clap_dep = b.dependency("clap", .{});
     const yaml_dep = b.dependency("yaml", .{});
+    // Pass the selected target through: tracy's C library picks its system libraries (ws2_32
+    // and dbghelp on Windows) from it, so without this a cross-compile links the host's.
     const ztracy_dep = b.dependency("ztracy", .{
+        .target = target,
+        .optimize = optimize,
         .enable_ztracy = options.enable_ztracy,
         .enable_fibers = options.enable_fibers,
         .on_demand = options.on_demand,
@@ -141,7 +145,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     const exe = b.addExecutable(.{
-        .name = "run_launch",
+        .name = "runlaunch",
         .root_module = exe_mod,
     });
 

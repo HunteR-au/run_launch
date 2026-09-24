@@ -115,7 +115,7 @@ pub fn main(init: std.process.Init) !void {
     if (res.args.@"dry-run" != 0)
         try stdout.print("dry run set\n", .{});
     if (res.positionals[0] == null or res.positionals[1] == null) {
-        try stdout.print("Invalid format: use \"run_launch.exe path name\"\n", .{});
+        try stdout.print("Invalid format: use \"runlaunch.exe path name\"\n", .{});
         return RunLaunchErrors.BadPositionals;
     }
     if (res.args.@"web-ui" != 0) {

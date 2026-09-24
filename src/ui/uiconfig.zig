@@ -199,6 +199,7 @@ pub const UiConfig = struct {
 pub fn parseConfigs(
     io: Io,
     alloc: std.mem.Allocator,
+    env_map: *const std.process.Environ.Map,
 ) !UiConfig {
     var uiconfig = try UiConfig.init(alloc);
     const max_bytes = 1024 * 1024;
@@ -216,10 +217,7 @@ pub fn parseConfigs(
         },
         else => {
             // attempt to open file ~/.debugUi.json
-            const home_path = utils.get_home_path(alloc);
-            defer {
-                if (home_path) |p| alloc.free(p);
-            }
+            const home_path = utils.get_home_path(env_map);
             if (home_path) |prefix| {
                 const path = try std.fmt.allocPrint(alloc, "{s}/.debugUi.json", .{prefix});
                 defer alloc.free(path);

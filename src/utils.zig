@@ -147,10 +147,11 @@ pub fn cloneHashMap(
     return target;
 }
 
-pub fn get_home_path(alloc: Allocator) ?[]const u8 {
-    return std.process.getEnvVarOwned(alloc, "HOME") catch {
-        return null;
-    };
+/// The user's home directory from the process environment, or null when `HOME` is unset.
+/// The slice borrows from `env_map`.
+pub fn get_home_path(env_map: *const std.process.Environ.Map) ?[]const u8 {
+    const home = env_map.get("HOME") orelse return null;
+    return if (home.len == 0) null else home;
 }
 
 pub fn makeWindowsSafeFilename(
