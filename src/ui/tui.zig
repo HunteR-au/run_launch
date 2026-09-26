@@ -145,11 +145,34 @@ const TuiApp = struct {
     /// Focuses the view showing buffer `id`, if it exists yet.
     fn focusBuffer(self: *TuiApp, ctx: *vxfw.EventContext, id: uuid.UUID) !bool {
         const found = processviewmgr.find_by_buffer_id(&self.app_model, id) orelse return false;
-        const pos = try self.app_model.model_view.get_position(found.view);
-        try self.app_model.model_view.focus_outputview_by_idx(pos);
-        found.view.focus_output(found.widget);
-        try ctx.requestFocus(found.widget.widget());
+        try self.focusLocated(ctx, found);
         return true;
+    }
+
+    /// Makes `located` the shown output of its column and that column the focused one. The
+    /// keyboard follows only in the main mode: with the command bar open the pane switches
+    /// but the bar keeps typing focus (Esc lands on the new pane, see `focus_on_main`).
+    fn focusLocated(self: *TuiApp, ctx: *vxfw.EventContext, located: processviewmgr.Located) !void {
+        const pos = try self.app_model.model_view.get_position(located.view);
+        try self.app_model.model_view.focus_outputview_by_idx(pos);
+        located.view.focus_output(located.widget);
+        if (self.mode == .main) try ctx.requestFocus(located.widget.widget());
+        ctx.redraw = true;
+    }
+
+    /// `view {~n | name}`: shows view n, or the first view titled `name` (titles can repeat,
+    /// so `~n` is the unambiguous form). This is what the select step of a script line does.
+    fn selectView(self: *TuiApp, ctx: *vxfw.EventContext, arg: []const u8) !void {
+        const target = processviewmgr.get_via_strid(&self.app_model, arg) orelse blk: {
+            var it = processviewmgr.get_view_list_iterator(&self.app_model);
+            while (it.next()) |ow| {
+                if (std.mem.eql(u8, ow.process_name, arg)) break :blk ow;
+            }
+            std.log.warn("view {s}: no such view", .{arg});
+            return;
+        };
+        const located = processviewmgr.locate_widget(&self.app_model, target) orelse return;
+        try self.focusLocated(ctx, located);
     }
 
     /// Frees the views `stop` detached during the previous frame and removes their buffers
@@ -382,7 +405,7 @@ const TuiApp = struct {
             .init => {
                 if (self.start_script) |script| {
                     // TODO: probably should have some user output for errors
-                    self.app_model.cmd.run_script(ctx.io, script, ctx, event) catch {};
+                    self.app_model.cmd.run_script(ctx.io, script, ctx) catch {};
                 }
             },
             else => {},
@@ -595,6 +618,13 @@ const TuiApp = struct {
                         } else if (std.mem.eql(u8, cmd_name, StopViewData.event_str)) {
                             const args = cmd.get_args(self._alloc) catch return error.UnexpectedParseError;
                             try self.stopViews(ctx, args);
+                        } else if (std.mem.eql(u8, cmd_name, ViewSelectData.event_str)) {
+                            const args = cmd.get_args(self._alloc) catch return error.UnexpectedParseError;
+                            if (args.len != 1) {
+                                std.log.warn("view: expected one view (~n) or title", .{});
+                                return;
+                            }
+                            try self.selectView(ctx, args[0]);
                         }
                     },
                     else => {},
@@ -698,7 +728,7 @@ const TuiApp = struct {
         };
     }
 
-    fn handleStartCmd(io: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+    fn handleStartCmd(io: Io, args: []const u8, listener: *anyopaque, _: Cmd.Info) std.mem.Allocator.Error!void {
         const self: *TuiApp = @ptrCast(@alignCast(listener));
 
         var handle = self.app_model.executor.run(io, args, .nonBlocking) catch {
@@ -744,6 +774,10 @@ const TuiApp = struct {
         .event_str = "stop",
         .arg_description = "{ ~n (remove view) | !n (kill process) } ...",
     };
+    const ViewSelectData = .{
+        .event_str = "view",
+        .arg_description = "{ ~n | name }",
+    };
 
     pub fn subscribeHandlersToCmd(self: *TuiApp) !void {
         const hander_data = comptime .{
@@ -755,6 +789,7 @@ const TuiApp = struct {
             &QuitSaveHandlerData,
             &MergeViewsData,
             &StopViewData,
+            &ViewSelectData,
         };
 
         inline for (hander_data) |data| {
@@ -1017,31 +1052,10 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 //      - if passes then ACTION runs which should be a script (ie wq or q)
 //          - maybe have a fail script as well ???
 
-// 3) normalize newlines for merge keep/hide bug (done)
-// 4) wrapped line mode (done)
-// 0) consider what to do about character controls....not sure atm but I need to do something. They can kill the program!!!! (done)
-//  - I want the stored data in ingest to store the original input
-//  - I want to have a mode to see the raw data to help with debugging
-//  - I want to have a default that is pretty and respects what the program wanted the user to see
-//      - This adds some complications in how flipping states from raw to terminal will work
-//      - It will also impact how features that use regex over the ingest data work. Pattern matching over hidden data is a problem
-//          - Ideally a user would write regexes over what they see and it matches
-// 6) be able to remove merged views (done: `stop ~n|!n`)
-// 7) kill/hide views backed by a process (done: `stop` removes the view and kills the process)
-//      - maybe later: a cmd that only stops the child process and keeps the view
-
 // think about workflows. this should be quick to turn on/off and powerfull with configuration set up
 
 // config that runs mutiple programs
 // script system for config
-
-// //// SCRIPTING INPUT SYSTEM ///// (DONE)
-// GLOBAL: color my_pattern red:line
-// Print: keep yes no apple
-// ~0: keep yes
-// : merge test ~0 ~1
-// test:
-// TODO - I don't have the ability to run a cmd on ALL yet
 
 // TODO - write logic for postTask. I'm thinking post tasks should be outputted to the main tty
 // question is what if I kill a single output, or it dies
@@ -1049,7 +1063,6 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 
 // create a panel in the middle of the screen to list all buffers/view
 // design: create a widget around optionPicker
-//  optionPicker should be the base abstraction (done)
 //  BUG: merge cannot ref views (only buffers)
 //  BUG: buffer should show program
 //  BUG: view should show title
@@ -1068,7 +1081,6 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 //  - this is going to be kinda complicated
 
 // ADD reference to the executor to the TUI so that:
-//      - can call run on config names (DONE)
 //      - can call run on custom commands
 //          - with features such as addding env or exec path
 //      - control running post tasks with UI still running
@@ -1088,14 +1100,6 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 // TODO: virtual buffers should receive filtered buffer rules (at time of FORK)
 
 // BUGS:
-
-// hide in list example is broken
-//  - hide build removes every line :(
-//  - same for keep line
-//  - FOUND OUT WHY - its because the sep is being treated as \r\n not \n
-//          but the render only uses \n
-
-// ScrollBars now has a bug in handleCapture new_view_cl_start: u32 = @intFromFloat(@ceil(new_view_col_start_f))
 
 // TODO parse ui config in TUI
 // ---> options
@@ -1136,3 +1140,29 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 // how do to splitting -- not sure
 // need childProcessBuffers which use the same base buffer
 // but clone filter rules and grandfather them in
+
+// ================== DONE todos ==================
+
+// 3) normalize newlines for merge keep/hide bug (done)
+// 4) wrapped line mode (done)
+// 0) consider what to do about character controls....not sure atm but I need to do something. They can kill the program!!!! (done)
+//  - I want the stored data in ingest to store the original input
+//  - I want to have a mode to see the raw data to help with debugging
+//  - I want to have a default that is pretty and respects what the program wanted the user to see
+//      - This adds some complications in how flipping states from raw to terminal will work
+//      - It will also impact how features that use regex over the ingest data work. Pattern matching over hidden data is a problem
+//          - Ideally a user would write regexes over what they see and it matches
+// 6) be able to remove merged views (done: `stop ~n|!n`)
+// 7) kill/hide views backed by a process (done: `stop` removes the view and kills the process)
+//      - maybe later: a cmd that only stops the child process and keeps the view
+
+// ADD reference to the executor to the TUI so that:
+//      - can call run on config names (DONE)
+
+// //// SCRIPTING INPUT SYSTEM ///// (DONE)
+// GLOBAL: color my_pattern red:line
+// Print: keep yes no apple
+// ~0: keep yes
+// : merge test ~0 ~1
+// test:
+// _: keep yes            (done: `_:` delivers the cmd to every output with scope .all)

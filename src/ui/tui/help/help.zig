@@ -137,5 +137,17 @@ pub fn getHelpString() []const u8 {
     \\              process-exited marker appears at the end of the output
     \\              (merged/help buffers have no process: nothing happens)
     \\          with no views left the app keeps running: start something or q
+    \\
+    \\view { ~n | name }
+    \\
+    \\      - show view n (or the first view titled name) and focus it; the
+    \\          select step of a script line (`~n: cmd`, `name: cmd`) does this
+    \\
+    \\script lines take the form `select: cmd`
+    \\
+    \\          `: cmd`     runs cmd on the focused output
+    \\          `~n: cmd`   shows view n first, then runs cmd on it
+    \\          `name: cmd` same, for the first view titled name
+    \\          `_: cmd`    runs cmd on every output
     ;
 }

@@ -57,11 +57,14 @@ pub const CommandHinter = struct {
     }
 
     pub fn addCommandInfo(self: *CommandHinter, cmd_info: CommandHintInfo) !void {
-        try self.command_map.put(
-            self.alloc,
-            try self.alloc.dupe(u8, cmd_info.commandName),
-            if (cmd_info.argumentDescription) |str| try self.alloc.dupe(u8, str) else null,
-        );
+        // Every output registers the same commands: the first registration wins. (A `put`
+        // on an existing key would keep the old key and leak both copies.)
+        if (self.command_map.contains(cmd_info.commandName)) return;
+        const name = try self.alloc.dupe(u8, cmd_info.commandName);
+        errdefer self.alloc.free(name);
+        const desc = if (cmd_info.argumentDescription) |str| try self.alloc.dupe(u8, str) else null;
+        errdefer if (desc) |d| self.alloc.free(d);
+        try self.command_map.put(self.alloc, name, desc);
     }
 
     pub fn generateHints(self: CommandHinter, alloc: std.mem.Allocator, cmd_str: []const u8) ![]Hint {

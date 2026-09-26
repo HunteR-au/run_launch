@@ -182,7 +182,7 @@ pub const CmdBarWidget = struct {
 
     pub fn runCmd(self: *CmdBarWidget, io: Io, cmdstr: []u8, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         // run old style cmds
-        try self.cmd.handleCmd(io, cmdstr, ctx, event);
+        try self.cmd.handleCmd(io, cmdstr, .{}, ctx, event);
         self.textBox.clearAndFree();
     }
 

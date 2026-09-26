@@ -14,6 +14,7 @@ const transforms = @import("pipeline/transforms.zig");
 
 // ui data structures
 const vaxis = @import("vaxis");
+const vxfw = vaxis.vxfw;
 const OutputWidget = @import("outputwidget.zig").OutputWidget;
 const uiconfig_mod = @import("uiconfig");
 pub const UiConfig = uiconfig_mod.UiConfig;
@@ -194,6 +195,11 @@ fn bufferId(self: *const Output) utils.uuid.UUID {
     return self.nonowned_process_buffer.id orelse .{ .bytes = [_]u8{0} ** 16 };
 }
 
+/// True when this output should act on the command
+fn isTarget(self: *const Output, info: Cmd.Info) bool {
+    return info.scope == .all or self.is_focused;
+}
+
 /// Compiles every argument as a regex into `alloc`; invalid patterns are skipped.
 fn compileRegexList(alloc: std.mem.Allocator, arguments: []const []const u8) std.mem.Allocator.Error![]Regex {
     var regex_list = try std.ArrayList(Regex).initCapacity(alloc, arguments.len);
@@ -241,9 +247,9 @@ fn installLineFilter(
     };
 }
 
-fn handleFoldCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleFoldCmd(_: Io, args: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    if (!self.is_focused) return;
+    if (!self.isTarget(info)) return;
 
     const arguments = try self.parseArgs(args);
     defer self.freeArgs(arguments);
@@ -251,9 +257,9 @@ fn handleFoldCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocato
     try self.installLineFilter(arguments, transforms.fold);
 }
 
-fn handlePruneCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handlePruneCmd(_: Io, args: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    if (!self.is_focused) return;
+    if (!self.isTarget(info)) return;
 
     const arguments = try self.parseArgs(args);
     defer self.freeArgs(arguments);
@@ -261,9 +267,9 @@ fn handlePruneCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocat
     try self.installLineFilter(arguments, transforms.prune);
 }
 
-fn handleReplaceCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleReplaceCmd(_: Io, args: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    if (!self.is_focused) return;
+    if (!self.isTarget(info)) return;
 
     const arg_array = try self.parseArgs(args);
     defer self.freeArgs(arg_array);
@@ -312,25 +318,25 @@ fn removeAllFilters(self: *Output) std.mem.Allocator.Error!void {
     self.filter_ids.clearAndFree(self._alloc);
 }
 
-fn handleUnfoldCmd(_: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleUnfoldCmd(_: Io, _: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    if (!self.is_focused) return;
+    if (!self.isTarget(info)) return;
 
     // TODO: only remove fold commands
     try self.removeAllFilters();
 }
 
-fn handleUnreplaceCmd(_: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleUnreplaceCmd(_: Io, _: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    if (!self.is_focused) return;
+    if (!self.isTarget(info)) return;
 
     // TODO: only remove replace commands
     try self.removeAllFilters();
 }
 
-fn handleFindCmd(io: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleFindCmd(io: Io, args: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    if (!self.is_focused) return;
+    if (!self.isTarget(info)) return;
     // search runs over the filtered buffer, which the raw view does not show
     if (self.render_mode == .raw) return;
 
@@ -343,36 +349,36 @@ fn handleFindCmd(io: Io, args: []const u8, listener: *anyopaque) std.mem.Allocat
     self.searchStr(io, arguments[0], start_from_line) catch return;
 }
 
-fn handleFindNextCmd(io: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleFindNextCmd(io: Io, _: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    if (!self.is_focused or self.render_mode == .raw) return;
+    if (!self.isTarget(info) or self.render_mode == .raw) return;
     self.searchNext(io);
 }
 
-fn handleFindPrevCmd(io: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleFindPrevCmd(io: Io, _: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    if (!self.is_focused or self.render_mode == .raw) return;
+    if (!self.isTarget(info) or self.render_mode == .raw) return;
     self.searchPrev(io);
 }
 
-fn handleJumpCmd(_: Io, arg: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleJumpCmd(_: Io, arg: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    if (!self.is_focused) return;
+    if (!self.isTarget(info)) return;
 
     const line_num: usize = std.fmt.parseInt(usize, arg, 10) catch return;
     self.jumpToLine(line_num);
 }
 
-fn handleInfoCmd(_: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleInfoCmd(_: Io, _: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    if (!self.is_focused) return;
+    if (!self.isTarget(info)) return;
 
     self.debuginfo();
 }
 
-fn handleUncolorCmd(_: Io, _: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleUncolorCmd(_: Io, _: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    if (!self.is_focused) return;
+    if (!self.isTarget(info)) return;
     self.store.post(.{ .remove_all_reviewers = .{ .id = self.bufferId() } }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => std.log.warn("could not remove reviewers: {t}", .{err}),
@@ -633,7 +639,7 @@ fn parseToggleArgs(arg_array: []const []const u8) ?ToggleArgs {
     return result;
 }
 
-fn handleShowLinesCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleShowLinesCmd(_: Io, args: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
 
     const arg_array = try self.parseArgs(args);
@@ -641,12 +647,12 @@ fn handleShowLinesCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.All
     const toggle = parseToggleArgs(arg_array) orelse return;
 
     // Without --all only the focused output changes
-    if (!toggle.all and !self.is_focused) return;
+    if (!toggle.all and !self.isTarget(info)) return;
 
     self.show_lines = toggle.requested orelse !self.show_lines;
 }
 
-fn handleWrapCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleWrapCmd(_: Io, args: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
 
     const arg_array = try self.parseArgs(args);
@@ -654,14 +660,14 @@ fn handleWrapCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocato
     const toggle = parseToggleArgs(arg_array) orelse return;
 
     // Without --all only the focused output changes
-    if (!toggle.all and !self.is_focused) return;
+    if (!toggle.all and !self.isTarget(info)) return;
 
     self.wrap_lines = toggle.requested orelse !self.wrap_lines;
     if (self.widget_ref) |widget| widget.onWrapToggled();
 }
 
 /// `render [--all] [terminal|raw]`: without a mode the view toggles.
-fn handleRenderCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleRenderCmd(_: Io, args: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
 
     const arg_array = try self.parseArgs(args);
@@ -682,7 +688,7 @@ fn handleRenderCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Alloca
     }
 
     // Without --all only the focused output changes
-    if (!all and !self.is_focused) return;
+    if (!all and !self.isTarget(info)) return;
 
     const mode = requested orelse switch (self.render_mode) {
         .terminal => RenderMode.raw,
@@ -693,7 +699,7 @@ fn handleRenderCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Alloca
     if (self.widget_ref) |widget| widget.onRenderModeChanged();
 }
 
-fn handleDumpCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleDumpCmd(_: Io, args: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
 
     var isAll = false;
@@ -709,7 +715,7 @@ fn handleDumpCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocato
         }
     }
 
-    if (!isAll and !self.is_focused) return;
+    if (!isAll and !self.isTarget(info)) return;
 
     // the pump writes the file from its own copy of the buffer, so the UI never blocks on disk
     self.dump(if (isFiltered) .Filtered else .Raw, .async) catch |err| switch (err) {
@@ -728,9 +734,9 @@ pub fn dump(self: *Output, backing: ProcessBuffer.BufferBacking, mode: enum { as
     }
 }
 
-fn handleColorCmd(_: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void {
+fn handleColorCmd(_: Io, args: []const u8, listener: *anyopaque, info: Cmd.Info) std.mem.Allocator.Error!void {
     const self: *Output = @ptrCast(@alignCast(listener));
-    if (!self.is_focused) return;
+    if (!self.isTarget(info)) return;
 
     const arg_array = try self.parseArgs(args);
     defer self.freeArgs(arg_array);
@@ -976,7 +982,7 @@ test "folding text" {
     // set focus to make sure the command works
     output.is_focused = true;
 
-    try Output.handleFoldCmd(io, "apples", &output);
+    try Output.handleFoldCmd(io, "apples", &output, .{});
     const buffer = try h.filtered(alloc);
     defer alloc.free(buffer);
     try testing.expectEqualStrings(
@@ -1010,7 +1016,7 @@ test "folding text" {
     , buffer3);
 
     // removing the filter restores everything
-    try Output.handleUnfoldCmd(io, "", &output);
+    try Output.handleUnfoldCmd(io, "", &output, .{});
     const buffer4 = try h.filtered(alloc);
     defer alloc.free(buffer4);
     try testing.expectEqual(9, std.mem.count(u8, buffer4, "\n"));
@@ -1031,7 +1037,7 @@ test "coloring text produces absolute style ranges" {
 
     // two batches, including an empty line and a CRLF line, to check offsets don't drift
     h.write("x apples\n\napples\n");
-    try Output.handleColorCmd(io, "apples red", &output);
+    try Output.handleColorCmd(io, "apples red", &output, .{});
     h.write("apples\r\n");
 
     // the buffer is quiescent after sync(); read the pump-owned index directly
@@ -1046,7 +1052,7 @@ test "coloring text produces absolute style ranges" {
     try testing.expectEqual(vaxis.Style{ .fg = Red }, h.pb.styles.palette.items[ranges[0].style]);
 
     // a full-line rule paints the whole line
-    try Output.handleColorCmd(io, "^x fg:blue:line", &output);
+    try Output.handleColorCmd(io, "^x fg:blue:line", &output, .{});
     h.sync();
     const ranges2 = h.pb.styles.ranges.items;
     try testing.expectEqual(0, ranges2[0].start);
@@ -1054,7 +1060,7 @@ test "coloring text produces absolute style ranges" {
 
     // uncolor keeps the filtered text but drops the styles, without bumping version
     const before = h.pb.peek();
-    try Output.handleUncolorCmd(io, "", &output);
+    try Output.handleUncolorCmd(io, "", &output, .{});
     h.sync();
     try testing.expectEqual(0, h.pb.styles.ranges.items.len);
     try testing.expectEqual(before.version, h.pb.peek().version);
@@ -1074,4 +1080,77 @@ test "parse style args" {
 
     try testing.expectEqual(null, createStyleFromArg("fg:red:fg:blue"));
     try testing.expectEqual(null, createStyleFromArg("notacolor"));
+}
+
+test "scope .all reaches an output that is not focused" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var h = try Harness.init(alloc, io, "t");
+    defer h.deinit();
+    var output = try Output.init(alloc, h.pb, h.store);
+    defer {
+        output.deinit(io);
+        h.sync();
+    }
+    h.write("apples\ncarrots\n");
+
+    // not focused: the bar's default scope leaves it alone
+    try Output.handleFoldCmd(io, "apples", &output, .{});
+    const untouched = try h.filtered(alloc);
+    defer alloc.free(untouched);
+    try testing.expectEqualStrings("apples\ncarrots\n", untouched);
+
+    // a `_:` script step reaches it
+    try Output.handleFoldCmd(io, "apples", &output, .{ .scope = .all });
+    const folded = try h.filtered(alloc);
+    defer alloc.free(folded);
+    try testing.expectEqualStrings("apples\n", folded);
+}
+
+test "a scripted `_:` step reaches every output, `:` only the focused one" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var h1 = try Harness.init(alloc, io, "a");
+    defer h1.deinit();
+    var h2 = try Harness.init(alloc, io, "b");
+    defer h2.deinit();
+
+    const cmd = try Cmd.init(alloc);
+    defer cmd.deinit();
+
+    var focused = try Output.init(alloc, h1.pb, h1.store);
+    var hidden = try Output.init(alloc, h2.pb, h2.store);
+    defer {
+        // the outputs unsubscribe from `cmd` in deinit, so they go first
+        focused.deinit(io);
+        hidden.deinit(io);
+        h1.sync();
+        h2.sync();
+    }
+    try focused.subscribeHandlersToCmd(cmd);
+    try hidden.subscribeHandlersToCmd(cmd);
+    focused.is_focused = true;
+
+    h1.write("apples\ncarrots\n");
+    h2.write("apples\ncarrots\n");
+
+    var ctx: vxfw.EventContext = .{ .io = io, .alloc = alloc, .cmds = .empty };
+
+    try cmd.run_script(io, ": hide carrots\n", &ctx);
+    const f1 = try h1.filtered(alloc);
+    defer alloc.free(f1);
+    const f2 = try h2.filtered(alloc);
+    defer alloc.free(f2);
+    try testing.expectEqualStrings("apples\n", f1);
+    try testing.expectEqualStrings("apples\ncarrots\n", f2);
+
+    try cmd.run_script(io, "_: hide apples\n", &ctx);
+    const g1 = try h1.filtered(alloc);
+    defer alloc.free(g1);
+    const g2 = try h2.filtered(alloc);
+    defer alloc.free(g2);
+    try testing.expectEqualStrings("", g1);
+    try testing.expectEqualStrings("carrots\n", g2);
 }

@@ -4,7 +4,8 @@ const utils = @import("utils");
 const Output = @import("../outputwidget.zig").Output;
 const CmdWidget = @import("../cmd//cmdwidget.zig").CmdWidget;
 const CmdHinter = @import("cmdhints.zig").CommandHinter;
-const CmdAutomation = @import("cmd_automation.zig");
+const CmdAutomation = @import("cmdautomation.zig");
+const cmdevents = @import("cmdevents.zig");
 
 const vxfw = @import("vaxis").vxfw;
 
@@ -23,7 +24,7 @@ const HandlerRef = struct {
 };
 
 pub const HandleEventFn = fn (ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void;
-pub const HandleRawFn = fn (io: Io, args: []const u8, listener: *anyopaque) std.mem.Allocator.Error!void;
+pub const HandleRawFn = fn (io: Io, args: []const u8, listener: *anyopaque, info: DispatchInfo) std.mem.Allocator.Error!void;
 pub const HandleId = usize;
 
 pub const HandleFn = union(enum) {
@@ -31,7 +32,18 @@ pub const HandleFn = union(enum) {
     event_fn: *const HandleEventFn,
 };
 
+pub const Scope = enum { focused, all };
+
+// Used to express the intent of the command being broadcasted. The handler can use
+// this to decided how to act.
+pub const DispatchInfo = struct {
+    // .focused: only the focused output should action the command
+    // .all: every output should action the command
+    scope: Scope = .focused,
+};
+
 pub const Cmd = struct {
+    pub const Info = DispatchInfo;
     // what does this do
     // needs to process a command
     // --- pub/sub model
@@ -68,37 +80,40 @@ pub const Cmd = struct {
         self.alloc.destroy(self);
     }
 
-    pub fn run_script(self: *const Cmd, io: Io, script: []const u8, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+    /// Runs a script (see `cmdautomation.parse_line` for the line format). Each line is
+    /// dispatched exactly as if it had been typed in the command bar: a `~n:`/`name:` select
+    /// step becomes a `view` command first, a `_:` step is delivered with `.scope = .all`.
+    pub fn run_script(self: *const Cmd, io: Io, script: []const u8, ctx: *vxfw.EventContext) !void {
         const autos = try CmdAutomation.parse_script(self.alloc, script);
         defer {
             for (autos) |a| a.deinit(self.alloc);
+            self.alloc.free(autos);
         }
 
         for (autos) |step| {
             switch (step.select) {
-                .str => |select_cmd| {
-                    // select the output
-                    try self.handleCmd(io, select_cmd, ctx, event);
-
-                    // run the cmd
-                    try self.handleCmd(io, step.cmd, ctx, event);
+                .str => |target| {
+                    // select the output, then run the cmd on it
+                    const select_cmd = try std.fmt.allocPrint(self.alloc, "view {s}", .{target});
+                    defer self.alloc.free(select_cmd);
+                    try self.dispatch(io, select_cmd, ctx, .{});
+                    try self.dispatch(io, step.cmd, ctx, .{});
                 },
-                .skip => {
-                    // no select action, run cmd
-                    try self.handleCmd(io, step.cmd, ctx, event);
-                },
-                .all => {
-                    // run the cmd on ALL outputs
-                    // TODO: maybe need a flag to signal I want to force is not in view
-
-                    // run the cmd
-                    try self.handleCmd(io, step.cmd, ctx, event);
-                },
+                .skip => try self.dispatch(io, step.cmd, ctx, .{}),
+                .all => try self.dispatch(io, step.cmd, ctx, .{ .scope = .all }),
             }
         }
     }
 
-    pub fn handleCmd(self: *const Cmd, io: Io, buffer: []const u8, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
+    /// Delivers one command line with the same `run_cmd` event the command bar sends, so
+    /// event handlers (`q`, `merge`, `stop`, `view`, ...) read their arguments from it.
+    fn dispatch(self: *const Cmd, io: Io, cmd_str: []u8, ctx: *vxfw.EventContext, info: Info) !void {
+        // the event only has to outlive this synchronous call
+        const run_event = cmdevents.CmdEvent{ .run_cmd = .{ .cmd_str = cmd_str } };
+        try self.handleCmd(io, cmd_str, info, ctx, cmdevents.makeEvent(&run_event));
+    }
+
+    pub fn handleCmd(self: *const Cmd, io: Io, buffer: []const u8, info: Cmd.Info, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         const index = findFirstChar(buffer, ' ');
 
         // parse the key/args
@@ -125,7 +140,7 @@ pub const Cmd = struct {
         for (matches.items) |*match| {
             const h = match.handler;
             switch (h.handle) {
-                .regular_fn => |func| try func(io, args, h.listener),
+                .regular_fn => |func| try func(io, args, h.listener, info),
                 .event_fn => |func| try func(h.listener, ctx, event),
             }
         }
@@ -177,3 +192,56 @@ pub const Cmd = struct {
         return null;
     }
 };
+
+// ------------------------------------------------------------------
+// Tests
+// ------------------------------------------------------------------
+
+const testing = std.testing;
+
+/// Records the `run_cmd` event every dispatched command line arrives with.
+const EventProbe = struct {
+    alloc: std.mem.Allocator,
+    seen: std.ArrayList([]u8) = .empty,
+
+    fn handle(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
+        _ = ctx;
+        const self: *EventProbe = @ptrCast(@alignCast(ptr));
+        const cmd_event = cmdevents.getCmdEvent(event.app) orelse return error.NotACmdEvent;
+        const run = switch (cmd_event.*) {
+            .run_cmd => |r| r,
+            else => return error.NotARunCmd,
+        };
+        try self.seen.append(self.alloc, try self.alloc.dupe(u8, run.cmd_str));
+    }
+
+    fn deinit(self: *EventProbe) void {
+        for (self.seen.items) |s| self.alloc.free(s);
+        self.seen.deinit(self.alloc);
+    }
+};
+
+test "run_script hands event handlers a run_cmd event and selects views first" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const cmd = try Cmd.init(alloc);
+    defer cmd.deinit();
+
+    var probe: EventProbe = .{ .alloc = alloc };
+    defer probe.deinit();
+    for ([_][]const u8{ "view", "probe" }) |name| {
+        _ = try cmd.addHandler(.{
+            .listener = &probe,
+            .handle = .{ .event_fn = EventProbe.handle },
+            .event_str = name,
+        });
+    }
+
+    var ctx: vxfw.EventContext = .{ .io = io, .alloc = alloc, .cmds = .empty };
+    try cmd.run_script(io, ": probe one\n~1: probe two\nPrint: probe three\n", &ctx);
+
+    const expected = [_][]const u8{ "probe one", "view ~1", "probe two", "view Print", "probe three" };
+    try testing.expectEqual(expected.len, probe.seen.items.len);
+    for (expected, probe.seen.items) |want, got| try testing.expectEqualStrings(want, got);
+}
