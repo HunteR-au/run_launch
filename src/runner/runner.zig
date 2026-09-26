@@ -585,14 +585,35 @@ fn isLaunched(runner: *const ConfiguredRunner, id: UUID) bool {
     return false;
 }
 
-/// A shell line that takes about a second (`type: shell` runs cmd.exe /c or sh -c).
-const slow_line = switch (builtin.os.tag) {
-    .windows => "ping -n 2 127.0.0.1 > nul",
+/// The shutdown sequence (kill the children, stop the pump), run exactly once: explicitly
+/// when a test wants to read its sink afterwards, or from the `defer` when an assertion
+/// fails first. That keeps a failed assertion a readable failure rather than a crash in
+/// `pump.deinit`/`ing.destroy`. Declare it after `defer runner.deinit(io)`.
+const Cleanup = struct {
+    runner: *ConfiguredRunner,
+    pump: *Pump,
+    io: Io,
+    done: bool = false,
+
+    fn run(self: *Cleanup) void {
+        if (self.done) return;
+        self.done = true;
+        self.runner.killAll(self.io) catch {};
+        self.pump.stop();
+    }
+};
+
+/// A native command line (no shell in between: Ubuntu's `sh -c` forks the command, so a kill
+/// would only reach the shell) that takes about a second. Gates that must still be running
+/// when a test looks use it: `echo` under a shell can exit and be reaped within the same
+/// `startReady` pass on Linux.
+const slow_cmd = switch (builtin.os.tag) {
+    .windows => "ping -n 2 127.0.0.1",
     else => "sleep 1",
 };
 /// ... and one that runs until it is killed.
-const forever_line = switch (builtin.os.tag) {
-    .windows => "ping -n 60 127.0.0.1 > nul",
+const forever_cmd = switch (builtin.os.tag) {
+    .windows => "ping -n 60 127.0.0.1",
     else => "sleep 60",
 };
 
@@ -650,14 +671,14 @@ test "run/runStartup: targets resolve, a pre task gates its process, scripts fir
     defer pump.deinit();
     try pump.start();
 
-    // `type: shell` so `echo` exists on every platform
-    const config = try parseConfig(io, alloc,
+    // `type: shell` so `echo` exists on every platform; d (a gate) is a slow native process
+    const source = try std.fmt.allocPrint(alloc,
         \\default: g
         \\processes:
         \\  a: echo a
         \\  b: echo b
         \\  c: echo c
-        \\  d: echo d
+        \\  d: {s}
         \\groups:
         \\  g: [a, b]
         \\configs:
@@ -669,14 +690,16 @@ test "run/runStartup: targets resolve, a pre task gates its process, scripts fir
         \\  - name: c
         \\    type: shell
         \\    preTask: d
-        \\  - name: d
-        \\    type: shell
         \\  - name: g
         \\    script: ['_: wrap on']
         \\script: ['_: color x red']
-    );
+    , .{slow_cmd});
+    defer alloc.free(source);
+    const config = try parseConfig(io, alloc, source);
     const runner = try ConfiguredRunner.init(alloc, config, pump);
     defer runner.deinit(io);
+    var cleanup: Cleanup = .{ .runner = runner, .pump = pump, .io = io };
+    defer cleanup.run();
 
     try testing.expectError(error.NoConfigWithName, runner.run(io, "nope"));
     try testing.expectError(error.NoConfigWithName, runner.runPostTasks(io, "nope", .nonBlocking));
@@ -743,9 +766,6 @@ test "run/runStartup: targets resolve, a pre task gates its process, scripts fir
     defer post_default.deinit();
     try testing.expectEqual(0, post_default.children.items.len);
     try testing.expectEqual(3, runner.config.run_all.len);
-
-    try runner.killAll(io);
-    pump.stop();
 }
 
 test "run: a failing pre task leaves its process unstarted, its view says why, pending scripts still complete" {
@@ -776,6 +796,8 @@ test "run: a failing pre task leaves its process unstarted, its view says why, p
     );
     const runner = try ConfiguredRunner.init(alloc, config, pump);
     defer runner.deinit(io);
+    var cleanup: Cleanup = .{ .runner = runner, .pump = pump, .io = io };
+    defer cleanup.run();
 
     var handle = try runner.run(io, "g");
     defer handle.deinit();
@@ -796,9 +818,7 @@ test "run: a failing pre task leaves its process unstarted, its view says why, p
     try testing.expectEqual(1, scripts.len);
     try testing.expectEqualStrings("_: wrap on", scripts[0]);
 
-    try runner.killAll(io);
-    pump.stop();
-
+    cleanup.run(); // the sink is read only once the pump thread is joined
     try testing.expectEqualStrings("c", sink.bufferName(id_c).?);
     try testing.expect(sink.stderrMentions(id_c, "c not started"));
     try testing.expect(sink.stderrMentions(id_c, "preTask \"pre\" exited with code 3"));
@@ -814,11 +834,12 @@ test "run: a group's pre task gates every member, then each member waits for its
     try pump.start();
 
     // T gates the group; a and b then wait for s (shared: once); c has no task; e names T
-    // itself, which just finished, so it starts right away
-    const config = try parseConfig(io, alloc,
+    // itself, which just finished, so it starts right away. Both gates are slow native
+    // processes so each stage is observable before the next one happens.
+    const source = try std.fmt.allocPrint(alloc,
         \\processes:
-        \\  T: echo T
-        \\  s: echo s
+        \\  T: {s}
+        \\  s: {s}
         \\  a: echo a
         \\  b: echo b
         \\  c: echo c
@@ -826,10 +847,6 @@ test "run: a group's pre task gates every member, then each member waits for its
         \\groups:
         \\  g: [a, b, c, e]
         \\configs:
-        \\  - name: T
-        \\    type: shell
-        \\  - name: s
-        \\    type: shell
         \\  - name: a
         \\    type: shell
         \\    preTask: s
@@ -844,9 +861,13 @@ test "run: a group's pre task gates every member, then each member waits for its
         \\  - name: g
         \\    preTask: T
         \\    script: ['_: lines on']
-    );
+    , .{ slow_cmd, slow_cmd });
+    defer alloc.free(source);
+    const config = try parseConfig(io, alloc, source);
     const runner = try ConfiguredRunner.init(alloc, config, pump);
     defer runner.deinit(io);
+    var cleanup: Cleanup = .{ .runner = runner, .pump = pump, .io = io };
+    defer cleanup.run();
 
     var handle = try runner.run(io, "g");
     defer handle.deinit();
@@ -891,9 +912,6 @@ test "run: a group's pre task gates every member, then each member waits for its
         fired += scripts.len;
     }
     try testing.expectEqual(1, fired);
-
-    try runner.killAll(io);
-    pump.stop();
 }
 
 test "run: a failing group pre task announces every member" {
@@ -925,6 +943,8 @@ test "run: a failing group pre task announces every member" {
     );
     const runner = try ConfiguredRunner.init(alloc, config, pump);
     defer runner.deinit(io);
+    var cleanup: Cleanup = .{ .runner = runner, .pump = pump, .io = io };
+    defer cleanup.run();
 
     var handle = try runner.run(io, "g");
     defer handle.deinit();
@@ -934,9 +954,7 @@ test "run: a failing group pre task announces every member" {
     try testing.expectEqual(0, runner.deferred.items.len);
     try testing.expectEqual(1, runner._context.procs.items.len);
 
-    try runner.killAll(io);
-    pump.stop();
-
+    cleanup.run();
     try testing.expectEqualStrings("a", sink.bufferName(handle.ids.items[0]).?);
     try testing.expectEqualStrings("b", sink.bufferName(handle.ids.items[1]).?);
     try testing.expect(sink.stderrMentions(handle.ids.items[0], "preTask \"T\" exited with code 2"));
@@ -973,6 +991,8 @@ test "runStartup: everything runs a shared pre task once, each process waits for
     );
     const runner = try ConfiguredRunner.init(alloc, config, pump);
     defer runner.deinit(io);
+    var cleanup: Cleanup = .{ .runner = runner, .pump = pump, .io = io };
+    defer cleanup.run();
 
     var handle = try runner.runStartup(io, null);
     defer handle.deinit();
@@ -997,9 +1017,6 @@ test "runStartup: everything runs a shared pre task once, each process waits for
         fired += scripts.len;
     }
     try testing.expectEqual(1, fired);
-
-    try runner.killAll(io);
-    pump.stop();
 }
 
 test "run: stopping a pre task cancels the start; killAll drops what is still waiting" {
@@ -1012,25 +1029,26 @@ test "run: stopping a pre task cancels the start; killAll drops what is still wa
     defer pump.deinit();
     try pump.start();
 
+    // `slow` is native: the kill has to reach the process that holds the pipes
     const source = try std.fmt.allocPrint(alloc,
         \\processes:
         \\  slow: {s}
         \\  a: echo a
         \\  b: echo b
         \\configs:
-        \\  - name: slow
-        \\    type: shell
         \\  - name: a
         \\    type: shell
         \\    preTask: slow
         \\  - name: b
         \\    type: shell
         \\    preTask: slow
-    , .{forever_line});
+    , .{forever_cmd});
     defer alloc.free(source);
     const config = try parseConfig(io, alloc, source);
     const runner = try ConfiguredRunner.init(alloc, config, pump);
     defer runner.deinit(io);
+    var cleanup: Cleanup = .{ .runner = runner, .pump = pump, .io = io };
+    defer cleanup.run();
 
     var first = try runner.run(io, "a");
     defer first.deinit();
@@ -1049,11 +1067,10 @@ test "run: stopping a pre task cancels the start; killAll drops what is still wa
     try testing.expectEqual(1, runner.deferred.items.len);
 
     // shutdown drops the waiting process; nothing starts afterwards
-    try runner.killAll(io);
+    cleanup.run();
     try testing.expectEqual(0, runner.deferred.items.len);
     try testing.expectEqual(null, try runner.startReady(io));
     try testing.expect(!isLaunched(runner, second.ids.items[0]));
-    pump.stop();
 
     try testing.expect(sink.stderrMentions(first.ids.items[0], "a not started"));
     try testing.expectEqual(null, sink.bufferName(second.ids.items[0]));
@@ -1085,6 +1102,8 @@ test "run: a pre task that cannot be spawned is announced, the rest of the group
     );
     const runner = try ConfiguredRunner.init(alloc, config, pump);
     defer runner.deinit(io);
+    var cleanup: Cleanup = .{ .runner = runner, .pump = pump, .io = io };
+    defer cleanup.run();
 
     var handle = try runner.run(io, "g"); // no error out of a task that will not spawn
     defer handle.deinit();
@@ -1095,9 +1114,7 @@ test "run: a pre task that cannot be spawned is announced, the rest of the group
     try testing.expect(!isLaunched(runner, handle.ids.items[0]));
     try testing.expect(isLaunched(runner, handle.ids.items[1]));
 
-    try runner.killAll(io);
-    pump.stop();
-
+    cleanup.run();
     try testing.expect(sink.stderrMentions(handle.ids.items[0], "preTask \"bad\" could not be started"));
     var bad_announced = false;
     for (sink.buffers.items) |b| {
@@ -1139,6 +1156,8 @@ test "runPostTasks: a group's own and its members' post tasks, once each" {
     );
     const runner = try ConfiguredRunner.init(alloc, config, pump);
     defer runner.deinit(io);
+    var cleanup: Cleanup = .{ .runner = runner, .pump = pump, .io = io };
+    defer cleanup.run();
 
     var group = try runner.runPostTasks(io, "g", .blocking);
     defer group.deinit();
@@ -1154,7 +1173,4 @@ test "runPostTasks: a group's own and its members' post tasks, once each" {
     var all = try runner.runPostTasks(io, null, .blocking);
     defer all.deinit();
     try testing.expectEqual(1, all.children.items.len);
-
-    try runner.killAll(io);
-    pump.stop();
 }

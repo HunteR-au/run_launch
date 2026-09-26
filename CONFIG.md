@@ -43,7 +43,10 @@ How the line is run depends on the process' `type` (see `configs`):
 | `python` | run as `py -u <command line>` (`python3 -u` off Windows): a script path, or `-m module` |
 | `shell`  | handed whole to `cmd.exe /c` (`sh -c` off Windows), so pipes and built-ins work |
 
-The view is titled with the process name.
+The view is titled with the process name. One caveat for `shell` on Linux: `stop` kills the
+shell, and `sh` (dash on Ubuntu) runs the command as a child rather than replacing itself, so
+a long-running command may keep running after the shell is gone. Use `native` for commands
+you expect to stop, or `sh -c 'exec ...'` style entries with `native`.
 
 ### groups
 
