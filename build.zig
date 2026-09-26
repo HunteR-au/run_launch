@@ -128,6 +128,7 @@ pub fn build(b: *std.Build) !void {
     // Setup config
     config.addImport("utils", utils);
     config.addImport("yaml", yaml);
+    config.addImport("uiconfig", uiconfig);
 
     // Setup tui
     tui.addImport("vaxis", vaxis);
@@ -280,6 +281,7 @@ pub fn build(b: *std.Build) !void {
     });
     config_unit_tests.root_module.addImport("utils", utils);
     config_unit_tests.root_module.addImport("yaml", yaml);
+    config_unit_tests.root_module.addImport("uiconfig", uiconfig);
 
     // And the runner module (spawns real short-lived processes).
     const runner_unit_tests = b.addTest(.{

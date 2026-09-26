@@ -1,46 +1,35 @@
-configurations:
-  - name: "Attach"
-    type: "debugpy"
-    module: "http.server"
-    request: "attach"
-    preLaunchTask: "list"
-    connect: 
-      host: "remote-machine-name"
-      port: 5678
-  - name: "Print"
-    type: "debugpy"
-    program: '.\data\printlines.py'
-    request: "attach"
-    preLaunchTask: "list"
-    connect:
-       host: "remote-machine-name"
-       port: 5678
-  - name: "Control"
-    type: "debugpy"
-    program: '.\data\controlchars.py'
-    request: "attach"
-    connect:
-       host: "remote-machine-name"
-       port: 5678
+# runlaunch sample launch file. Try:
+#   runlaunch data\launch.yml             starts `default:` (the Demo group)
+#   runlaunch data\launch.yml Print       starts one process
+#   runlaunch data\launch.yml Server      a process whose preTask starts alongside it
+# CONFIG.md describes every field.
 
-tasks:
-  - label: "list"
-    type: "shell"
-    command: "ls"
-    args: ["."]
-  - label: "build"
-    type: "shell"
-    command: "zig"
-    args: ["build", "-freference-trace"]
-  - label: "build2"
-    type: "shell"
-    command: "msbuild"
-    args: [
-        "/property:GenerateFullPaths=true",
-        "/t:build",
-        "/consoleloggerparameters:NoSummary"
-    ]
-    group: "build"
-    presentation: 
-      reveal: "silent"
-    problemMatcher: "$msCompile"
+default: Demo
+
+processes:
+  List: ls .
+  Print: .\data\printlines.py
+  Control: .\data\controlchars.py
+  Server: '-m http.server 8000'
+
+groups:
+  Demo: [Print, Control]
+
+configs:
+  - name: Print
+    type: python
+    preTask: List
+  - name: Control
+    type: python
+  - name: Server
+    type: python
+    preTask: List
+  - name: Demo
+    # runs once both Print and Control have a view
+    script:
+      - 'Control: wrap on'
+
+colorRules:
+  - pattern: data
+    background_color: '220,6,6'
+    just_pattern: true

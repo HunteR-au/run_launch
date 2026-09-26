@@ -111,7 +111,6 @@ const TuiApp = struct {
     retired: std.ArrayList(actions.stop.Detached) = .empty,
     mode: ModelState = .main,
     prev_mode: ModelState = .main,
-    start_script: ?[]const u8 = null,
     /// Screen size on the last draw; locates the cmd overlay for mouse routing.
     last_size: vxfw.Size = .{},
     // views: vxfw.Surface,
@@ -276,6 +275,20 @@ const TuiApp = struct {
                             _ = try self.focusBuffer(ctx, c.id);
                         }
                     }
+
+                    // The view exists now: the process' own script, then any group/startup
+                    // script this was the last awaited view of (see CONFIG.md).
+                    const scripts = self.app_model.executor.viewCreated(ctx.io, model_alloc_root, c.id) catch |err| blk: {
+                        std.log.warn("config scripts for \"{s}\" skipped: {t}", .{ c.name, err });
+                        break :blk &.{};
+                    };
+                    defer model_alloc_root.free(scripts);
+                    for (scripts) |script| {
+                        std.log.debug("config script on view \"{s}\": {s}", .{ c.name, script });
+                        self.app_model.cmd.run_script(ctx.io, script, ctx) catch |err| {
+                            std.log.warn("config script failed: {t}", .{err});
+                        };
+                    }
                 },
                 .buffer_removed => |r| {
                     self.app_model.removeBufferInfo(model_alloc_root, r.id);
@@ -400,12 +413,6 @@ const TuiApp = struct {
                         return ctx.consumeEvent();
                     },
                     else => {},
-                }
-            },
-            .init => {
-                if (self.start_script) |script| {
-                    // TODO: probably should have some user output for errors
-                    self.app_model.cmd.run_script(ctx.io, script, ctx) catch {};
                 }
             },
             else => {},
@@ -899,6 +906,16 @@ fn wakeInputThread() void {
     }
 }
 
+/// The launch file's colour rules join the `.debugUi.json` ones: the file-level rules apply
+/// to every view, a process' to its view, a group's to each member's view.
+fn applyConfigColorRules(ui: *uiconfig.UiConfig, config: *const runner.Configuration) !void {
+    try ui.addGlobalRules(config.color_rules);
+    for (config.processes) |*p| try ui.addRules(p.name, p.color_rules);
+    for (config.groups) |*g| {
+        for (g.members) |p| try ui.addRules(p.name, g.color_rules);
+    }
+}
+
 fn run_tui(io: Io, alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner, env_map: *std.process.Environ.Map) !void {
     // Whatever happens, main must be released from waitForTUIClose.
     defer setTUIClose(io);
@@ -910,6 +927,7 @@ fn run_tui(io: Io, alloc: std.mem.Allocator, executor: *runner.ConfiguredRunner,
 
     tui_env = env_map;
     ui_config = try uiconfig.parseConfigs(io, alloc, env_map);
+    try applyConfigColorRules(&ui_config, &executor.config);
 
     var buffer: [1024]u8 = undefined;
     app = try vxfw.App.init(io, alloc, env_map, &buffer);

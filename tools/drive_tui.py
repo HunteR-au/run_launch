@@ -8,8 +8,8 @@ usage: py tools\drive_tui.py <seconds_before_keys> <steps...>
   SNAP prints the current rendered screen.
 
 environment:
-  DRV_CMD   executable (default zig-out\\bin\\run_launch.exe relative to the repo root)
-  DRV_ARGS  arguments  (default "data\\launch.json Print")
+  DRV_CMD   executable (default zig-out\\bin\\runlaunch.exe relative to the repo root)
+  DRV_ARGS  arguments  (default "data\\launch.yml Print")
   DRV_COLS, DRV_ROWS  terminal size (default 140x40)
 
 example: py tools\drive_tui.py 4 TAB TAB TAB SNAP / "merge m1 ~3 ~4" ENTER ESC TAB SNAP / q ENTER
@@ -22,8 +22,8 @@ import pyte
 import winpty
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CMD = os.environ.get("DRV_CMD", os.path.join(REPO, "zig-out", "bin", "run_launch.exe"))
-ARGS = os.environ.get("DRV_ARGS", r"data\launch.json Print")
+CMD = os.environ.get("DRV_CMD", os.path.join(REPO, "zig-out", "bin", "runlaunch.exe"))
+ARGS = os.environ.get("DRV_ARGS", r"data\launch.yml Print")
 COLS, ROWS = int(os.environ.get("DRV_COLS", 140)), int(os.environ.get("DRV_ROWS", 40))
 
 SPECIAL = {

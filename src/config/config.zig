@@ -1,79 +1,42 @@
+//! The launch configuration module: reads the YAML launch file (CONFIG.md describes the
+//! format) into a validated `Configuration` the runner and the UI work from.
+
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
-const Yaml = @import("yaml").Yaml;
-const launch_ = @import("launch.zig");
-const task_ = @import("task.zig");
-const yamlconfig = @import("yamlconfig.zig");
-const jsonconfig = @import("jsonconfig.zig");
-
 pub const expand = @import("expand.zig");
+pub const cmdline = @import("cmdline.zig");
+const model = @import("configuration.zig");
+const parse_ = @import("parse.zig");
 
-pub const Launch = launch_.Launch;
-pub const LaunchConfiguration = launch_.Configuration;
-pub const Compound = launch_.Compound;
-pub const Task = task_.Task;
-pub const Tasks = task_.Tasks;
+pub const Configuration = model.Configuration;
+pub const Process = model.Process;
+pub const Group = model.Group;
+pub const Target = model.Target;
+pub const RunnerType = model.RunnerType;
+pub const ColorRule = model.ColorRule;
+pub const EnvTuple = model.EnvTuple;
+pub const Diagnostics = parse_.Diagnostics;
+pub const ParseError = parse_.Error;
+pub const parse = parse_.parse;
 
-pub const Configuration = struct {
-    launch: Launch,
-    tasks: ?Tasks,
-};
+pub const max_config_bytes = 1024 * 1024;
 
-const ConfigType = enum { Json, Yaml };
-
-fn getConfigType(filepath: []const u8) !ConfigType {
-    const ext = std.Io.Dir.path.extension(filepath);
-
-    if (std.mem.eql(u8, ext, ".yml") or std.mem.eql(u8, ext, ".yaml")) return .Yaml;
-    if (std.mem.eql(u8, ext, ".json")) return .Json;
-    return error.InvalidExtension;
-}
-
-pub fn parseConfig(io: Io, alloc: Allocator, filepath: []const u8) !Configuration {
-    const config_type = try getConfigType(filepath);
-
-    const size_limit = Io.Limit.limited64(1024 * 1024);
-    const data = try std.Io.Dir.cwd().readFileAlloc(io, filepath, alloc, size_limit);
-    std.log.debug("\n{s}\n", .{data});
+/// Reads and parses `filepath`. When this fails `diag` says what is wrong, in the user's
+/// terms. `${...}` tokens resolve against the map given to `expand.init_expand`.
+pub fn parseFile(io: Io, alloc: Allocator, filepath: []const u8, diag: *Diagnostics) !Configuration {
+    const data = std.Io.Dir.cwd().readFileAlloc(io, filepath, alloc, .limited(max_config_bytes)) catch |err| {
+        diag.set("cannot read \"{s}\": {t}", .{ filepath, err });
+        return err;
+    };
     defer alloc.free(data);
-
-    switch (config_type) {
-        .Yaml => {
-            var yaml: Yaml = .{ .source = data };
-            defer yaml.deinit(alloc);
-
-            yaml.load(alloc) catch |err| switch (err) {
-                error.ParseFailure => {
-                    std.debug.assert(yaml.parse_errors.errorMessageCount() > 0);
-                    //yaml.parse_errors.renderToStdErr(io, .{}, .auto) catch {};
-                    return error.ParseFailure;
-                },
-                else => return err,
-            };
-
-            return .{
-                .launch = try yamlconfig.parseLaunch(io, alloc, yaml),
-                .tasks = try yamlconfig.parseTasks(io, alloc, yaml),
-            };
-        },
-        .Json => {
-            var parsed = try std.json.parseFromSlice(std.json.Value, alloc, data, .{});
-            defer parsed.deinit();
-
-            return .{
-                .launch = try jsonconfig.parseLaunch(io, alloc, parsed.value),
-                .tasks = try jsonconfig.parseTasks(io, alloc, parsed.value),
-            };
-        },
-    }
+    return parse_.parse(io, alloc, data, diag);
 }
 
 test {
     _ = expand;
-    _ = jsonconfig;
-    _ = yamlconfig;
-    _ = launch_;
-    _ = task_;
+    _ = cmdline;
+    _ = model;
+    _ = parse_;
 }

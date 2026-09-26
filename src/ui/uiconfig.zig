@@ -25,6 +25,16 @@ pub const ColorRule = struct {
         }
     }
 
+    /// A copy whose strings are owned by `alloc`.
+    pub fn dupe(self: *const ColorRule, alloc: std.mem.Allocator) std.mem.Allocator.Error!ColorRule {
+        var copy: ColorRule = .{ .just_pattern = self.just_pattern };
+        errdefer copy.deinit(alloc);
+        if (self.pattern) |p| copy.pattern = try alloc.dupe(u8, p);
+        if (self.foreground_color) |p| copy.foreground_color = try alloc.dupe(u8, p);
+        if (self.background_color) |p| copy.background_color = try alloc.dupe(u8, p);
+        return copy;
+    }
+
     pub fn parse(alloc: std.mem.Allocator, object: std.json.ObjectMap) !ColorRule {
         var rule = ColorRule{};
         errdefer rule.deinit(alloc);
@@ -126,6 +136,54 @@ pub const UiConfig = struct {
 
     pub fn init(alloc: std.mem.Allocator) !UiConfig {
         return UiConfig{ ._alloc = alloc, .otherProcesses = try std.ArrayList(ProcessConfig).initCapacity(alloc, 10) };
+    }
+
+    /// Appends copies of `rules` to the process called `name`, after whatever it already
+    /// has (an unknown name gets a new entry). Rules from the launch file land here.
+    pub fn addRules(self: *UiConfig, name: []const u8, rules: []const ColorRule) std.mem.Allocator.Error!void {
+        if (rules.len == 0) return;
+        if (self.get(name)) |existing| {
+            existing.colorRules = try appendRules(self._alloc, existing.colorRules, rules);
+            return;
+        }
+        const process_name = try self._alloc.dupe(u8, name);
+        errdefer self._alloc.free(process_name);
+        const copies = try appendRules(self._alloc, &.{}, rules);
+        errdefer freeRules(self._alloc, copies);
+        try self.otherProcesses.append(self._alloc, .{ .processName = process_name, .colorRules = copies });
+    }
+
+    /// Like `addRules`, for the rules every view gets.
+    pub fn addGlobalRules(self: *UiConfig, rules: []const ColorRule) std.mem.Allocator.Error!void {
+        if (rules.len == 0) return;
+        if (self.globalConfig) |*global| {
+            global.colorRules = try appendRules(self._alloc, global.colorRules, rules);
+            return;
+        }
+        const process_name = try self._alloc.dupe(u8, "GLOBAL");
+        errdefer self._alloc.free(process_name);
+        const copies = try appendRules(self._alloc, &.{}, rules);
+        self.globalConfig = .{ .processName = process_name, .colorRules = copies };
+    }
+
+    /// `existing` ++ copies of `extra`; `existing` (the slice, not its rules) is freed.
+    fn appendRules(alloc: std.mem.Allocator, existing: []const ColorRule, extra: []const ColorRule) std.mem.Allocator.Error![]ColorRule {
+        const out = try alloc.alloc(ColorRule, existing.len + extra.len);
+        errdefer alloc.free(out);
+        @memcpy(out[0..existing.len], existing);
+        var copied: usize = 0;
+        errdefer for (out[existing.len..][0..copied]) |*c| c.deinit(alloc);
+        for (extra, existing.len..) |*rule, i| {
+            out[i] = try rule.dupe(alloc);
+            copied += 1;
+        }
+        if (existing.len > 0) alloc.free(existing);
+        return out;
+    }
+
+    fn freeRules(alloc: std.mem.Allocator, rules: []ColorRule) void {
+        for (rules) |*c| c.deinit(alloc);
+        alloc.free(rules);
     }
 
     pub fn deinit(self: *UiConfig) void {
@@ -451,4 +509,65 @@ test "Two processes with same name" {
 
     try std.testing.expectEqual(config.otherProcesses.items.len, 1);
     try std.testing.expectEqualSlices(u8, config.get("Process1").?.colorRules[0].pattern.?, "TEST_PATTERN2");
+}
+
+test "addRules/addGlobalRules: launch-file rules go after the file's, copied" {
+    const alloc = std.testing.allocator;
+    const jsonStr =
+        \\{
+        \\    "processes": [
+        \\        {
+        \\            "processName": "GLOBAL",
+        \\            "colorRules": [ { "pattern": "g0", "foreground_color": "1,1,1", "just_pattern": true } ]
+        \\        },
+        \\        {
+        \\            "processName": "Print",
+        \\            "colorRules": [ { "pattern": "p0", "foreground_color": "2,2,2", "just_pattern": false } ]
+        \\        }
+        \\    ]
+        \\}
+    ;
+    const jsonValue = try std.json.parseFromSlice(std.json.Value, alloc, jsonStr, .{});
+    defer jsonValue.deinit();
+    var config = try UiConfig.init(alloc);
+    defer config.deinit();
+    try config.parse(jsonValue.value.object);
+
+    // the caller keeps ownership of what it passes in
+    var pattern = [_]u8{ 'x', '1' };
+    var colour = [_]u8{ '3', ',', '3', ',', '3' };
+    const extra = [_]ColorRule{
+        .{ .pattern = &pattern, .background_color = &colour, .just_pattern = true },
+        .{ .pattern = &pattern, .foreground_color = &colour },
+    };
+
+    try config.addRules("Print", &extra);
+    try config.addRules("New", extra[0..1]);
+    try config.addRules("Empty", &.{});
+    try config.addGlobalRules(extra[1..]);
+    pattern[1] = '9'; // the copies must not see this
+
+    const print = config.get("Print").?;
+    try std.testing.expectEqual(3, print.colorRules.len);
+    try std.testing.expectEqualStrings("p0", print.colorRules[0].pattern.?);
+    try std.testing.expectEqualStrings("x1", print.colorRules[1].pattern.?);
+    try std.testing.expectEqualStrings("3,3,3", print.colorRules[1].background_color.?);
+    try std.testing.expect(print.colorRules[1].just_pattern);
+    try std.testing.expectEqualStrings("x1", print.colorRules[2].pattern.?);
+    try std.testing.expectEqual(null, print.colorRules[2].background_color);
+
+    try std.testing.expectEqual(1, config.get("New").?.colorRules.len);
+    try std.testing.expectEqual(null, config.get("Empty"));
+
+    const global = config.globalConfig.?;
+    try std.testing.expectEqual(2, global.colorRules.len);
+    try std.testing.expectEqualStrings("g0", global.colorRules[0].pattern.?);
+    try std.testing.expectEqualStrings("x1", global.colorRules[1].pattern.?);
+
+    // with no file at all, the global entry is created on demand
+    var fresh = try UiConfig.init(alloc);
+    defer fresh.deinit();
+    try fresh.addGlobalRules(&extra);
+    try std.testing.expectEqualStrings("GLOBAL", fresh.globalConfig.?.processName);
+    try std.testing.expectEqual(2, fresh.globalConfig.?.colorRules.len);
 }

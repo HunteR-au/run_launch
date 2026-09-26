@@ -4,7 +4,6 @@ const clap = @import("clap");
 
 const utils = @import("utils");
 const config_ = @import("config");
-const parseConfig = config_.parseConfig;
 const tui = @import("tui");
 const runner = @import("runner");
 const ui_debug = @import("debug_ui");
@@ -43,6 +42,12 @@ pub fn deinitLogger() void {
 
 pub const std_options: std.Options = .{
     .logFn = logFn,
+    // the YAML library traces every token at debug level; keep logs.txt readable
+    .log_scope_levels = &.{
+        .{ .scope = .yaml, .level = .warn },
+        .{ .scope = .tokenizer, .level = .warn },
+        .{ .scope = .parser, .level = .warn },
+    },
 };
 
 var debug_log_io: Io = undefined;
@@ -96,8 +101,9 @@ pub fn main(init: std.process.Init) !void {
         \\-h, --help                    Display this help and exit
         \\-d, --dry-run                 Print out actions without executing them
         \\-w, --web-ui                  Render the web ui interface
-        \\<str>                         The path to the launch.json file
-        \\<str>                         The configuration name to run
+        \\<str>                         The path to the launch file (see CONFIG.md)
+        \\<str>                         The process or group to start; without it the
+        \\                              file's `default:`, or everything
     );
 
     var diag = clap.Diagnostic{};
@@ -114,8 +120,8 @@ pub fn main(init: std.process.Init) !void {
         return clap.help(stdout, clap.Help, &params, .{});
     if (res.args.@"dry-run" != 0)
         try stdout.print("dry run set\n", .{});
-    if (res.positionals[0] == null or res.positionals[1] == null) {
-        try stdout.print("Invalid format: use \"runlaunch.exe path name\"\n", .{});
+    if (res.positionals[0] == null) {
+        try stdout.print("Invalid format: use \"runlaunch.exe path [name]\"\n", .{});
         return RunLaunchErrors.BadPositionals;
     }
     if (res.args.@"web-ui" != 0) {
@@ -125,15 +131,39 @@ pub fn main(init: std.process.Init) !void {
 
     // we have parsed what we need from the arguments...lets go!
     const launchPath = res.positionals[0].?;
-    const taskNameToRun: []const u8 = res.positionals[1].?;
+    const nameToRun: ?[]const u8 = res.positionals[1];
 
     // parse configuration (`${...}` tokens resolve against the process environment)
     config_.expand.init_expand(init.environ_map);
     defer config_.expand.deinit_expand();
-    const config = parseConfig(io, alloc, launchPath) catch |err| {
-        try stdout.print("could not load {s}: {t}\n", .{ launchPath, err });
-        return err;
+    var config_diag: config_.Diagnostics = .{};
+    var config = config_.parseFile(io, alloc, launchPath, &config_diag) catch |err| {
+        if (config_diag.message().len > 0) {
+            try stdout.print("could not load {s}: {s}\n", .{ launchPath, config_diag.message() });
+        } else {
+            try stdout.print("could not load {s}: {t}\n", .{ launchPath, err });
+        }
+        // a usage error: the message is the whole story, no error trace behind it
+        try stdout.flush();
+        std.process.exit(1);
     };
+    // ours until the runner takes it
+    var config_moved = false;
+    errdefer if (!config_moved) config.deinit();
+
+    const target = config.resolve(nameToRun) orelse {
+        try stdout.print("{s} has no process or group called \"{s}\". It has:", .{ launchPath, nameToRun.? });
+        for (config.processes) |p| try stdout.print(" {s}", .{p.name});
+        for (config.groups) |g| try stdout.print(" {s}", .{g.name});
+        try stdout.print("\n", .{});
+        try stdout.flush();
+        std.process.exit(1);
+    };
+    if (target == .all and target.all.len == 0) {
+        try stdout.print("{s} has nothing to start: every process is another one's preTask/postTask. Add `default:` or name a process or group.\n", .{launchPath});
+        try stdout.flush();
+        std.process.exit(1);
+    }
 
     // The store owns every buffer; the pump feeds it; the runner produces; the TUI reads
     // snapshots and posts commands.
@@ -143,7 +173,9 @@ pub fn main(init: std.process.Init) !void {
     defer pump.deinit();
     store.attach(pump);
 
-    const executor = try runner.ConfiguredRunner.init(alloc, config.launch, config.tasks, pump);
+    // the runner owns the configuration from here on
+    const executor = try runner.ConfiguredRunner.init(alloc, config, pump);
+    config_moved = true;
     defer executor.deinit(io);
 
     var tui_env_map = try init.environ_map.clone(alloc);
@@ -152,9 +184,8 @@ pub fn main(init: std.process.Init) !void {
     try tui.start_tui(io, alloc, executor, pump, store, &tui_env_map);
     try pump.start();
 
-    std.log.debug("first positional arg: {s}\n", .{res.positionals[0].?});
-    std.log.debug("version: {s}\n", .{executor.config.version});
-    std.log.debug("configurations: {d}\n", .{executor.config.configurations.len});
+    std.log.debug("launch file: {s}\n", .{launchPath});
+    std.log.debug("processes: {d}, groups: {d}\n", .{ executor.config.processes.len, executor.config.groups.len });
 
     var pre_handle: ?runner.WorkHandle = null;
     var run_handle: ?runner.WorkHandle = null;
@@ -167,8 +198,8 @@ pub fn main(init: std.process.Init) !void {
     if (debug) {
         try ui_debug.init(io, pump);
     }
-    pre_handle = try executor.runPreTasks(io, taskNameToRun, .nonBlocking);
-    run_handle = try executor.run(io, taskNameToRun, .nonBlocking);
+    pre_handle = try executor.runPreTasks(io, nameToRun, .nonBlocking);
+    run_handle = try executor.runStartup(io, nameToRun, .nonBlocking);
 
     try tui.waitForTUIClose(io);
     std.log.info("shutdown: tui closed", .{});
@@ -184,7 +215,7 @@ pub fn main(init: std.process.Init) !void {
 
     try executor.killAll(io);
     std.log.info("shutdown: children stopped", .{});
-    post_handle = try executor.runPostTasks(io, taskNameToRun, .blocking);
+    post_handle = try executor.runPostTasks(io, nameToRun, .blocking);
     if (post_handle) |*h| try h.waitAllDone(io);
     std.log.info("shutdown: post tasks done", .{});
 
