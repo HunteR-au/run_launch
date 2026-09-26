@@ -80,13 +80,21 @@ pub fn launch(
     argv: []const []const u8,
     environ_map: ?*std.process.Environ.Map,
 ) !*ProcIngest {
-    const id = utils.uuid.newV4(io);
+    return launchWithId(io, alloc, pump, utils.uuid.newV4(io), name, argv, environ_map);
+}
 
-    const name_copy = try pump.alloc.dupe(u8, name);
-    pump.submit(io, .{ .create_buffer = .{ .id = id, .name = name_copy } }) catch |err| {
-        pump.alloc.free(name_copy);
-        return err;
-    };
+/// `launch` with a caller-minted buffer id (`utils.uuid.newV4`), for callers that hand the
+/// id out before the process exists (a process waiting for its pre task).
+pub fn launchWithId(
+    io: Io,
+    alloc: Allocator,
+    pump: *Pump,
+    id: UUID,
+    name: []const u8,
+    argv: []const []const u8,
+    environ_map: ?*std.process.Environ.Map,
+) !*ProcIngest {
+    try announceBuffer(io, pump, id, name);
 
     const child = std.process.spawn(io, .{
         .argv = argv,
@@ -95,8 +103,7 @@ pub fn launch(
         .stdout = .pipe,
         .stderr = .pipe,
     }) catch |err| {
-        const text = std.fmt.allocPrint(pump.alloc, "!!! failed to spawn \"{s}\": {t} !!!\n", .{ argv[0], err }) catch return err;
-        pump.submit(io, .{ .bytes = .{ .id = id, .stream = .stderr, .data = text } }) catch pump.alloc.free(text);
+        writeStderr(io, pump, id, "!!! failed to spawn \"{s}\": {t} !!!\n", .{ argv[0], err }) catch {};
         return err;
     };
 
@@ -117,6 +124,32 @@ pub fn launch(
 
     try startTasks(io, pump, ing, out, err_pipe);
     return ing;
+}
+
+/// Asks the pump for a buffer called `name` under `id` (the pump owns the name copy).
+pub fn announceBuffer(io: Io, pump: *Pump, id: UUID, name: []const u8) !void {
+    const name_copy = try pump.alloc.dupe(u8, name);
+    pump.submit(io, .{ .create_buffer = .{ .id = id, .name = name_copy } }) catch |err| {
+        pump.alloc.free(name_copy);
+        return err;
+    };
+}
+
+/// Writes one formatted line into buffer `id`'s stderr stream.
+pub fn writeStderr(io: Io, pump: *Pump, id: UUID, comptime fmt: []const u8, args: anytype) !void {
+    const text = try std.fmt.allocPrint(pump.alloc, fmt, args);
+    pump.submit(io, .{ .bytes = .{ .id = id, .stream = .stderr, .data = text } }) catch |err| {
+        pump.alloc.free(text);
+        return err;
+    };
+}
+
+/// A buffer called `name` under `id` whose only content is the formatted line: how a
+/// process that is not going to be started explains itself (its view still appears, under
+/// the id everyone was told to expect).
+pub fn announceFailure(io: Io, pump: *Pump, id: UUID, name: []const u8, comptime fmt: []const u8, args: anytype) !void {
+    try announceBuffer(io, pump, id, name);
+    try writeStderr(io, pump, id, fmt, args);
 }
 
 fn startTasks(io: Io, pump: *Pump, ing: *ProcIngest, out: Io.File, err_pipe: Io.File) Io.ConcurrentError!void {

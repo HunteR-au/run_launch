@@ -1,7 +1,7 @@
 # runlaunch sample launch file. Try:
 #   runlaunch data\launch.yml             starts `default:` (the Demo group)
 #   runlaunch data\launch.yml Print       starts one process
-#   runlaunch data\launch.yml Server      a process whose preTask starts alongside it
+#   runlaunch data\launch.yml Server      a process that starts after its preTask (List)
 # CONFIG.md describes every field.
 
 default: Demo

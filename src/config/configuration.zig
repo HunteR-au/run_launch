@@ -30,7 +30,7 @@ pub const Process = struct {
     /// appended after the command line's own tokens
     args: []const []const u8 = &.{},
     env: []const EnvTuple = &.{},
-    /// started alongside this process (see CONFIG.md: it does not wait)
+    /// must exit with code 0 before this process starts (see CONFIG.md)
     pre_task: ?*const Process = null,
     /// started once this process has been stopped at shutdown
     post_task: ?*const Process = null,
@@ -46,7 +46,9 @@ pub const Process = struct {
 pub const Group = struct {
     name: []const u8,
     members: []const *const Process,
+    /// must exit with code 0 before any member (or a member's own pre task) starts
     pre_task: ?*const Process = null,
+    /// started at shutdown along with the members' own post tasks
     post_task: ?*const Process = null,
     /// runs once every member's view exists
     script: ?[]const u8 = null,

@@ -469,6 +469,15 @@ const TuiApp = struct {
                 try ctx.tick(tick_ms, self.widget());
                 self.flushRetired(ctx.io);
                 try self.drainInbox(ctx);
+                // processes whose pre task has finished start now; the last one to start
+                // takes focus when its view appears, unless a `start` already chose a view
+                const spawned = self.app_model.executor.startReady(ctx.io) catch |err| blk: {
+                    std.log.warn("waiting processes not started: {t}", .{err});
+                    break :blk null;
+                };
+                if (spawned) |id| {
+                    if (self.pending_focus_id == null) self.pending_focus_id = id;
+                }
                 if (self.anyOutputChanged()) ctx.redraw = true;
             },
             .key_press => |key| {
@@ -738,14 +747,14 @@ const TuiApp = struct {
     fn handleStartCmd(io: Io, args: []const u8, listener: *anyopaque, _: Cmd.Info) std.mem.Allocator.Error!void {
         const self: *TuiApp = @ptrCast(@alignCast(listener));
 
-        var handle = self.app_model.executor.run(io, args, .nonBlocking) catch {
+        var handle = self.app_model.executor.run(io, args) catch |err| {
+            std.log.warn("start {s}: {t}", .{ args, err });
             return;
         };
-        if (handle) |*h| {
-            // Choose to focus the last ProcItem
-            if (h.children.items.len > 0) self.pending_focus_id = h.children.items[h.children.items.len - 1].id;
-            h.deinit();
-        }
+        defer handle.deinit();
+        // the target's last process takes focus when its view appears (behind a pre task,
+        // that is once the task has finished)
+        self.pending_focus_id = handle.focusId();
     }
 
     /// Dumps every output's raw buffer to disk. Synchronous: used right before quitting.

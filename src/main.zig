@@ -187,19 +187,18 @@ pub fn main(init: std.process.Init) !void {
     std.log.debug("launch file: {s}\n", .{launchPath});
     std.log.debug("processes: {d}, groups: {d}\n", .{ executor.config.processes.len, executor.config.groups.len });
 
-    var pre_handle: ?runner.WorkHandle = null;
     var run_handle: ?runner.WorkHandle = null;
     var post_handle: ?runner.WorkHandle = null;
 
-    defer if (pre_handle) |*h| h.deinit();
     defer if (run_handle) |*h| h.deinit();
     defer if (post_handle) |*h| h.deinit();
 
     if (debug) {
         try ui_debug.init(io, pump);
     }
-    pre_handle = try executor.runPreTasks(io, nameToRun, .nonBlocking);
-    run_handle = try executor.runStartup(io, nameToRun, .nonBlocking);
+    // pre tasks are spawned here; the processes behind them start from the TUI's tick once
+    // those tasks have finished (`ConfiguredRunner.startReady`)
+    run_handle = try executor.runStartup(io, nameToRun);
 
     try tui.waitForTUIClose(io);
     std.log.info("shutdown: tui closed", .{});
