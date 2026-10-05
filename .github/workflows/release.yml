@@ -15,13 +15,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # An explicit target keeps the runner's own CPU features, OS version and glibc out
+        # of the release binaries (a native build bakes all three in).
         include:
           - name: windows
             os: windows-latest
+            target: x86_64-windows-gnu   # Windows 10 and later
             binary: runlaunch.exe
             asset: runlaunch-windows-x86_64.exe
           - name: ubuntu
             os: ubuntu-latest
+            target: x86_64-linux-musl    # fully static: any x86_64 Linux, no glibc needed
             binary: runlaunch
             asset: runlaunch-ubuntu-x86_64
     env:
@@ -34,11 +38,14 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
+      # Tests run on the same target and CPU as the release build, so what ships is what was
+      # tested. `-Dcpu=baseline` (generic x86-64) is what an explicit target defaults to; it
+      # is spelled out so the binaries stay portable even if a target is changed to native.
       - name: Run tests
-        run: zig build test
+        run: zig build test -Dtarget=${{ matrix.target }} -Dcpu=baseline
 
       - name: Build (ReleaseSafe)
-        run: zig build -Doptimize=ReleaseSafe
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} -Dcpu=baseline
 
       - name: Package
         shell: bash
