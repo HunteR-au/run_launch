@@ -370,8 +370,11 @@ pub const ProcessBuffer = struct {
     }
 
     /// Merge-child append: complete lines plus their (already assigned) sequence numbers.
-    /// Numbers are monotonic by construction because propagation runs in the same pump step
-    /// as the parent's ingest; assert in Debug and clamp otherwise so ordering never breaks.
+    /// Numbers only grow, because propagation runs in the same pump step as the parent's
+    /// ingest. A line can arrive more than once, though: through each parent it descends
+    /// from (a merge of a merge and one of its parents, or two merges sharing a parent).
+    /// Every copy carries the line's number, so a number at or below the last one held is a
+    /// line already here and is skipped. Returns the range of lines actually appended.
     pub fn appendLinesWithSeq(self: *ProcessBuffer, lines: []const u8, seqs: []const u64) Allocator.Error!NewLines {
         self.assertWriter();
         std.debug.assert(seqs.len == std.mem.count(u8, lines, "\n"));
@@ -379,18 +382,34 @@ pub const ProcessBuffer = struct {
         self.m.lockUncancelable(self.io);
         defer self.m.unlock(self.io);
 
-        const before = self.buffer.countLines();
-        try self.buffer.append(lines);
-        const after = self.buffer.countLines();
-        std.debug.assert(after - before == seqs.len);
-
-        try self.line_seqs.ensureUnusedCapacity(self.alloc, seqs.len);
         var last: u64 = if (self.line_seqs.items.len > 0) self.line_seqs.items[self.line_seqs.items.len - 1] else 0;
-        for (seqs) |s| {
-            std.debug.assert(s >= last);
-            last = @max(last, s);
-            self.line_seqs.appendAssumeCapacity(last);
+        const before = self.buffer.countLines();
+        try self.line_seqs.ensureUnusedCapacity(self.alloc, seqs.len);
+
+        if (seqs.len == 0 or seqs[0] > last) {
+            // the usual case: all new
+            try self.buffer.append(lines);
+            self.line_seqs.appendSliceAssumeCapacity(seqs);
+        } else {
+            var kept: std.ArrayList(u8) = .empty;
+            defer kept.deinit(self.alloc);
+            var kept_seqs: std.ArrayList(u64) = .empty;
+            defer kept_seqs.deinit(self.alloc);
+            var start: usize = 0;
+            for (seqs) |s| {
+                const end = std.mem.indexOfScalarPos(u8, lines, start, '\n').? + 1;
+                if (s > last) {
+                    try kept.appendSlice(self.alloc, lines[start..end]);
+                    try kept_seqs.append(self.alloc, s);
+                    last = s;
+                }
+                start = end;
+            }
+            try self.buffer.append(kept.items);
+            self.line_seqs.appendSliceAssumeCapacity(kept_seqs.items);
         }
+        const after = self.buffer.countLines();
+        std.debug.assert(after == self.line_seqs.items.len);
         self.published.raw_lines.store(after, .release);
         self.published.raw_len.store(self.buffer.count(), .release);
 

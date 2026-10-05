@@ -9,6 +9,7 @@ comptime {
     _ = @import("ui/tui/pipeline/search.zig");
     _ = @import("ui/tui/pipeline/ingeststore.zig");
     _ = @import("ui/tui/pipeline/buffer/merge.zig");
+    _ = @import("ui/tui/pipeline/merge_fuzz.zig");
     _ = @import("ui/tui/pipeline/buffer/acyclicgraph.zig");
     _ = @import("ui/tui/widgets/option_picker.zig");
     _ = @import("ui/tui/widgets/mutistyletext.zig");
@@ -18,6 +19,7 @@ comptime {
     _ = @import("ui/tui/clipboardkeys.zig");
     _ = @import("ui/tui/processviewmgr.zig");
     _ = @import("ui/tui/actions/stop.zig");
+    _ = @import("ui/tui/actions/merge.zig");
     // the pump module has its own test compilation in build.zig (tests are only collected
     // from a compilation's root module)
 }

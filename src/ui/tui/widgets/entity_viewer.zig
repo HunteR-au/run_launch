@@ -87,7 +87,7 @@ pub fn create_objects(alloc: Allocator, app_model: *AppModel, io: Io) !*Objects 
 }
 
 inner_widget: *OptionPicker,
-title: []const u8 = "Views and Buffers",
+title: []const u8 = "Views(~n) and Buffers(!n)",
 objects: ?*Objects = null,
 
 /// Objects is expected to be allocated and owned by the EntityViewer

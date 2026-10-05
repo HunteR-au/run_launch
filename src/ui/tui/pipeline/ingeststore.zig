@@ -378,7 +378,9 @@ pub const IngestStore = struct {
         self.execute(boxed.*) catch |err| std.log.err("pump command failed: {t}", .{err});
     }
 
-    fn execute(self: *IngestStore, cmd: PumpCommand) Allocator.Error!void {
+    /// Runs `cmd` on the calling thread. Pump thread only; tests call it directly, without a
+    /// pump (see merge_fuzz.zig).
+    pub fn execute(self: *IngestStore, cmd: PumpCommand) Allocator.Error!void {
         switch (cmd) {
             .remove_buffer => |c| self.removeBuffer(c.id),
             .add_filter => |c| {
@@ -623,4 +625,35 @@ test "store: unknown parent in merge reports a failure event and creates nothing
     defer for (events.items) |ev| UiInbox.freeEvent(alloc, ev);
     try testing.expectEqual(1, events.items.len);
     try testing.expect(events.items[0] == .command_failed);
+}
+
+test "store: a line reaching a merge through two parents shows once, also when it arrives live" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    const store = try IngestStore.init(alloc, io);
+    defer store.deinit();
+    const s = store.sink();
+
+    s.vtable.createBuffer(s.ctx, idFrom(1), "A");
+    s.vtable.createBuffer(s.ctx, idFrom(2), "B");
+    s.vtable.bytes(s.ctx, idFrom(1), .stdout, "a1\n");
+    s.vtable.bytes(s.ctx, idFrom(2), .stdout, "b2\n");
+
+    // M1 = A + B, then M2 = M1 + A: A's lines reach M2 directly and through M1
+    // (`merge m1 --all` followed by `merge m2 --all` builds exactly this)
+    const p1 = try alloc.dupe(UUID, &.{ idFrom(1), idFrom(2) });
+    try store.execute(.{ .create_merge = .{ .id = idFrom(9), .name = try alloc.dupe(u8, "M1"), .parents = p1 } });
+    const p2 = try alloc.dupe(UUID, &.{ idFrom(9), idFrom(1) });
+    try store.execute(.{ .create_merge = .{ .id = idFrom(10), .name = try alloc.dupe(u8, "M2"), .parents = p2 } });
+    const m2 = store.map.get(idFrom(10)).?;
+    try testing.expectEqualStrings("a1\nb2\n", m2.buffer.buf.items);
+    try testing.expectEqualSlices(u64, &.{ 1, 2 }, m2.line_seqs.items);
+
+    // several lines in one chunk used to trip an assertion (a panic in Debug and ReleaseSafe)
+    s.vtable.bytes(s.ctx, idFrom(1), .stdout, "a3\na4\n");
+    s.vtable.bytes(s.ctx, idFrom(2), .stdout, "b5\n");
+    try testing.expectEqualStrings("a1\nb2\na3\na4\nb5\n", m2.buffer.buf.items);
+    try testing.expectEqualStrings("a1\nb2\na3\na4\nb5\n", m2.filtered_buffer.buf.items);
+    try testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4, 5 }, m2.line_seqs.items);
+    _ = drainAndFree(store);
 }

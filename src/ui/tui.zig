@@ -69,7 +69,7 @@ const Bindings = struct {
         .{ .action = Action.FocusCmdWindow, .key = Key{ .cp = '/', .mod = .{} } },
         .{ .action = Action.Escape, .key = Key{ .cp = vaxis.Key.escape, .mod = .{} } },
         .{ .action = Action.ShowHelp, .key = Key{ .cp = vaxis.Key.f2, .mod = .{} } },
-        .{ .action = Action.FastQuit, .key = Key{ .cp = 'c', .mod = .{ .ctrl = false } } },
+        .{ .action = Action.FastQuit, .key = Key{ .cp = 'c', .mod = .{ .ctrl = true } } },
         .{ .action = Action.OutputViewPrev, .key = Key{ .cp = 'w', .mod = .{ .shift = true } } },
         .{ .action = Action.OutputViewPrev, .key = Key{ .cp = vaxis.Key.tab, .mod = .{ .shift = true } } },
         .{ .action = Action.OutputViewNext, .key = Key{ .cp = 'e', .mod = .{ .shift = true } } },
@@ -628,8 +628,10 @@ const TuiApp = struct {
                                 &self.app_model,
                                 args,
                             ) catch |err| switch (err) {
-                                error.MergeCmdNotEnoughArgs => {},
-                                else => return err,
+                                error.OutOfMemory => return err,
+                                // vxfw ends the app on any error a handler returns, so a
+                                // mistyped view number (`merge m ~99`) must stop here
+                                else => std.log.warn("merge: {t}", .{err}),
                             };
                         } else if (std.mem.eql(u8, cmd_name, StopViewData.event_str)) {
                             const args = cmd.get_args(self._alloc) catch return error.UnexpectedParseError;
@@ -1163,6 +1165,8 @@ pub fn setUIConfig(alloc: std.mem.Allocator, jsonStr: []const u8) std.mem.Alloca
 //  split (ie if in rule b1 else b2)
 // OR tee (ie if in rule b1 and b2 ELSE b1)
 // counter for a regex match
+// expand feature to show hidden lines ( args include number of lines to show or only up/down)
+// tee with forzen ruleset from prevous view
 
 // how do to splitting -- not sure
 // need childProcessBuffers which use the same base buffer

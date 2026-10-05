@@ -4,6 +4,9 @@
 //! line was completed, so merging by that number reproduces arrival order exactly. Because
 //! the pump is the only writer, everything up to each parent's current line count is in the
 //! result and any later propagation carries strictly newer numbers: no watermarks needed.
+//!
+//! Parents can share lines (a merge of a merge and one of its parents, or two merges with a
+//! common parent). A shared line has the same number in every parent, so it is kept once.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ProcessBuffer = @import("../processbuffer.zig").ProcessBuffer;
@@ -19,6 +22,7 @@ pub fn mergeBySeq(
     defer alloc.free(cursors);
     @memset(cursors, 0);
 
+    var last: ?u64 = null;
     while (true) {
         var best: ?usize = null;
         var best_seq: u64 = std.math.maxInt(u64);
@@ -31,10 +35,13 @@ pub fn mergeBySeq(
             }
         }
         const i = best orelse break;
-        const parent = parents[i];
-        try out_buf.append(parent.buffer.getLineWithSep(cursors[i]).?);
-        try out_seqs.append(alloc, best_seq);
+        const line = cursors[i];
         cursors[i] += 1;
+        // the same line reached through another parent
+        if (last == best_seq) continue;
+        try out_buf.append(parents[i].buffer.getLineWithSep(line).?);
+        try out_seqs.append(alloc, best_seq);
+        last = best_seq;
     }
 }
 
